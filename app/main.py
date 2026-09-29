@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers.health import router as health_router
+from app.routers.auth import router as auth_router
 
 app = FastAPI(
     title="Quan ly dao tao",
@@ -20,3 +21,4 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(auth_router)
