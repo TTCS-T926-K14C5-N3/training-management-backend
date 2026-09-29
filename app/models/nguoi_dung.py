@@ -1,70 +1,70 @@
-from datetime import datetime
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    DateTime
+)
 
-from sqlalchemy import DateTime, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.models.base import Base
+from app.database import Base
 
 
 class NguoiDung(Base):
     __tablename__ = "NguoiDung"
 
-    NguoiDungId: Mapped[int] = mapped_column(
+    NguoiDungId = Column(
         Integer,
         primary_key=True,
         autoincrement=True
     )
 
-    HoTen: Mapped[str] = mapped_column(
+    HoTen = Column(
         String(100),
         nullable=False
     )
 
-    Email: Mapped[str] = mapped_column(
-        String(150),
-        unique=True,
-        nullable=False
+    Email = Column(
+        String(255),
+        nullable=False,
+        unique=True
     )
 
-    SoDienThoai: Mapped[str | None] = mapped_column(
+    SoDienThoai = Column(
         String(20),
         nullable=True
     )
 
-    MatKhauHash: Mapped[str] = mapped_column(
+    MatKhauHash = Column(
         String(255),
         nullable=False
     )
 
-    TrangThai: Mapped[str] = mapped_column(
-        String(20),
-        nullable=False,
-        default="HoatDong"
+    TrangThai = Column(
+        String(50),
+        nullable=False
     )
 
-    SoLanDangNhapSai: Mapped[int] = mapped_column(
+    SoLanDangNhapSai = Column(
         Integer,
         nullable=False,
         default=0
     )
 
-    KhoaDen: Mapped[datetime | None] = mapped_column(
+    KhoaDen = Column(
         DateTime,
         nullable=True
     )
 
-    LyDoKhoa: Mapped[str | None] = mapped_column(
-        String(500),
+    LyDoKhoa = Column(
+        String(255),
         nullable=True
     )
 
-    NgayTao: Mapped[datetime] = mapped_column(
+    NgayTao = Column(
         DateTime,
-        nullable=False,
-        default=datetime.now
+        nullable=True
     )
 
-    NgayCapNhat: Mapped[datetime | None] = mapped_column(
+    NgayCapNhat = Column(
         DateTime,
         nullable=True
     )
