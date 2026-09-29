@@ -1,8 +1,16 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from urllib.parse import quote_plus
 
-from app.core.config import DB_SERVER, DB_NAME, DB_DRIVER
+from sqlalchemy import create_engine
+from sqlalchemy.orm import (
+    declarative_base,
+    sessionmaker
+)
+
+from app.core.config import (
+    DB_SERVER,
+    DB_NAME,
+    DB_DRIVER
+)
 
 
 connection_string = (
@@ -13,15 +21,18 @@ connection_string = (
     f"TrustServerCertificate=yes;"
 )
 
+
 DATABASE_URL = (
     "mssql+pyodbc:///?odbc_connect="
     + quote_plus(connection_string)
 )
 
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True
 )
+
 
 SessionLocal = sessionmaker(
     autocommit=False,
@@ -30,10 +41,14 @@ SessionLocal = sessionmaker(
 )
 
 
+Base = declarative_base()
+
+
 def get_db():
     db = SessionLocal()
 
     try:
         yield db
+
     finally:
         db.close()
