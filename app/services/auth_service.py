@@ -8,7 +8,6 @@ from app.models.nguoi_dung import NguoiDung
 from app.schemas.login import LoginRequest
 from pwdlib import PasswordHash
 
-
 password_hash = PasswordHash.recommended()
 
 
@@ -92,9 +91,20 @@ def login_user(db: Session, request: LoginRequest):
     ).mappings().all()
 
     db.commit()
+    
+    # 1. Tạo payload (dữ liệu gói gọn bên trong Token)
+    token_payload = {
+        "sub": user.Email,          # Chuẩn JWT thường dùng 'sub' (subject) để lưu định danh chính
+        "user_id": user.NguoiDungId
+    }
+
+    # 2. Gọi hàm tạo JWT Token
+    access_token = create_access_token(data=token_payload)
 
     return {
         "message": "Đăng nhập thành công",
+        "access_token": access_token,      # <--- Bắt buộc phải có để trả về cho Frontend
+        "token_type": "bearer",
         "nguoiDungId": user.NguoiDungId,
         "hoTen": user.HoTen,
         "email": user.Email,
