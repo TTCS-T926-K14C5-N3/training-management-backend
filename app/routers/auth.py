@@ -22,10 +22,15 @@ from app.schemas.register import (
     RegisterRequest
 )
 
+from app.schemas.change_password import (
+    ChangePasswordRequest
+)
+
 from app.services.auth_service import (
     login_user,
     logout_user,
-    register_user
+    register_user,
+    update_password
 )
 
 
@@ -34,6 +39,7 @@ router = APIRouter(
 )
 
 security = HTTPBearer()
+
 
 # ============================================================
 # ĐĂNG KÝ
@@ -66,6 +72,11 @@ def login(
         db,
         request
     )
+
+
+# ============================================================
+# ĐĂNG XUẤT
+# ============================================================
 
 @router.post(
     "/logout",
@@ -104,3 +115,33 @@ def get_current_user(
         "hoTen": user.HoTen,
         "email": user.Email
     }
+
+
+# ============================================================
+# ĐỔI MẬT KHẨU
+# ============================================================
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_200_OK
+)
+def change_password(
+    request: ChangePasswordRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    token = credentials.credentials
+
+    # Kiểm tra token và lấy người dùng hiện tại
+    user = verify_access_token(
+        token,
+        db
+    )
+
+    # Đổi mật khẩu
+    return update_password(
+        db,
+        user,
+        request.current_password,
+        request.new_password
+    )
