@@ -4,6 +4,11 @@ from fastapi import (
     status
 )
 
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer
+)
+
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -18,6 +23,7 @@ from app.schemas.register import (
 
 from app.services.auth_service import (
     login_user,
+    logout_user,
     register_user
 )
 
@@ -26,6 +32,7 @@ router = APIRouter(
     tags=["Authentication"]
 )
 
+security = HTTPBearer()
 
 # ============================================================
 # ĐĂNG KÝ
@@ -63,7 +70,13 @@ def login(
     "/logout",
     status_code=status.HTTP_200_OK
 )
-def logout():
-    return {
-        "message": "Đăng xuất thành công"
-    }
+def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    token = credentials.credentials
+
+    return logout_user(
+        db,
+        token
+    )

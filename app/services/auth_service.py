@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -9,7 +8,15 @@ from app.models.nguoi_dung import NguoiDung
 from app.schemas.login import LoginRequest
 from app.schemas.register import RegisterRequest
 
+from datetime import datetime, timedelta, timezone
 
+import jwt
+
+from app.core.security import (
+    create_access_token,
+    decode_access_token
+)
+from app.models.revoked_token import RevokedToken
 
 
 # ============================================================
@@ -157,8 +164,8 @@ def login_user(
         user.LyDoKhoa = None
         user.NgayCapNhat = now
 
-        db.commit()
-        db.refresh(user)
+    db.commit()
+    db.refresh(user)
 
     # --------------------------------------------------------
     # Kiểm tra mật khẩu
@@ -239,38 +246,109 @@ def login_user(
     ).mappings().all()
 
     db.commit()
-db.refresh(user)
+    db.refresh(user)
 
-# --------------------------------------------------------
-# Tạo JWT Access Token
-# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Tạo JWT Access Token
+    # --------------------------------------------------------
 
-token_payload = {
-    "sub": user.Email,
-    "user_id": user.NguoiDungId
-}
+    token_payload = {
+        "sub": user.Email,
+        "user_id": user.NguoiDungId
+    }
 
-access_token = create_access_token(data=token_payload)
+    access_token = create_access_token(
+        data=token_payload
+    )
 
-# --------------------------------------------------------
-# Response
-# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Response
+    # --------------------------------------------------------
 
-return {
-    "message": "Đăng nhập thành công",
+    return {
+        "message": "Đăng nhập thành công",
 
-    "access_token": access_token,
-    "token_type": "bearer",
+        "access_token": access_token,
+        "token_type": "bearer",
 
-    "nguoiDungId": user.NguoiDungId,
-    "hoTen": user.HoTen,
-    "email": user.Email,
+        "nguoiDungId": user.NguoiDungId,
+        "hoTen": user.HoTen,
+        "email": user.Email,
 
-    "vaiTro": [
-        {
-            "vaiTroId": role["VaiTroId"],
-            "tenVaiTro": role["TenVaiTro"]
+        "vaiTro": [
+            {
+                "vaiTroId": role["VaiTroId"],
+                "tenVaiTro": role["TenVaiTro"]
+            }
+            for role in roles
+        ]
+    }
+# ============================================================
+# ĐĂNG XUẤT
+# ============================================================
+
+def logout_user(
+    db: Session,
+    token: str
+):
+    try:
+        payload = decode_access_token(token)
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Phiên đăng nhập đã hết hạn"
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token không hợp lệ"
+        )
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+
+    if not jti or not exp:
+        raise HTTPException(
+            status_code=401,
+            detail="Token không hợp lệ"
+        )
+
+    # Kiểm tra token đã bị revoke trước đó chưa
+    existing_token = (
+        db.query(RevokedToken)
+        .filter(RevokedToken.Jti == jti)
+        .first()
+    )
+
+    if existing_token:
+        return {
+            "message": "Đăng xuất thành công"
         }
-        for role in roles
-    ]
-}
+
+    expires_at = datetime.fromtimestamp(
+        exp,
+        tz=timezone.utc
+    ).replace(tzinfo=None)
+
+    revoked_token = RevokedToken(
+        Jti=jti,
+        ExpiresAt=expires_at
+    )
+
+    try:
+        db.add(revoked_token)
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Không thể đăng xuất"
+        )
+
+    return {
+        "message": "Đăng xuất thành công"
+    }
