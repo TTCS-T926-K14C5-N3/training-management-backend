@@ -1,28 +1,34 @@
-
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from pwdlib import PasswordHash
 
 from app.models.nguoi_dung import NguoiDung
+from app.models.revoked_token import RevokedToken
+from app.models.token_mat_khau import TokenMatKhau
+
 from app.schemas.login import LoginRequest
 from app.schemas.register import RegisterRequest
+from app.schemas.forgot_password import ForgotPasswordRequest
+from app.schemas.reset_password import ResetPasswordRequest
 
-from datetime import datetime, timedelta, timezone
-
-import jwt
+from app.services.email_service import send_reset_password_email
 
 from app.core.security import (
     create_access_token,
     decode_access_token
 )
-from app.models.revoked_token import RevokedToken
+
+from datetime import datetime, timedelta, timezone
+
+import hashlib
+import secrets
+import jwt
 
 
 # ============================================================
 # PASSWORD HASH
 # ============================================================
-
 
 password_hash = PasswordHash.recommended()
 
@@ -101,7 +107,6 @@ def register_user(
             detail="Không thể tạo tài khoản"
         )
 
-    # Không trả MatKhauHash ra ngoài
     return {
         "message": "Đăng ký thành công",
         "user": {
@@ -240,8 +245,7 @@ def login_user(
     roles = db.execute(
         role_query,
         {
-            "nguoi_dung_id":
-                user.NguoiDungId
+            "nguoi_dung_id": user.NguoiDungId
         }
     ).mappings().all()
 
@@ -283,6 +287,8 @@ def login_user(
             for role in roles
         ]
     }
+
+
 # ============================================================
 # ĐĂNG XUẤT
 # ============================================================
@@ -353,6 +359,7 @@ def logout_user(
         "message": "Đăng xuất thành công"
     }
 
+
 # ============================================================
 # CẬP NHẬT MẬT KHẨU
 # ============================================================
@@ -390,4 +397,277 @@ def update_password(
 
     return {
         "message": "Cập nhật mật khẩu thành công"
+    }
+
+
+# ============================================================
+# QUÊN MẬT KHẨU
+# ============================================================
+
+def forgot_password(
+    db: Session,
+    request: ForgotPasswordRequest
+):
+    """
+    Tạo token đặt lại mật khẩu và gửi email.
+
+    Token thật không được lưu trực tiếp trong database.
+    Database chỉ lưu SHA-256 hash của token.
+    """
+
+    email = str(request.email).strip().lower()
+
+    # --------------------------------------------------------
+    # Message dùng chung
+    # --------------------------------------------------------
+
+    generic_message = (
+        "Nếu email tồn tại trong hệ thống, "
+        "hướng dẫn đặt lại mật khẩu đã được gửi đến email."
+    )
+
+    # --------------------------------------------------------
+    # Tìm người dùng
+    # --------------------------------------------------------
+
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == email)
+        .first()
+    )
+
+    # Không tiết lộ email có tồn tại hay không
+    if not user:
+        return {
+            "message": generic_message
+        }
+
+    # --------------------------------------------------------
+    # Tạo token ngẫu nhiên
+    # --------------------------------------------------------
+
+    raw_token = secrets.token_urlsafe(32)
+
+    # Hash token trước khi lưu DB
+    token_hash = hashlib.sha256(
+        raw_token.encode("utf-8")
+    ).hexdigest()
+
+    now = datetime.now()
+
+    expires_at = (
+        now + timedelta(minutes=30)
+    )
+
+    # --------------------------------------------------------
+    # Hủy các token reset cũ chưa sử dụng
+    # --------------------------------------------------------
+
+    old_tokens = (
+        db.query(TokenMatKhau)
+        .filter(
+            TokenMatKhau.NguoiDungId == user.NguoiDungId,
+            TokenMatKhau.DaSuDung == False
+        )
+        .all()
+    )
+
+    for old_token in old_tokens:
+        old_token.DaSuDung = True
+
+    # --------------------------------------------------------
+    # Tạo token mới
+    # --------------------------------------------------------
+
+    reset_token = TokenMatKhau(
+        NguoiDungId=user.NguoiDungId,
+        Token=token_hash,
+        ThoiGianTao=now,
+        ThoiGianHetHan=expires_at,
+        DaSuDung=False
+    )
+
+    try:
+        db.add(reset_token)
+        db.commit()
+
+    except Exception as exc:
+        db.rollback()
+
+        print(
+            f"[FORGOT PASSWORD] Lỗi lưu TokenMatKhau: {exc}"
+        )
+
+        return {
+            "message": generic_message
+        }
+    # --------------------------------------------------------
+    # Tạo link reset
+    # --------------------------------------------------------
+
+    reset_link = (
+        "http://localhost:5173/reset-password"
+        f"?token={raw_token}"
+    )
+
+    # --------------------------------------------------------
+    # Gửi email
+    # --------------------------------------------------------
+
+    try:
+        send_reset_password_email(
+            recipient_email=user.Email,
+            reset_link=reset_link
+        )
+
+    except Exception:
+        # Không trả lỗi chi tiết SMTP ra ngoài.
+        #
+        # Trong môi trường thực tế nên ghi log để
+        # quản trị viên kiểm tra.
+        return {
+            "message": generic_message
+        }
+
+    # --------------------------------------------------------
+    # Response
+    # --------------------------------------------------------
+
+    return {
+        "message": generic_message
+    }
+
+
+# ============================================================
+# ĐẶT LẠI MẬT KHẨU
+# ============================================================
+
+def reset_password(
+    db: Session,
+    request: ResetPasswordRequest
+):
+    """
+    Đặt lại mật khẩu bằng reset token.
+
+    Điều kiện:
+    - Token tồn tại
+    - Token chưa được sử dụng
+    - Token chưa hết hạn
+    - Mật khẩu đã được validate bởi Pydantic
+    """
+
+    # --------------------------------------------------------
+    # Hash token nhận từ client
+    # --------------------------------------------------------
+
+    token_hash = hashlib.sha256(
+        request.token.encode("utf-8")
+    ).hexdigest()
+
+    # --------------------------------------------------------
+    # Tìm token
+    # --------------------------------------------------------
+
+    reset_token = (
+        db.query(TokenMatKhau)
+        .filter(
+            TokenMatKhau.Token == token_hash,
+            TokenMatKhau.DaSuDung == False
+        )
+        .first()
+    )
+
+    # Token không tồn tại hoặc đã sử dụng
+    if not reset_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Liên kết đặt lại mật khẩu không hợp lệ"
+        )
+
+    now = datetime.now()
+
+    # --------------------------------------------------------
+    # Kiểm tra hết hạn
+    # --------------------------------------------------------
+
+    if reset_token.ThoiGianHetHan <= now:
+
+        # Đánh dấu token hết hạn là đã sử dụng
+        reset_token.DaSuDung = True
+
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Liên kết đặt lại mật khẩu đã hết hạn"
+        )
+
+    # --------------------------------------------------------
+    # Tìm người dùng
+    # --------------------------------------------------------
+
+    user = (
+        db.query(NguoiDung)
+        .filter(
+            NguoiDung.NguoiDungId
+            == reset_token.NguoiDungId
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="Liên kết đặt lại mật khẩu không hợp lệ"
+        )
+
+    # --------------------------------------------------------
+    # Hash mật khẩu mới
+    # --------------------------------------------------------
+
+    new_password_hash = password_hash.hash(
+        request.new_password
+    )
+
+    # --------------------------------------------------------
+    # Cập nhật mật khẩu
+    # --------------------------------------------------------
+
+    user.MatKhauHash = new_password_hash
+    user.NgayCapNhat = now
+
+    # Thu hồi các JWT được cấp trước khi reset
+    user.TokenValidAfter = now
+
+    # --------------------------------------------------------
+    # Token reset chỉ được dùng một lần
+    # --------------------------------------------------------
+
+    reset_token.DaSuDung = True
+
+    # --------------------------------------------------------
+    # Lưu tất cả thay đổi
+    # --------------------------------------------------------
+
+    try:
+        db.commit()
+        db.refresh(user)
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Không thể đặt lại mật khẩu"
+        )
+
+    # --------------------------------------------------------
+    # Response
+    # --------------------------------------------------------
+
+    return {
+        "message": "Đặt lại mật khẩu thành công"
     }

@@ -22,10 +22,20 @@ from app.schemas.register import (
     RegisterRequest
 )
 
+from app.schemas.forgot_password import (
+    ForgotPasswordRequest
+)
+
+from app.schemas.reset_password import (
+    ResetPasswordRequest
+)
+
 from app.services.auth_service import (
     login_user,
     logout_user,
-    register_user
+    register_user,
+    forgot_password,
+    reset_password
 )
 
 
@@ -34,6 +44,7 @@ router = APIRouter(
 )
 
 security = HTTPBearer()
+
 
 # ============================================================
 # ĐĂNG KÝ
@@ -66,6 +77,11 @@ def login(
         db,
         request
     )
+
+
+# ============================================================
+# ĐĂNG XUẤT
+# ============================================================
 
 @router.post(
     "/logout",
@@ -104,3 +120,39 @@ def get_current_user(
         "hoTen": user.HoTen,
         "email": user.Email
     }
+
+
+# ============================================================
+# QUÊN MẬT KHẨU
+# ============================================================
+
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_200_OK
+)
+def forgot_password_endpoint(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    return forgot_password(
+        db,
+        request
+    )
+
+
+# ============================================================
+# ĐẶT LẠI MẬT KHẨU
+# ============================================================
+
+@router.post(
+    "/reset-password",
+    status_code=status.HTTP_200_OK
+)
+def reset_password_endpoint(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    return reset_password(
+        db,
+        request
+    )
