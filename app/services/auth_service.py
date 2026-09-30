@@ -352,3 +352,37 @@ def logout_user(
     return {
         "message": "Đăng xuất thành công"
     }
+
+# ============================================================
+# CẬP NHẬT MẬT KHẨU
+# ============================================================
+
+def update_password(
+    db: Session,
+    user: NguoiDung,
+    new_password: str
+):
+    # Hash mật khẩu mới
+    new_password_hash = password_hash.hash(
+        new_password
+    )
+
+    # Chỉ lưu mật khẩu đã hash vào database
+    user.MatKhauHash = new_password_hash
+    user.NgayCapNhat = datetime.now()
+
+    try:
+        db.commit()
+        db.refresh(user)
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Không thể cập nhật mật khẩu"
+        )
+
+    return {
+        "message": "Cập nhật mật khẩu thành công"
+    }
