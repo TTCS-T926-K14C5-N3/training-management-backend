@@ -10,9 +10,12 @@ from app.schemas.login import LoginRequest
 from app.schemas.register import RegisterRequest
 
 
+
+
 # ============================================================
 # PASSWORD HASH
 # ============================================================
+
 
 password_hash = PasswordHash.recommended()
 
@@ -236,33 +239,38 @@ def login_user(
     ).mappings().all()
 
     db.commit()
-    db.refresh(user)
+db.refresh(user)
 
-    # --------------------------------------------------------
-    # Response
-    # --------------------------------------------------------
+# --------------------------------------------------------
+# Tạo JWT Access Token
+# --------------------------------------------------------
 
-    return {
-        "message": "Đăng nhập thành công",
+token_payload = {
+    "sub": user.Email,
+    "user_id": user.NguoiDungId
+}
 
-        "nguoiDungId":
-            user.NguoiDungId,
+access_token = create_access_token(data=token_payload)
 
-        "hoTen":
-            user.HoTen,
+# --------------------------------------------------------
+# Response
+# --------------------------------------------------------
 
-        "email":
-            user.Email,
+return {
+    "message": "Đăng nhập thành công",
 
-        "vaiTro": [
-            {
-                "vaiTroId":
-                    role["VaiTroId"],
+    "access_token": access_token,
+    "token_type": "bearer",
 
-                "tenVaiTro":
-                    role["TenVaiTro"]
-            }
+    "nguoiDungId": user.NguoiDungId,
+    "hoTen": user.HoTen,
+    "email": user.Email,
 
-            for role in roles
-        ]
-    }
+    "vaiTro": [
+        {
+            "vaiTroId": role["VaiTroId"],
+            "tenVaiTro": role["TenVaiTro"]
+        }
+        for role in roles
+    ]
+}
