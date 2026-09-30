@@ -378,8 +378,8 @@ def update_password(
             detail="Mật khẩu hiện tại không đúng"
         )
 
-    now = datetime.now()
-
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+   
     # Hash mật khẩu mới
     new_password_hash = password_hash.hash(
         new_password
