@@ -12,15 +12,15 @@ from fastapi.security import (
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.core.security import verify_access_token
+from app.core.security import (
+    verify_access_token,
+    require_permission
+)
 
 from app.schemas.login import (
     LoginRequest
 )
 
-from app.schemas.register import (
-    RegisterRequest
-)
 
 from app.schemas.forgot_password import (
     ForgotPasswordRequest
@@ -37,7 +37,6 @@ from app.schemas.change_password import (
 from app.services.auth_service import (
     login_user,
     logout_user,
-    register_user,
     forgot_password,
     reset_password,
     update_password
@@ -51,22 +50,6 @@ router = APIRouter(
 security = HTTPBearer()
 
 
-# ============================================================
-# ĐĂNG KÝ
-# ============================================================
-
-@router.post(
-    "/register",
-    status_code=status.HTTP_201_CREATED
-)
-def register(
-    request: RegisterRequest,
-    db: Session = Depends(get_db)
-):
-    return register_user(
-        db,
-        request
-    )
 
 
 # ============================================================
@@ -191,3 +174,17 @@ def change_password(
         request.current_password,
         request.new_password
     )
+# ============================================================
+# TEST DEPENDENCY - KIỂM TRA PHÂN QUYỀN
+# ============================================================
+
+@router.get(
+    "/test-permission",
+    dependencies=[
+        Depends(require_permission("USER_CREATE"))
+    ]
+)
+def test_permission():
+    return {
+        "message": "Bạn có quyền USER_CREATE"
+    }

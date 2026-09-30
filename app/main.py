@@ -50,3 +50,11 @@ app.include_router(
 app.include_router(
     auth_router
 )
+
+from app.routers.nguoi_dung import (
+    router as nguoi_dung_router
+)
+
+app.include_router(
+    nguoi_dung_router
+)

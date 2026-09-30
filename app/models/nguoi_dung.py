@@ -70,6 +70,6 @@ class NguoiDung(Base):
     )
 
     TokenValidAfter = Column(
-    DateTime,
-    nullable=True
-)
+        DateTime,
+        nullable=True
+    )
