@@ -68,3 +68,8 @@ class NguoiDung(Base):
         DateTime,
         nullable=True
     )
+
+    TokenValidAfter = Column(
+    DateTime,
+    nullable=True
+)
