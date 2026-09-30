@@ -59,7 +59,10 @@ def login(
         request
     )
 
-@router.post("/logout")
+@router.post(
+    "/logout",
+    status_code=status.HTTP_200_OK
+)
 def logout():
     return {
         "message": "Đăng xuất thành công"
