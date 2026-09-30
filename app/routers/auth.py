@@ -58,3 +58,9 @@ def login(
         db,
         request
     )
+
+@router.post("/logout")
+def logout():
+    return {
+        "message": "Đăng xuất thành công"
+    }
