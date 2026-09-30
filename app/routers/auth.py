@@ -12,6 +12,7 @@ from fastapi.security import (
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.core.security import verify_access_token
 
 from app.schemas.login import (
     LoginRequest
@@ -80,3 +81,26 @@ def logout(
         db,
         token
     )
+
+
+# ============================================================
+# KIỂM TRA PHIÊN ĐĂNG NHẬP
+# ============================================================
+
+@router.get("/me")
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    token = credentials.credentials
+
+    user = verify_access_token(
+        token,
+        db
+    )
+
+    return {
+        "nguoiDungId": user.NguoiDungId,
+        "hoTen": user.HoTen,
+        "email": user.Email
+    }

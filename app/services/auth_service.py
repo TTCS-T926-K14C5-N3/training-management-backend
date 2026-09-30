@@ -362,14 +362,19 @@ def update_password(
     user: NguoiDung,
     new_password: str
 ):
+    now = datetime.now()
+
     # Hash mật khẩu mới
     new_password_hash = password_hash.hash(
         new_password
     )
 
-    # Chỉ lưu mật khẩu đã hash vào database
+    # Cập nhật mật khẩu
     user.MatKhauHash = new_password_hash
-    user.NgayCapNhat = datetime.now()
+    user.NgayCapNhat = now
+
+    # Thu hồi các token được cấp trước thời điểm đổi mật khẩu
+    user.TokenValidAfter = now
 
     try:
         db.commit()
