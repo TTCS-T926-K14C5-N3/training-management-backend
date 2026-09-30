@@ -8,19 +8,14 @@ from pwdlib import PasswordHash
 from app.models.nguoi_dung import NguoiDung
 from app.schemas.login import LoginRequest
 from app.schemas.register import RegisterRequest
+from app.database import get_db
+from fastapi import HTTPException, Depends, status
 
-
-# ============================================================
 # PASSWORD HASH
-# ============================================================
-
 password_hash = PasswordHash.recommended()
 
 
-# ============================================================
 # ĐĂNG KÝ
-# ============================================================
-
 def register_user(
     db: Session,
     request: RegisterRequest
@@ -35,10 +30,8 @@ def register_user(
         else None
     )
 
-    # --------------------------------------------------------
+   
     # Kiểm tra email đã tồn tại
-    # --------------------------------------------------------
-
     existing_user = (
         db.query(NguoiDung)
         .filter(NguoiDung.Email == email)
@@ -51,9 +44,7 @@ def register_user(
             detail="Email đã được sử dụng"
         )
 
-    # --------------------------------------------------------
     # Hash mật khẩu
-    # --------------------------------------------------------
 
     hashed_password = password_hash.hash(
         request.password
@@ -61,9 +52,7 @@ def register_user(
 
     now = datetime.now()
 
-    # --------------------------------------------------------
     # Tạo người dùng
-    # --------------------------------------------------------
 
     new_user = NguoiDung(
         HoTen=ho_ten,
@@ -104,9 +93,7 @@ def register_user(
     }
 
 
-# ============================================================
 # ĐĂNG NHẬP
-# ============================================================
 
 def login_user(
     db: Session,
@@ -114,10 +101,8 @@ def login_user(
 ):
     email = str(request.email).strip().lower()
 
-    # --------------------------------------------------------
     # Tìm người dùng theo email
-    # --------------------------------------------------------
-
+ 
     user = (
         db.query(NguoiDung)
         .filter(NguoiDung.Email == email)
@@ -133,9 +118,8 @@ def login_user(
 
     now = datetime.now()
 
-    # --------------------------------------------------------
+
     # Kiểm tra tài khoản đang bị khóa
-    # --------------------------------------------------------
 
     if user.KhoaDen and user.KhoaDen > now:
         raise HTTPException(
@@ -143,9 +127,7 @@ def login_user(
             detail="Tài khoản đang bị khóa, vui lòng thử lại sau"
         )
 
-    # --------------------------------------------------------
     # Nếu hết thời gian khóa -> mở khóa
-    # --------------------------------------------------------
 
     if user.KhoaDen and user.KhoaDen <= now:
         user.KhoaDen = None
@@ -157,9 +139,7 @@ def login_user(
         db.commit()
         db.refresh(user)
 
-    # --------------------------------------------------------
     # Kiểm tra mật khẩu
-    # --------------------------------------------------------
 
     try:
         password_correct = password_hash.verify(
@@ -170,10 +150,7 @@ def login_user(
     except Exception:
         password_correct = False
 
-    # --------------------------------------------------------
     # Mật khẩu sai
-    # --------------------------------------------------------
-
     if not password_correct:
 
         if user.SoLanDangNhapSai is None:
@@ -201,9 +178,7 @@ def login_user(
             detail="Email hoặc mật khẩu không đúng"
         )
 
-    # --------------------------------------------------------
     # Đăng nhập thành công
-    # --------------------------------------------------------
 
     user.SoLanDangNhapSai = 0
     user.KhoaDen = None
@@ -211,9 +186,7 @@ def login_user(
     user.LyDoKhoa = None
     user.NgayCapNhat = now
 
-    # --------------------------------------------------------
     # Lấy vai trò của người dùng
-    # --------------------------------------------------------
 
     role_query = text("""
         SELECT
@@ -238,9 +211,7 @@ def login_user(
     db.commit()
     db.refresh(user)
 
-    # --------------------------------------------------------
     # Response
-    # --------------------------------------------------------
 
     return {
         "message": "Đăng nhập thành công",
@@ -266,3 +237,51 @@ def login_user(
             for role in roles
         ]
     }
+# HÀM GIẢ LẬP LẤY USER (Dùng tạm để test Phân quyền khi chưa có tính năng JWT)
+def get_current_user(db: Session = Depends(get_db)):
+    # Tạm thời gán cứng User ID = 1 đang đăng nhập (bạn có thể đổi thành ID thực tế trong SQL của bạn)
+    user_id_dang_test = 1
+    
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == user_id_dang_test).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Tài khoản test không tồn tại trong Database"
+        )
+    return user
+
+# CHỐT CHẶN PHÂN QUYỀN (SCRUM-64)
+def get_current_admin(
+    current_user: NguoiDung = Depends(get_current_user), # Hàm giải mã token lấy ra User hiện tại
+    db: Session = Depends(get_db) # Hàm kết nối Database
+):
+    """
+    Kiểm tra: Chỉ cho phép tài khoản có quyền 'admin' đi qua
+    """
+    # Sử dụng lại logic truy vấn bảng quyền giống hệt như lúc Đăng nhập
+    role_query = text("""
+        SELECT vt.TenVaiTro 
+        FROM VaiTro vt
+        INNER JOIN NguoiDung_VaiTro ndvt ON vt.VaiTroId = ndvt.VaiTroId
+        WHERE ndvt.NguoiDungId = :nguoi_dung_id
+    """)
+
+    roles = db.execute(
+        role_query, 
+        {"nguoi_dung_id": current_user.NguoiDungId}
+    ).mappings().all()
+
+    # Chuyển kết quả thành danh sách các tên quyền (chuyển về chữ thường để dễ so sánh)
+    danh_sach_quyen = [role["TenVaiTro"].lower() for role in roles]
+
+    # Kiểm tra xem có quyền quản trị không
+    # (Nếu trong SQL server bạn lưu là "Quản trị viên" thì thay chữ "admin" bên dưới thành "quản trị viên")
+    if "admin" not in danh_sach_quyen:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quyền truy cập bị từ chối! Tính năng này chỉ dành cho Quản trị viên."
+        )
+
+    return current_user
+
