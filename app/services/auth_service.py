@@ -360,17 +360,36 @@ def logout_user(
     }
 
 
+
+
 # ============================================================
+
 # CẬP NHẬT MẬT KHẨU
 # ============================================================
 
 def update_password(
     db: Session,
     user: NguoiDung,
+    current_password: str,
     new_password: str
 ):
-    now = datetime.now()
+    # Kiểm tra mật khẩu hiện tại
+    try:
+        password_correct = password_hash.verify(
+            current_password,
+            user.MatKhauHash
+        )
+    except Exception:
+        password_correct = False
 
+    if not password_correct:
+        raise HTTPException(
+            status_code=400,
+            detail="Mật khẩu hiện tại không đúng"
+        )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+   
     # Hash mật khẩu mới
     new_password_hash = password_hash.hash(
         new_password
