@@ -1,4 +1,3 @@
-
 IF DB_ID('QuanLyDaoTao') IS NULL
 BEGIN
     CREATE DATABASE QuanLyDaoTao;

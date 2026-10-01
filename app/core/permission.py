@@ -42,7 +42,7 @@ def require_permission(permission_code: str):
         query = text("""
             SELECT 1
             FROM NguoiDung_VaiTro ndvt
-            INNER JOIN VaiTroQuyen vtq
+            INNER JOIN VaiTro_Quyen vtq
                 ON ndvt.VaiTroId = vtq.VaiTroId
             INNER JOIN Quyen q
                 ON vtq.QuyenId = q.QuyenId

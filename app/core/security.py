@@ -433,12 +433,10 @@ def require_permission(
             )
 
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Bạn không có quyền thực hiện "
-                    f"chức năng này: {ma_quyen}"
-                ),
-            )
+              status_code=status.HTTP_403_FORBIDDEN,
+              detail="Bạn không có quyền thực hiện chức năng này.",
+            
+         )
 
         # ----------------------------------------------------
         # Có quyền
