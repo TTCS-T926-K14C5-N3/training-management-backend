@@ -8,6 +8,7 @@ from fastapi import (
     HTTPException,
     status,
 )
+
 from fastapi.security import (
     HTTPAuthorizationCredentials,
     HTTPBearer,
@@ -122,6 +123,21 @@ def verify_access_token(
             detail="Token không hợp lệ",
         )
 
+    # ========================================================
+    # DEBUG - THÔNG TIN TOKEN
+    # ========================================================
+    #
+    # Tạm thời dùng để kiểm tra token Swagger đang gửi.
+    # Sau khi xác định xong lỗi có thể xóa các dòng DEBUG này.
+    #
+
+    print("=" * 60)
+    print("KIỂM TRA ACCESS TOKEN")
+    print(f"User ID       : {user_id}")
+    print(f"JTI           : {jti}")
+    print(f"Issued At     : {issued_at}")
+    print("=" * 60)
+
     # --------------------------------------------------------
     # Kiểm tra token đã bị revoke chưa
     # --------------------------------------------------------
@@ -134,7 +150,21 @@ def verify_access_token(
         .first()
     )
 
+    # ========================================================
+    # DEBUG - KIỂM TRA REVOKED TOKEN
+    # ========================================================
+
+    print(
+        "Token có trong RevokedToken:",
+        revoked_token is not None
+    )
+
     if revoked_token:
+
+        print(
+            ">>> TOKEN BỊ TỪ CHỐI: ĐÃ CÓ TRONG RevokedToken"
+        )
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Phiên đăng nhập đã bị thu hồi",
@@ -153,10 +183,23 @@ def verify_access_token(
     )
 
     if not user:
+
+        print(
+            ">>> TOKEN BỊ TỪ CHỐI: NGƯỜI DÙNG KHÔNG TỒN TẠI"
+        )
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Người dùng không tồn tại",
         )
+
+    # ========================================================
+    # DEBUG - TOKEN VALID AFTER
+    # ========================================================
+
+    print(
+        f"TokenValidAfter: {user.TokenValidAfter}"
+    )
 
     # --------------------------------------------------------
     # Kiểm tra TokenValidAfter
@@ -167,8 +210,11 @@ def verify_access_token(
 
     if user.TokenValidAfter:
 
+        # ----------------------------------------------------
         # JWT "iat" sau khi decode thường là Unix timestamp
         # nên chuyển về datetime UTC.
+        # ----------------------------------------------------
+
         token_issued_at = datetime.fromtimestamp(
             issued_at,
             tz=timezone.utc,
@@ -176,33 +222,45 @@ def verify_access_token(
 
         valid_after = user.TokenValidAfter
 
+        # ----------------------------------------------------
         # SQL Server DATETIME/DATETIME2 không lưu timezone.
         # Nếu không có timezone thì coi giá trị DB là UTC.
+        # ----------------------------------------------------
+
         if valid_after.tzinfo is None:
             valid_after = valid_after.replace(
                 tzinfo=timezone.utc
             )
 
         # ----------------------------------------------------
-        # QUAN TRỌNG:
+        # JWT iat có độ chính xác đến giây.
+        # SQL Server có thể lưu microsecond.
         #
-        # JWT iat chỉ có độ chính xác đến giây.
-        # TokenValidAfter có thể có microsecond.
-        #
-        # Ví dụ:
+        # Vì vậy bỏ microsecond để tránh:
         #
         # iat:
         # 2026-10-01 01:20:15
         #
-        # TokenValidAfter:
+        # valid_after:
         # 2026-10-01 01:20:15.734821
         #
-        # Nếu không bỏ microsecond thì token mới có thể
         # bị hiểu nhầm là token cũ.
         # ----------------------------------------------------
 
         valid_after = valid_after.replace(
             microsecond=0
+        )
+
+        # ====================================================
+        # DEBUG - SO SÁNH THỜI GIAN
+        # ====================================================
+
+        print(
+            f"Token issued at : {token_issued_at}"
+        )
+
+        print(
+            f"Valid after     : {valid_after}"
         )
 
         # ----------------------------------------------------
@@ -211,10 +269,25 @@ def verify_access_token(
         # ----------------------------------------------------
 
         if token_issued_at < valid_after:
+
+            print(
+                ">>> TOKEN BỊ TỪ CHỐI: TOKEN CŨ HƠN TokenValidAfter"
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Phiên đăng nhập đã bị thu hồi",
             )
+
+    # ========================================================
+    # TOKEN HỢP LỆ
+    # ========================================================
+
+    print(
+        ">>> TOKEN HỢP LỆ"
+    )
+
+    print("=" * 60)
 
     return user
 
@@ -333,11 +406,32 @@ def require_permission(
             },
         ).first()
 
+        # ====================================================
+        # DEBUG - KIỂM TRA QUYỀN
+        # ====================================================
+
+        print(
+            f"User {current_user.NguoiDungId} "
+            f"đang yêu cầu quyền: {ma_quyen}"
+        )
+
+        print(
+            "Có quyền:",
+            permission is not None
+        )
+
         # ----------------------------------------------------
         # Không có quyền
         # ----------------------------------------------------
 
         if not permission:
+
+            print(
+                f">>> 403 FORBIDDEN: "
+                f"User {current_user.NguoiDungId} "
+                f"không có quyền {ma_quyen}"
+            )
+
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -349,6 +443,11 @@ def require_permission(
         # ----------------------------------------------------
         # Có quyền
         # ----------------------------------------------------
+
+        print(
+            f">>> 200: User {current_user.NguoiDungId} "
+            f"có quyền {ma_quyen}"
+        )
 
         return current_user
 

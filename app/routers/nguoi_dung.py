@@ -19,6 +19,7 @@ from app.services.auth_service import (
     create_user,
     update_user,
     lock_user,
+    unlock_user,
 )
 
 
@@ -137,4 +138,25 @@ def lock_user_endpoint(
         db,
         nguoi_dung_id,
         request.ly_do_khoa
+    )
+
+# ============================================================
+# MỞ KHÓA TÀI KHOẢN NGƯỜI DÙNG
+# ============================================================
+
+@router.put(
+    "/{nguoi_dung_id}/unlock",
+    dependencies=[
+        Depends(
+            require_permission("USER_UNLOCK")
+        )
+    ],
+)
+def unlock_user_endpoint(
+    nguoi_dung_id: int,
+    db: Session = Depends(get_db),
+):
+    return unlock_user(
+        db,
+        nguoi_dung_id
     )
