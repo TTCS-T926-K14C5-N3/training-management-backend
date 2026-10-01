@@ -5,7 +5,7 @@ from pwdlib import PasswordHash
 
 from app.schemas.nguoi_dung import (
     NguoiDungCreate,
-    NguoiDungLock
+    NguoiDungLock,
 )
 
 from app.models.nguoi_dung import NguoiDung
@@ -29,7 +29,7 @@ from app.core.security import (
 from datetime import (
     datetime,
     timedelta,
-    timezone
+    timezone,
 )
 
 import hashlib
@@ -42,6 +42,23 @@ import jwt
 # ============================================================
 
 password_hash = PasswordHash.recommended()
+
+
+# ============================================================
+# HELPER - THỜI GIAN UTC CHO SQL SERVER
+# ============================================================
+
+def utc_now():
+    """
+    Lấy thời gian UTC hiện tại.
+
+    SQL Server DATETIME/DATETIME2 không lưu timezone,
+    nên lưu UTC dạng naive datetime.
+    """
+
+    return datetime.now(timezone.utc).replace(
+        tzinfo=None
+    )
 
 
 # ============================================================
@@ -80,6 +97,8 @@ def register_user(
             detail="Email đã được sử dụng"
         )
 
+    now = utc_now()
+
     new_user = NguoiDung(
 
         HoTen=ho_ten,
@@ -100,10 +119,11 @@ def register_user(
 
         LyDoKhoa=None,
 
-        NgayTao=datetime.now(),
+        NgayTao=now,
 
-        NgayCapNhat=datetime.now()
+        NgayCapNhat=now,
 
+        TokenValidAfter=None,
     )
 
     try:
@@ -175,6 +195,8 @@ def create_user(
             detail="Email đã được sử dụng"
         )
 
+    now = utc_now()
+
     user = NguoiDung(
 
         HoTen=request.ho_ten.strip(),
@@ -197,9 +219,9 @@ def create_user(
 
         TokenValidAfter=None,
 
-        NgayTao=datetime.now(),
+        NgayTao=now,
 
-        NgayCapNhat=datetime.now()
+        NgayCapNhat=now,
 
     )
 
@@ -280,7 +302,11 @@ def login_user(
             detail="Email hoặc mật khẩu không đúng"
         )
 
-    now = datetime.now()
+    # ========================================================
+    # THỜI GIAN UTC
+    # ========================================================
+
+    now = utc_now()
 
     # ========================================================
     # KIỂM TRA TÀI KHOẢN BỊ ADMIN KHÓA
@@ -375,6 +401,18 @@ def login_user(
                 "Sai mật khẩu 5 lần liên tiếp"
             )
 
+            db.commit()
+
+            # Trả đúng 423 ngay tại lần sai thứ 5
+            raise HTTPException(
+                status_code=423,
+                detail=(
+                    "Tài khoản đã bị khóa tạm thời "
+                    "15 phút do nhập sai mật khẩu "
+                    "5 lần liên tiếp"
+                )
+            )
+
         db.commit()
 
         raise HTTPException(
@@ -402,12 +440,6 @@ def login_user(
 
     # ========================================================
     # LẤY VAI TRÒ
-    #
-    # NguoiDung
-    #      ↓
-    # NguoiDung_VaiTro
-    #      ↓
-    # VaiTro
     # ========================================================
 
     role_query = text("""
@@ -438,16 +470,6 @@ def login_user(
 
     # ========================================================
     # LẤY QUYỀN
-    #
-    # NguoiDung
-    #      ↓
-    # NguoiDung_VaiTro
-    #      ↓
-    # VaiTro
-    #      ↓
-    # VaiTroQuyen
-    #      ↓
-    # Quyen
     # ========================================================
 
     permission_query = text("""
@@ -515,16 +537,8 @@ def login_user(
         "email":
             user.Email,
 
-        # ----------------------------------------------------
-        # VAI TRÒ
-        # ----------------------------------------------------
-
         "vaiTro":
             vai_tro,
-
-        # ----------------------------------------------------
-        # QUYỀN
-        # ----------------------------------------------------
 
         "quyen":
             quyen
@@ -652,7 +666,7 @@ def update_password(
             detail="Mật khẩu hiện tại không đúng"
         )
 
-    now = datetime.now()
+    now = utc_now()
 
     user.MatKhauHash = password_hash.hash(
         new_password
@@ -728,7 +742,7 @@ def forgot_password(
         raw_token.encode()
     ).hexdigest()
 
-    now = datetime.now()
+    now = utc_now()
 
     reset_token = TokenMatKhau(
 
@@ -738,8 +752,9 @@ def forgot_password(
 
         ThoiGianTao=now,
 
-        ThoiGianHetHan=
-            now + timedelta(minutes=30),
+        ThoiGianHetHan=(
+            now + timedelta(minutes=30)
+        ),
 
         DaSuDung=False
 
@@ -813,7 +828,7 @@ def reset_password(
             detail="Token không hợp lệ"
         )
 
-    now = datetime.now()
+    now = utc_now()
 
     if reset_token.ThoiGianHetHan < now:
 
@@ -939,7 +954,7 @@ def update_user(
             request.so_dien_thoai.strip()
         )
 
-    user.NgayCapNhat = datetime.now()
+    user.NgayCapNhat = utc_now()
 
     try:
 
@@ -971,7 +986,7 @@ def update_user(
 def lock_user(
     db: Session,
     user_id: int,
-    request: NguoiDungLock
+    ly_do_khoa: str | None = None
 ):
 
     user = (
@@ -1000,8 +1015,8 @@ def lock_user(
     user.KhoaDen = None
 
     user.LyDoKhoa = (
-        request.ly_do_khoa.strip()
-        if request.ly_do_khoa
+        ly_do_khoa.strip()
+        if ly_do_khoa
         else "Bị khóa bởi quản trị viên"
     )
 
@@ -1009,9 +1024,11 @@ def lock_user(
     # VÔ HIỆU HÓA TOÀN BỘ JWT CŨ
     # ========================================================
 
-    user.TokenValidAfter = datetime.now()
+    now = utc_now()
 
-    user.NgayCapNhat = datetime.now()
+    user.TokenValidAfter = now
+
+    user.NgayCapNhat = now
 
     try:
 
@@ -1103,9 +1120,11 @@ def unlock_user(
     # NGƯỜI DÙNG PHẢI ĐĂNG NHẬP LẠI
     # ========================================================
 
-    user.TokenValidAfter = datetime.now()
+    now = utc_now()
 
-    user.NgayCapNhat = datetime.now()
+    user.TokenValidAfter = now
+
+    user.NgayCapNhat = now
 
     # ========================================================
     # LƯU DATABASE
