@@ -37,13 +37,11 @@ import secrets
 import jwt
 
 
-
 # ============================================================
 # PASSWORD HASH
 # ============================================================
 
 password_hash = PasswordHash.recommended()
-
 
 
 # ============================================================
@@ -59,16 +57,13 @@ def register_user(
         request.email
     ).strip().lower()
 
-
     ho_ten = request.ho_ten.strip()
-
 
     so_dien_thoai = (
         request.so_dien_thoai.strip()
         if request.so_dien_thoai
         else None
     )
-
 
     existing_user = (
         db.query(NguoiDung)
@@ -78,15 +73,12 @@ def register_user(
         .first()
     )
 
-
     if existing_user:
 
         raise HTTPException(
             status_code=400,
             detail="Email đã được sử dụng"
         )
-
-
 
     new_user = NguoiDung(
 
@@ -114,7 +106,6 @@ def register_user(
 
     )
 
-
     try:
 
         db.add(new_user)
@@ -122,7 +113,6 @@ def register_user(
         db.commit()
 
         db.refresh(new_user)
-
 
     except Exception:
 
@@ -132,8 +122,6 @@ def register_user(
             status_code=500,
             detail="Không thể tạo tài khoản"
         )
-
-
 
     return {
 
@@ -159,8 +147,6 @@ def register_user(
     }
 
 
-
-
 # ============================================================
 # ADMIN TẠO USER
 # ============================================================
@@ -174,8 +160,6 @@ def create_user(
         request.email
     ).strip().lower()
 
-
-
     exists = (
         db.query(NguoiDung)
         .filter(
@@ -184,15 +168,12 @@ def create_user(
         .first()
     )
 
-
     if exists:
 
         raise HTTPException(
             status_code=400,
             detail="Email đã được sử dụng"
         )
-
-
 
     user = NguoiDung(
 
@@ -222,8 +203,6 @@ def create_user(
 
     )
 
-
-
     try:
 
         db.add(user)
@@ -231,7 +210,6 @@ def create_user(
         db.commit()
 
         db.refresh(user)
-
 
     except Exception:
 
@@ -241,8 +219,6 @@ def create_user(
             status_code=500,
             detail="Không thể tạo người dùng"
         )
-
-
 
     return {
 
@@ -268,8 +244,6 @@ def create_user(
     }
 
 
-
-
 # ============================================================
 # ĐĂNG NHẬP
 # ============================================================
@@ -279,11 +253,17 @@ def login_user(
     request: LoginRequest
 ):
 
+    # ========================================================
+    # CHUẨN HÓA EMAIL
+    # ========================================================
+
     email = str(
         request.email
     ).strip().lower()
 
-
+    # ========================================================
+    # TÌM USER
+    # ========================================================
 
     user = (
         db.query(NguoiDung)
@@ -293,8 +273,6 @@ def login_user(
         .first()
     )
 
-
-
     if not user:
 
         raise HTTPException(
@@ -302,14 +280,10 @@ def login_user(
             detail="Email hoặc mật khẩu không đúng"
         )
 
-
-
     now = datetime.now()
 
-
-
     # ========================================================
-    # KIỂM TRA KHÓA ADMIN
+    # KIỂM TRA TÀI KHOẢN BỊ ADMIN KHÓA
     # ========================================================
 
     if user.TrangThai == "BiKhoa":
@@ -327,8 +301,6 @@ def login_user(
             )
         )
 
-
-
     # ========================================================
     # KIỂM TRA KHÓA TẠM THỜI
     # ========================================================
@@ -343,10 +315,8 @@ def login_user(
             detail="Tài khoản đang bị khóa tạm thời"
         )
 
-
-
     # ========================================================
-    # HẾT HẠN KHÓA -> MỞ LẠI
+    # KHÓA TẠM THỜI ĐÃ HẾT HẠN
     # ========================================================
 
     if (
@@ -361,8 +331,6 @@ def login_user(
         user.TrangThai = "HoatDong"
 
         user.LyDoKhoa = None
-
-
 
     # ========================================================
     # KIỂM TRA PASSWORD
@@ -379,53 +347,44 @@ def login_user(
 
         password_correct = False
 
-
+    # ========================================================
+    # PASSWORD SAI
+    # ========================================================
 
     if not password_correct:
-
 
         if user.SoLanDangNhapSai is None:
 
             user.SoLanDangNhapSai = 0
 
-
-
         user.SoLanDangNhapSai += 1
 
-
+        # ----------------------------------------------------
+        # SAI 5 LẦN → KHÓA TẠM THỜI 15 PHÚT
+        # ----------------------------------------------------
 
         if user.SoLanDangNhapSai >= 5:
-
 
             user.KhoaDen = (
                 now + timedelta(minutes=15)
             )
 
-
             user.TrangThai = "KhoaTamThoi"
-
 
             user.LyDoKhoa = (
                 "Sai mật khẩu 5 lần liên tiếp"
             )
 
-
-
         db.commit()
-
-
 
         raise HTTPException(
             status_code=401,
             detail="Email hoặc mật khẩu không đúng"
         )
 
-
-
     # ========================================================
     # LOGIN THÀNH CÔNG
     # ========================================================
-
 
     user.SoLanDangNhapSai = 0
 
@@ -433,31 +392,108 @@ def login_user(
 
     user.LyDoKhoa = None
 
+    user.TrangThai = "HoatDong"
+
     user.NgayCapNhat = now
-
-
 
     db.commit()
 
     db.refresh(user)
 
+    # ========================================================
+    # LẤY VAI TRÒ
+    #
+    # NguoiDung
+    #      ↓
+    # NguoiDung_VaiTro
+    #      ↓
+    # VaiTro
+    # ========================================================
 
+    role_query = text("""
+        SELECT
+            vt.VaiTroId,
+            vt.TenVaiTro
+        FROM NguoiDung_VaiTro ndvt
+        INNER JOIN VaiTro vt
+            ON ndvt.VaiTroId = vt.VaiTroId
+        WHERE ndvt.NguoiDungId = :nguoi_dung_id
+        ORDER BY vt.VaiTroId
+    """)
+
+    role_result = db.execute(
+        role_query,
+        {
+            "nguoi_dung_id": user.NguoiDungId
+        }
+    ).mappings().all()
+
+    vai_tro = [
+        {
+            "vaiTroId": role["VaiTroId"],
+            "tenVaiTro": role["TenVaiTro"]
+        }
+        for role in role_result
+    ]
+
+    # ========================================================
+    # LẤY QUYỀN
+    #
+    # NguoiDung
+    #      ↓
+    # NguoiDung_VaiTro
+    #      ↓
+    # VaiTro
+    #      ↓
+    # VaiTroQuyen
+    #      ↓
+    # Quyen
+    # ========================================================
+
+    permission_query = text("""
+        SELECT DISTINCT
+            q.QuyenId,
+            q.MaQuyen,
+            q.TenQuyen
+        FROM NguoiDung_VaiTro ndvt
+        INNER JOIN VaiTroQuyen vtq
+            ON ndvt.VaiTroId = vtq.VaiTroId
+        INNER JOIN Quyen q
+            ON vtq.QuyenId = q.QuyenId
+        WHERE ndvt.NguoiDungId = :nguoi_dung_id
+        ORDER BY q.QuyenId
+    """)
+
+    permission_result = db.execute(
+        permission_query,
+        {
+            "nguoi_dung_id": user.NguoiDungId
+        }
+    ).mappings().all()
+
+    quyen = [
+        {
+            "quyenId": permission["QuyenId"],
+            "maQuyen": permission["MaQuyen"],
+            "tenQuyen": permission["TenQuyen"]
+        }
+        for permission in permission_result
+    ]
+
+    # ========================================================
+    # TẠO JWT
+    # ========================================================
 
     token = create_access_token(
-
         {
-
-            "sub":
-                user.Email,
-
-            "user_id":
-                user.NguoiDungId
-
+            "sub": user.Email,
+            "user_id": user.NguoiDungId
         }
-
     )
 
-
+    # ========================================================
+    # RESPONSE LOGIN
+    # ========================================================
 
     return {
 
@@ -477,9 +513,25 @@ def login_user(
             user.HoTen,
 
         "email":
-            user.Email
+            user.Email,
+
+        # ----------------------------------------------------
+        # VAI TRÒ
+        # ----------------------------------------------------
+
+        "vaiTro":
+            vai_tro,
+
+        # ----------------------------------------------------
+        # QUYỀN
+        # ----------------------------------------------------
+
+        "quyen":
+            quyen
 
     }
+
+
 # ============================================================
 # ĐĂNG XUẤT
 # ============================================================
@@ -495,14 +547,12 @@ def logout_user(
             token
         )
 
-
     except jwt.ExpiredSignatureError:
 
         raise HTTPException(
             status_code=401,
             detail="Phiên đăng nhập đã hết hạn"
         )
-
 
     except jwt.InvalidTokenError:
 
@@ -511,13 +561,9 @@ def logout_user(
             detail="Token không hợp lệ"
         )
 
-
-
     jti = payload.get("jti")
 
     exp = payload.get("exp")
-
-
 
     if not jti or not exp:
 
@@ -525,8 +571,6 @@ def logout_user(
             status_code=401,
             detail="Token không hợp lệ"
         )
-
-
 
     exists = (
         db.query(RevokedToken)
@@ -536,16 +580,12 @@ def logout_user(
         .first()
     )
 
-
-
     if exists:
 
         return {
             "message":
                 "Đăng xuất thành công"
         }
-
-
 
     revoked = RevokedToken(
 
@@ -560,13 +600,11 @@ def logout_user(
 
     )
 
-
     try:
 
         db.add(revoked)
 
         db.commit()
-
 
     except Exception:
 
@@ -577,16 +615,12 @@ def logout_user(
             detail="Không thể đăng xuất"
         )
 
-
-
     return {
 
         "message":
             "Đăng xuất thành công"
 
     }
-
-
 
 
 # ============================================================
@@ -607,12 +641,9 @@ def update_password(
             user.MatKhauHash
         )
 
-
     except Exception:
 
         correct = False
-
-
 
     if not correct:
 
@@ -621,33 +652,25 @@ def update_password(
             detail="Mật khẩu hiện tại không đúng"
         )
 
-
-
     now = datetime.now()
-
-
 
     user.MatKhauHash = password_hash.hash(
         new_password
     )
 
-
     user.NgayCapNhat = now
 
-
-
-    # Thu hồi JWT cũ
+    # ========================================================
+    # THU HỒI JWT CŨ
+    # ========================================================
 
     user.TokenValidAfter = now
-
-
 
     try:
 
         db.commit()
 
         db.refresh(user)
-
 
     except Exception:
 
@@ -658,16 +681,12 @@ def update_password(
             detail="Không thể cập nhật mật khẩu"
         )
 
-
-
     return {
 
         "message":
             "Cập nhật mật khẩu thành công"
 
     }
-
-
 
 
 # ============================================================
@@ -683,14 +702,10 @@ def forgot_password(
         request.email
     ).strip().lower()
 
-
-
     message = (
         "Nếu email tồn tại trong hệ thống, "
         "hướng dẫn đặt lại mật khẩu đã được gửi."
     )
-
-
 
     user = (
         db.query(NguoiDung)
@@ -700,8 +715,6 @@ def forgot_password(
         .first()
     )
 
-
-
     if not user:
 
         return {
@@ -709,21 +722,13 @@ def forgot_password(
                 message
         }
 
-
-
     raw_token = secrets.token_urlsafe(32)
-
-
 
     token_hash = hashlib.sha256(
         raw_token.encode()
     ).hexdigest()
 
-
-
     now = datetime.now()
-
-
 
     reset_token = TokenMatKhau(
 
@@ -740,14 +745,11 @@ def forgot_password(
 
     )
 
-
-
     try:
 
         db.add(reset_token)
 
         db.commit()
-
 
     except Exception:
 
@@ -758,34 +760,21 @@ def forgot_password(
                 message
         }
 
-
-
     reset_link = (
-
         "http://localhost:5173/reset-password"
-
         f"?token={raw_token}"
-
     )
-
-
 
     try:
 
         send_reset_password_email(
-
             recipient_email=user.Email,
-
             reset_link=reset_link
-
         )
-
 
     except Exception:
 
         pass
-
-
 
     return {
 
@@ -793,8 +782,6 @@ def forgot_password(
             message
 
     }
-
-
 
 
 # ============================================================
@@ -810,25 +797,14 @@ def reset_password(
         request.token.encode()
     ).hexdigest()
 
-
-
     reset_token = (
-
         db.query(TokenMatKhau)
-
         .filter(
-
             TokenMatKhau.Token == token_hash,
-
             TokenMatKhau.DaSuDung == False
-
         )
-
         .first()
-
     )
-
-
 
     if not reset_token:
 
@@ -837,44 +813,28 @@ def reset_password(
             detail="Token không hợp lệ"
         )
 
-
-
     now = datetime.now()
 
-
-
     if reset_token.ThoiGianHetHan < now:
-
 
         reset_token.DaSuDung = True
 
         db.commit()
-
 
         raise HTTPException(
             status_code=400,
             detail="Token đã hết hạn"
         )
 
-
-
     user = (
-
         db.query(NguoiDung)
-
         .filter(
-
             NguoiDung.NguoiDungId
             ==
             reset_token.NguoiDungId
-
         )
-
         .first()
-
     )
-
-
 
     if not user:
 
@@ -883,34 +843,23 @@ def reset_password(
             detail="Không tìm thấy người dùng"
         )
 
-
-
     user.MatKhauHash = password_hash.hash(
-
         request.new_password
-
     )
 
-
-
-    # Thu hồi JWT cũ
+    # ========================================================
+    # THU HỒI JWT CŨ
+    # ========================================================
 
     user.TokenValidAfter = now
 
-
-
     user.NgayCapNhat = now
 
-
-
     reset_token.DaSuDung = True
-
-
 
     try:
 
         db.commit()
-
 
     except Exception:
 
@@ -921,16 +870,12 @@ def reset_password(
             detail="Không thể đặt lại mật khẩu"
         )
 
-
-
     return {
 
         "message":
             "Đặt lại mật khẩu thành công"
 
     }
-
-
 
 
 # ============================================================
@@ -944,22 +889,14 @@ def update_user(
 ):
 
     user = (
-
         db.query(NguoiDung)
-
         .filter(
-
             NguoiDung.NguoiDungId
             ==
             user_id
-
         )
-
         .first()
-
     )
-
-
 
     if not user:
 
@@ -968,34 +905,20 @@ def update_user(
             detail="Không tìm thấy người dùng"
         )
 
-
-
     if request.email:
-
 
         email = str(
             request.email
         ).strip().lower()
 
-
-
         exists = (
-
             db.query(NguoiDung)
-
             .filter(
-
                 NguoiDung.Email == email,
-
                 NguoiDung.NguoiDungId != user_id
-
             )
-
             .first()
-
         )
-
-
 
         if exists:
 
@@ -1004,17 +927,11 @@ def update_user(
                 detail="Email đã tồn tại"
             )
 
-
-
         user.Email = email
-
-
 
     if request.ho_ten:
 
         user.HoTen = request.ho_ten.strip()
-
-
 
     if request.so_dien_thoai:
 
@@ -1022,18 +939,13 @@ def update_user(
             request.so_dien_thoai.strip()
         )
 
-
-
     user.NgayCapNhat = datetime.now()
-
-
 
     try:
 
         db.commit()
 
         db.refresh(user)
-
 
     except Exception:
 
@@ -1044,16 +956,12 @@ def update_user(
             detail="Không thể cập nhật"
         )
 
-
-
     return {
 
         "message":
             "Cập nhật thành công"
 
     }
-
-
 
 
 # ============================================================
@@ -1066,24 +974,15 @@ def lock_user(
     request: NguoiDungLock
 ):
 
-
     user = (
-
         db.query(NguoiDung)
-
         .filter(
-
             NguoiDung.NguoiDungId
             ==
             user_id
-
         )
-
         .first()
-
     )
-
-
 
     if not user:
 
@@ -1092,46 +991,33 @@ def lock_user(
             detail="Không tìm thấy người dùng"
         )
 
-
+    # ========================================================
+    # KHÓA VĨNH VIỄN BỞI ADMIN
+    # ========================================================
 
     user.TrangThai = "BiKhoa"
 
-
-
     user.KhoaDen = None
 
-
-
     user.LyDoKhoa = (
-
         request.ly_do_khoa.strip()
-
         if request.ly_do_khoa
-
-        else
-
-        "Bị khóa bởi quản trị viên"
-
+        else "Bị khóa bởi quản trị viên"
     )
 
-
-
-    # Vô hiệu hóa toàn bộ JWT cũ
+    # ========================================================
+    # VÔ HIỆU HÓA TOÀN BỘ JWT CŨ
+    # ========================================================
 
     user.TokenValidAfter = datetime.now()
 
-
-
     user.NgayCapNhat = datetime.now()
-
-
 
     try:
 
         db.commit()
 
         db.refresh(user)
-
 
     except Exception:
 
@@ -1141,8 +1027,6 @@ def lock_user(
             status_code=500,
             detail="Không thể khóa tài khoản"
         )
-
-
 
     return {
 
@@ -1160,68 +1044,81 @@ def lock_user(
 
     }
 
+
 # ============================================================
-# MỞ KHÓA TÀI KHOẢN NGƯỜI DÙNG
+# MỞ KHÓA TÀI KHOẢN
 # ============================================================
 
 def unlock_user(
     db: Session,
     user_id: int
 ):
-    # --------------------------------------------------------
-    # Tìm người dùng
-    # --------------------------------------------------------
+
+    # ========================================================
+    # TÌM USER
+    # ========================================================
 
     user = (
         db.query(NguoiDung)
         .filter(
-            NguoiDung.NguoiDungId == user_id
+            NguoiDung.NguoiDungId
+            ==
+            user_id
         )
         .first()
     )
 
     if not user:
+
         raise HTTPException(
             status_code=404,
             detail="Không tìm thấy người dùng"
         )
 
-    # --------------------------------------------------------
-    # Kiểm tra tài khoản có đang bị khóa không
-    # --------------------------------------------------------
+    # ========================================================
+    # KIỂM TRA USER ĐANG BỊ KHÓA
+    # ========================================================
 
     if user.TrangThai != "BiKhoa":
+
         raise HTTPException(
             status_code=400,
             detail="Tài khoản chưa bị khóa"
         )
 
-    # --------------------------------------------------------
-    # Mở khóa tài khoản
-    # --------------------------------------------------------
+    # ========================================================
+    # MỞ KHÓA
+    # ========================================================
 
     user.TrangThai = "HoatDong"
+
     user.KhoaDen = None
+
     user.LyDoKhoa = None
+
     user.SoLanDangNhapSai = 0
 
-    # --------------------------------------------------------
-    # Thu hồi token cũ
-    # Người dùng phải đăng nhập lại
-    # --------------------------------------------------------
+    # ========================================================
+    # THU HỒI TOKEN CŨ
+    # NGƯỜI DÙNG PHẢI ĐĂNG NHẬP LẠI
+    # ========================================================
 
     user.TokenValidAfter = datetime.now()
+
     user.NgayCapNhat = datetime.now()
 
-    # --------------------------------------------------------
-    # Lưu database
-    # --------------------------------------------------------
+    # ========================================================
+    # LƯU DATABASE
+    # ========================================================
 
     try:
+
         db.commit()
+
         db.refresh(user)
 
     except Exception:
+
         db.rollback()
 
         raise HTTPException(
@@ -1229,17 +1126,32 @@ def unlock_user(
             detail="Không thể mở khóa tài khoản"
         )
 
-    # --------------------------------------------------------
-    # Response
-    # --------------------------------------------------------
+    # ========================================================
+    # RESPONSE
+    # ========================================================
 
     return {
-        "message": "Mở khóa tài khoản thành công",
+
+        "message":
+            "Mở khóa tài khoản thành công",
+
         "user": {
-            "nguoiDungId": user.NguoiDungId,
-            "hoTen": user.HoTen,
-            "email": user.Email,
-            "trangThai": user.TrangThai,
-            "ngayCapNhat": user.NgayCapNhat
+
+            "nguoiDungId":
+                user.NguoiDungId,
+
+            "hoTen":
+                user.HoTen,
+
+            "email":
+                user.Email,
+
+            "trangThai":
+                user.TrangThai,
+
+            "ngayCapNhat":
+                user.NgayCapNhat
+
         }
+
     }
