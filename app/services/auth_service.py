@@ -1,801 +1,650 @@
-from fastapi import HTTPException
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-from pwdlib import PasswordHash
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Union
 
-from app.schemas.nguoi_dung import (
-    NguoiDungCreate,
-    NguoiDungLock,
-)
+from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError
 
 from app.models.nguoi_dung import NguoiDung
-from app.models.revoked_token import RevokedToken
-from app.models.token_mat_khau import TokenMatKhau
+from app.models.vai_tro import VaiTro
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 
-from app.schemas.login import LoginRequest
-from app.schemas.register import RegisterRequest
-from app.schemas.forgot_password import ForgotPasswordRequest
-from app.schemas.reset_password import ResetPasswordRequest
-
-from app.services.email_service import (
-    send_reset_password_email
+from app.schemas.auth_schema import (
+    NguoiDungCreate,
+    NguoiDungLogin,
+    NguoiDungUpdate,
+    NguoiDungLock,
 )
 
 from app.core.security import (
     create_access_token,
-    decode_access_token
+    decode_access_token,
 )
 
-from datetime import (
-    datetime,
-    timedelta,
-    timezone,
-)
 
-import hashlib
-import secrets
-import jwt
+# ============================================================
+# PASSWORD HASHER
+# ============================================================
+
+ph = PasswordHasher()
 
 
 # ============================================================
-# PASSWORD HASH
+# HELPER
 # ============================================================
 
-password_hash = PasswordHash.recommended()
-
-
-# ============================================================
-# HELPER - THỜI GIAN UTC CHO SQL SERVER
-# ============================================================
-
-def utc_now():
+def utc_now() -> datetime:
     """
     Lấy thời gian UTC hiện tại.
-
-    SQL Server DATETIME/DATETIME2 không lưu timezone,
-    nên lưu UTC dạng naive datetime.
     """
+    return datetime.utcnow()
 
-    return datetime.now(timezone.utc).replace(
-        tzinfo=None
+
+def _commit_or_raise(db: Session, action: str = "Thao tác") -> None:
+    """
+    Commit transaction.
+    Nếu có lỗi DB thì rollback và trả về HTTP 500.
+    """
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{action} thất bại",
+        )
+
+
+def _user_summary(user: NguoiDung) -> Dict[str, Any]:
+    """
+    Chuẩn hóa thông tin user trả về.
+    """
+    roles = (
+        [
+            {
+                "VaiTroId": item.vaitro.VaiTroId,
+                "TenVaiTro": item.vaitro.TenVaiTro,
+            }
+            for item in user.nguoi_dung_vai_tro
+            if item.vaitro
+        ]
+        if hasattr(user, "nguoi_dung_vai_tro")
+        else []
     )
+
+    return {
+        "NguoiDungId": user.NguoiDungId,
+        "HoTen": user.HoTen,
+        "Email": user.Email,
+        "SoDienThoai": user.SoDienThoai,
+        "TrangThai": user.TrangThai,
+        "SoLanDangNhapSai": user.SoLanDangNhapSai,
+        "KhoaDen": user.KhoaDen,
+        "LyDoKhoa": user.LyDoKhoa,
+        "roles": roles,
+    }
 
 
 # ============================================================
-# ĐĂNG KÝ USER
+# REGISTER USER
 # ============================================================
 
 def register_user(
     db: Session,
-    request: RegisterRequest
-):
+    request: NguoiDungCreate,
+) -> Dict[str, Any]:
+    """
+    Đăng ký tài khoản người dùng.
+    """
 
-    email = str(
-        request.email
-    ).strip().lower()
-
-    ho_ten = request.ho_ten.strip()
-
-    so_dien_thoai = (
-        request.so_dien_thoai.strip()
-        if request.so_dien_thoai
-        else None
-    )
-
+    # Kiểm tra email đã tồn tại
     existing_user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.Email == email
-        )
+        .filter(NguoiDung.Email == request.Email)
         .first()
     )
 
     if existing_user:
-
         raise HTTPException(
-            status_code=400,
-            detail="Email đã được sử dụng"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email đã được sử dụng",
         )
 
-    now = utc_now()
-
-    new_user = NguoiDung(
-
-        HoTen=ho_ten,
-
-        Email=email,
-
-        SoDienThoai=so_dien_thoai,
-
-        MatKhauHash=password_hash.hash(
-            request.password
-        ),
-
-        TrangThai="HoatDong",
-
-        SoLanDangNhapSai=0,
-
-        KhoaDen=None,
-
-        LyDoKhoa=None,
-
-        NgayTao=now,
-
-        NgayCapNhat=now,
-
-        TokenValidAfter=None,
-    )
-
-    try:
-
-        db.add(new_user)
-
-        db.commit()
-
-        db.refresh(new_user)
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể tạo tài khoản"
+    # Kiểm tra số điện thoại nếu có
+    if getattr(request, "SoDienThoai", None):
+        existing_phone = (
+            db.query(NguoiDung)
+            .filter(NguoiDung.SoDienThoai == request.SoDienThoai)
+            .first()
         )
 
-    return {
+        if existing_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Số điện thoại đã được sử dụng",
+            )
 
-        "message":
-            "Đăng ký thành công",
-
-        "user": {
-
-            "nguoiDungId":
-                new_user.NguoiDungId,
-
-            "hoTen":
-                new_user.HoTen,
-
-            "email":
-                new_user.Email,
-
-            "trangThai":
-                new_user.TrangThai
-
-        }
-
-    }
-
-
-# ============================================================
-# ADMIN TẠO USER
-# ============================================================
-
-def create_user(
-    db: Session,
-    request: NguoiDungCreate
-):
-
-    email = str(
-        request.email
-    ).strip().lower()
-
-    exists = (
-        db.query(NguoiDung)
-        .filter(
-            NguoiDung.Email == email
-        )
-        .first()
-    )
-
-    if exists:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Email đã được sử dụng"
-        )
+    # Hash password
+    password_hash = ph.hash(request.MatKhau)
 
     now = utc_now()
 
     user = NguoiDung(
-
-        HoTen=request.ho_ten.strip(),
-
-        Email=email,
-
-        SoDienThoai=request.so_dien_thoai,
-
-        MatKhauHash=password_hash.hash(
-            request.password
-        ),
-
+        HoTen=request.HoTen,
+        Email=request.Email,
+        SoDienThoai=getattr(request, "SoDienThoai", None),
+        MatKhauHash=password_hash,
         TrangThai="HoatDong",
-
         SoLanDangNhapSai=0,
-
         KhoaDen=None,
-
         LyDoKhoa=None,
-
-        TokenValidAfter=None,
-
         NgayTao=now,
-
         NgayCapNhat=now,
-
     )
 
+    db.add(user)
+
     try:
-
-        db.add(user)
-
-        db.commit()
-
-        db.refresh(user)
-
-    except Exception:
-
+        db.flush()
+    except SQLAlchemyError:
         db.rollback()
-
         raise HTTPException(
-            status_code=500,
-            detail="Không thể tạo người dùng"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Không thể tạo tài khoản",
         )
 
+    # Gán role mặc định nếu tồn tại
+    default_role = (
+        db.query(VaiTro)
+        .filter(VaiTro.TenVaiTro == "user")
+        .first()
+    )
+
+    if default_role:
+        user_role = NguoiDungVaiTro(
+            NguoiDungId=user.NguoiDungId,
+            VaiTroId=default_role.VaiTroId,
+        )
+
+        db.add(user_role)
+
+    _commit_or_raise(db, "Đăng ký tài khoản")
+
+    db.refresh(user)
+
     return {
-
-        "message":
-            "Tạo người dùng thành công",
-
-        "user": {
-
-            "nguoiDungId":
-                user.NguoiDungId,
-
-            "hoTen":
-                user.HoTen,
-
-            "email":
-                user.Email,
-
-            "trangThai":
-                user.TrangThai
-
-        }
-
+        "message": "Đăng ký tài khoản thành công",
+        "user": _user_summary(user),
     }
 
 
 # ============================================================
-# ĐĂNG NHẬP
+# CREATE USER - ADMIN
+# ============================================================
+
+def create_user(
+    db: Session,
+    request: NguoiDungCreate,
+) -> Dict[str, Any]:
+    """
+    Admin tạo tài khoản người dùng.
+    """
+
+    # Kiểm tra email
+    existing_user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == request.Email)
+        .first()
+    )
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email đã được sử dụng",
+        )
+
+    # Kiểm tra số điện thoại
+    if getattr(request, "SoDienThoai", None):
+        existing_phone = (
+            db.query(NguoiDung)
+            .filter(NguoiDung.SoDienThoai == request.SoDienThoai)
+            .first()
+        )
+
+        if existing_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+    # Hash password
+    password_hash = ph.hash(request.MatKhau)
+
+    now = utc_now()
+
+    user = NguoiDung(
+        HoTen=request.HoTen,
+        Email=request.Email,
+        SoDienThoai=getattr(request, "SoDienThoai", None),
+        MatKhauHash=password_hash,
+        TrangThai="HoatDong",
+        SoLanDangNhapSai=0,
+        KhoaDen=None,
+        LyDoKhoa=None,
+        NgayTao=now,
+        NgayCapNhat=now,
+    )
+
+    db.add(user)
+
+    try:
+        db.flush()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Không thể tạo tài khoản",
+        )
+
+    # Role mặc định
+    default_role = (
+        db.query(VaiTro)
+        .filter(VaiTro.TenVaiTro == "user")
+        .first()
+    )
+
+    if default_role:
+        user_role = NguoiDungVaiTro(
+            NguoiDungId=user.NguoiDungId,
+            VaiTroId=default_role.VaiTroId,
+        )
+
+        db.add(user_role)
+
+    _commit_or_raise(db, "Tạo tài khoản")
+
+    db.refresh(user)
+
+    return {
+        "message": "Tạo tài khoản thành công",
+        "user": _user_summary(user),
+    }
+# ============================================================
+# LOGIN USER
 # ============================================================
 
 def login_user(
     db: Session,
-    request: LoginRequest
-):
+    request: NguoiDungLogin,
+) -> Dict[str, Any]:
+    """
+    Đăng nhập tài khoản.
 
-    # ========================================================
-    # CHUẨN HÓA EMAIL
-    # ========================================================
-
-    email = str(
-        request.email
-    ).strip().lower()
-
-    # ========================================================
-    # TÌM USER
-    # ========================================================
+    Quy tắc:
+    - Kiểm tra email tồn tại.
+    - Kiểm tra tài khoản có đang bị khóa hay không.
+    - Xác thực mật khẩu bằng Argon2.
+    - Sai mật khẩu 5 lần liên tiếp -> khóa 15 phút.
+    - Đăng nhập thành công -> reset số lần sai.
+    - Tạo access token.
+    """
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.Email == email
-        )
+        .filter(NguoiDung.Email == request.Email)
         .first()
     )
 
+    # Không tiết lộ tài khoản có tồn tại hay không
     if not user:
-
         raise HTTPException(
-            status_code=401,
-            detail="Email hoặc mật khẩu không đúng"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email hoặc mật khẩu không chính xác",
         )
-
-    # ========================================================
-    # THỜI GIAN UTC
-    # ========================================================
 
     now = utc_now()
 
     # ========================================================
-    # KIỂM TRA TÀI KHOẢN BỊ ADMIN KHÓA
+    # KIỂM TRA TRẠNG THÁI TÀI KHOẢN
     # ========================================================
 
-    if user.TrangThai == "BiKhoa":
-
+    if user.TrangThai == "BiKhoa" and not user.KhoaDen:
         raise HTTPException(
-            status_code=423,
+            status_code=status.HTTP_423_LOCKED,
             detail=(
-                "Tài khoản đã bị khóa"
-                +
-                (
-                    f": {user.LyDoKhoa}"
-                    if user.LyDoKhoa
-                    else ""
-                )
-            )
+                user.LyDoKhoa
+                or "Tài khoản đã bị khóa"
+            ),
         )
 
     # ========================================================
     # KIỂM TRA KHÓA TẠM THỜI
     # ========================================================
 
-    if (
-        user.KhoaDen
-        and user.KhoaDen > now
-    ):
+    if user.KhoaDen:
+        if user.KhoaDen > now:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="Tài khoản đang bị khóa tạm thời",
+            )
 
+        # Hết thời gian khóa -> tự động mở khóa
+        user.KhoaDen = None
+        user.SoLanDangNhapSai = 0
+        user.TrangThai = "HoatDong"
+        user.LyDoKhoa = None
+        user.NgayCapNhat = now
+
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Không thể cập nhật trạng thái tài khoản",
+            )
+
+    # ========================================================
+    # KIỂM TRA TRẠNG THÁI HOẠT ĐỘNG
+    # ========================================================
+
+    if user.TrangThai != "HoatDong":
         raise HTTPException(
-            status_code=423,
-            detail="Tài khoản đang bị khóa tạm thời"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tài khoản không ở trạng thái hoạt động",
         )
 
     # ========================================================
-    # KHÓA TẠM THỜI ĐÃ HẾT HẠN
-    # ========================================================
-
-    if (
-        user.KhoaDen
-        and user.KhoaDen <= now
-    ):
-
-        user.KhoaDen = None
-
-        user.SoLanDangNhapSai = 0
-
-        user.TrangThai = "HoatDong"
-
-        user.LyDoKhoa = None
-
-    # ========================================================
-    # KIỂM TRA PASSWORD
+    # KIỂM TRA MẬT KHẨU
     # ========================================================
 
     try:
-
-        password_correct = password_hash.verify(
-            request.password,
-            user.MatKhauHash
+        password_valid = ph.verify(
+            user.MatKhauHash,
+            request.MatKhau,
         )
 
-    except Exception:
-
-        password_correct = False
+    except (VerifyMismatchError, VerificationError):
+        password_valid = False
 
     # ========================================================
-    # PASSWORD SAI
+    # SAI MẬT KHẨU
     # ========================================================
 
-    if not password_correct:
+    if not password_valid:
 
-        if user.SoLanDangNhapSai is None:
+        user.SoLanDangNhapSai = (
+            (user.SoLanDangNhapSai or 0) + 1
+        )
 
-            user.SoLanDangNhapSai = 0
-
-        user.SoLanDangNhapSai += 1
-
-        # ----------------------------------------------------
-        # SAI 5 LẦN → KHÓA TẠM THỜI 15 PHÚT
-        # ----------------------------------------------------
-
+        # Sai 5 lần -> khóa 15 phút
         if user.SoLanDangNhapSai >= 5:
+            user.KhoaDen = now + timedelta(minutes=15)
+            user.TrangThai = "BiKhoa"
+            user.LyDoKhoa = "Sai mật khẩu 5 lần liên tiếp"
+            user.NgayCapNhat = now
 
-            user.KhoaDen = (
-                now + timedelta(minutes=15)
-            )
-
-            user.TrangThai = "KhoaTamThoi"
-
-            user.LyDoKhoa = (
-                "Sai mật khẩu 5 lần liên tiếp"
-            )
-
-            db.commit()
-
-            # Trả đúng 423 ngay tại lần sai thứ 5
-            raise HTTPException(
-                status_code=423,
-                detail=(
-                    "Tài khoản đã bị khóa tạm thời "
-                    "15 phút do nhập sai mật khẩu "
-                    "5 lần liên tiếp"
+            try:
+                db.commit()
+            except SQLAlchemyError:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Không thể cập nhật trạng thái tài khoản",
                 )
+
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail=(
+                    "Tài khoản đã bị khóa tạm thời 15 phút "
+                    "do nhập sai mật khẩu 5 lần liên tiếp"
+                ),
             )
 
-        db.commit()
+        user.NgayCapNhat = now
+
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Không thể cập nhật số lần đăng nhập sai",
+            )
 
         raise HTTPException(
-            status_code=401,
-            detail="Email hoặc mật khẩu không đúng"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email hoặc mật khẩu không chính xác",
         )
 
     # ========================================================
-    # LOGIN THÀNH CÔNG
+    # ĐĂNG NHẬP THÀNH CÔNG
     # ========================================================
 
     user.SoLanDangNhapSai = 0
-
     user.KhoaDen = None
-
     user.LyDoKhoa = None
-
     user.TrangThai = "HoatDong"
-
     user.NgayCapNhat = now
 
-    db.commit()
-
-    db.refresh(user)
-
     # ========================================================
-    # LẤY VAI TRÒ
+    # LẤY ROLE
     # ========================================================
 
-    role_query = text("""
-        SELECT
-            vt.VaiTroId,
-            vt.TenVaiTro
-        FROM NguoiDung_VaiTro ndvt
-        INNER JOIN VaiTro vt
-            ON ndvt.VaiTroId = vt.VaiTroId
-        WHERE ndvt.NguoiDungId = :nguoi_dung_id
-        ORDER BY vt.VaiTroId
-    """)
-
-    role_result = db.execute(
-        role_query,
-        {
-            "nguoi_dung_id": user.NguoiDungId
-        }
-    ).mappings().all()
-
-    vai_tro = [
-        {
-            "vaiTroId": role["VaiTroId"],
-            "tenVaiTro": role["TenVaiTro"]
-        }
-        for role in role_result
-    ]
-
-    # ========================================================
-    # LẤY QUYỀN
-    # ========================================================
-
-    permission_query = text("""
-        SELECT DISTINCT
-            q.QuyenId,
-            q.MaQuyen,
-            q.TenQuyen
-        FROM NguoiDung_VaiTro ndvt
-        INNER JOIN VaiTro_Quyen vtq
-            ON ndvt.VaiTroId = vtq.VaiTroId
-        INNER JOIN Quyen q
-            ON vtq.QuyenId = q.QuyenId
-        WHERE ndvt.NguoiDungId = :nguoi_dung_id
-        ORDER BY q.QuyenId
-    """)
-
-    permission_result = db.execute(
-        permission_query,
-        {
-            "nguoi_dung_id": user.NguoiDungId
-        }
-    ).mappings().all()
-
-    quyen = [
-        {
-            "quyenId": permission["QuyenId"],
-            "maQuyen": permission["MaQuyen"],
-            "tenQuyen": permission["TenQuyen"]
-        }
-        for permission in permission_result
-    ]
-
-    # ========================================================
-    # TẠO JWT
-    # ========================================================
-
-    token = create_access_token(
-        {
-            "sub": user.Email,
-            "user_id": user.NguoiDungId
-        }
+    roles = (
+        [
+            item.vaitro.TenVaiTro
+            for item in user.nguoi_dung_vai_tro
+            if item.vaitro
+        ]
+        if hasattr(user, "nguoi_dung_vai_tro")
+        else []
     )
 
+    # Role mặc định nếu không có
+    if not roles:
+        roles = ["user"]
+
     # ========================================================
-    # RESPONSE LOGIN
+    # TẠO ACCESS TOKEN
     # ========================================================
 
-    return {
-
-        "message":
-            "Đăng nhập thành công",
-
-        "access_token":
-            token,
-
-        "token_type":
-            "bearer",
-
-        "nguoiDungId":
-            user.NguoiDungId,
-
-        "hoTen":
-            user.HoTen,
-
-        "email":
-            user.Email,
-
-        "vaiTro":
-            vai_tro,
-
-        "quyen":
-            quyen
-
+    token_data = {
+        "sub": str(user.NguoiDungId),
+        "email": user.Email,
+        "roles": roles,
     }
 
+    access_token = create_access_token(
+        data=token_data
+    )
 
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Đăng nhập thất bại",
+        )
+
+    return {
+        "message": "Đăng nhập thành công",
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": _user_summary(user),
+    }
 # ============================================================
-# ĐĂNG XUẤT
+# LOGOUT USER
 # ============================================================
 
 def logout_user(
     db: Session,
-    token: str
-):
+    token: str,
+) -> Dict[str, Any]:
+    """
+    Đăng xuất người dùng.
 
-    try:
+    Token được decode để lấy thông tin người dùng.
+    Nếu hệ thống có cơ chế TokenValidAfter thì có thể
+    dùng thời điểm này để vô hiệu hóa các token cũ.
+    """
 
-        payload = decode_access_token(
-            token
-        )
+    payload = decode_access_token(token)
 
-    except jwt.ExpiredSignatureError:
-
+    if not payload:
         raise HTTPException(
-            status_code=401,
-            detail="Phiên đăng nhập đã hết hạn"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token không hợp lệ hoặc đã hết hạn",
         )
 
-    except jwt.InvalidTokenError:
+    user_id = payload.get("sub")
 
+    if not user_id:
         raise HTTPException(
-            status_code=401,
-            detail="Token không hợp lệ"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token không hợp lệ",
         )
-
-    jti = payload.get("jti")
-
-    exp = payload.get("exp")
-
-    if not jti or not exp:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Token không hợp lệ"
-        )
-
-    exists = (
-        db.query(RevokedToken)
-        .filter(
-            RevokedToken.Jti == jti
-        )
-        .first()
-    )
-
-    if exists:
-
-        return {
-            "message":
-                "Đăng xuất thành công"
-        }
-
-    revoked = RevokedToken(
-
-        Jti=jti,
-
-        ExpiresAt=datetime.fromtimestamp(
-            exp,
-            tz=timezone.utc
-        ).replace(
-            tzinfo=None
-        )
-
-    )
-
-    try:
-
-        db.add(revoked)
-
-        db.commit()
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể đăng xuất"
-        )
-
-    return {
-
-        "message":
-            "Đăng xuất thành công"
-
-    }
-
-
-# ============================================================
-# ĐỔI MẬT KHẨU
-# ============================================================
-
-def update_password(
-    db: Session,
-    user: NguoiDung,
-    current_password: str,
-    new_password: str
-):
-
-    try:
-
-        correct = password_hash.verify(
-            current_password,
-            user.MatKhauHash
-        )
-
-    except Exception:
-
-        correct = False
-
-    if not correct:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Mật khẩu hiện tại không đúng"
-        )
-
-    now = utc_now()
-
-    user.MatKhauHash = password_hash.hash(
-        new_password
-    )
-
-    user.NgayCapNhat = now
-
-    # ========================================================
-    # THU HỒI JWT CŨ
-    # ========================================================
-
-    user.TokenValidAfter = now
-
-    try:
-
-        db.commit()
-
-        db.refresh(user)
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể cập nhật mật khẩu"
-        )
-
-    return {
-
-        "message":
-            "Cập nhật mật khẩu thành công"
-
-    }
-
-
-# ============================================================
-# QUÊN MẬT KHẨU
-# ============================================================
-
-def forgot_password(
-    db: Session,
-    request: ForgotPasswordRequest
-):
-
-    email = str(
-        request.email
-    ).strip().lower()
-
-    message = (
-        "Nếu email tồn tại trong hệ thống, "
-        "hướng dẫn đặt lại mật khẩu đã được gửi."
-    )
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.Email == email
-        )
+        .filter(NguoiDung.NguoiDungId == int(user_id))
         .first()
     )
 
     if not user:
-
-        return {
-            "message":
-                message
-        }
-
-    raw_token = secrets.token_urlsafe(32)
-
-    token_hash = hashlib.sha256(
-        raw_token.encode()
-    ).hexdigest()
-
-    now = utc_now()
-
-    reset_token = TokenMatKhau(
-
-        NguoiDungId=user.NguoiDungId,
-
-        Token=token_hash,
-
-        ThoiGianTao=now,
-
-        ThoiGianHetHan=(
-            now + timedelta(minutes=30)
-        ),
-
-        DaSuDung=False
-
-    )
-
-    try:
-
-        db.add(reset_token)
-
-        db.commit()
-
-    except Exception:
-
-        db.rollback()
-
-        return {
-            "message":
-                message
-        }
-
-    reset_link = (
-        "http://localhost:5173/reset-password"
-        f"?token={raw_token}"
-    )
-
-    try:
-
-        send_reset_password_email(
-            recipient_email=user.Email,
-            reset_link=reset_link
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
         )
 
-    except Exception:
+    # Nếu model có trường TokenValidAfter thì cập nhật.
+    if hasattr(user, "TokenValidAfter"):
+        user.TokenValidAfter = utc_now()
 
-        pass
+    user.NgayCapNhat = utc_now()
+
+    _commit_or_raise(db, "Đăng xuất")
 
     return {
+        "message": "Đăng xuất thành công",
+    }
 
-        "message":
-            message
 
+# ============================================================
+# UPDATE PASSWORD
+# ============================================================
+
+def update_password(
+    db: Session,
+    user_id: int,
+    old_password: str,
+    new_password: str,
+) -> Dict[str, Any]:
+    """
+    Đổi mật khẩu khi người dùng đang đăng nhập.
+    """
+
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.NguoiDungId == user_id)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
+        )
+
+    # Kiểm tra mật khẩu hiện tại
+    try:
+        password_valid = ph.verify(
+            user.MatKhauHash,
+            old_password,
+        )
+
+    except (VerifyMismatchError, VerificationError):
+        password_valid = False
+
+    if not password_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu hiện tại không chính xác",
+        )
+
+    # Không cho dùng lại mật khẩu cũ
+    if old_password == new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu mới phải khác mật khẩu hiện tại",
+        )
+
+    # Hash mật khẩu mới
+    user.MatKhauHash = ph.hash(new_password)
+
+    now = utc_now()
+    user.NgayCapNhat = now
+
+    # Đổi mật khẩu -> vô hiệu hóa các token cũ
+    if hasattr(user, "TokenValidAfter"):
+        user.TokenValidAfter = now
+
+    _commit_or_raise(db, "Đổi mật khẩu")
+
+    return {
+        "message": "Đổi mật khẩu thành công",
+    }
+
+
+# ============================================================
+# FORGOT PASSWORD
+# ============================================================
+
+def forgot_password(
+    db: Session,
+    email: str,
+) -> Dict[str, Any]:
+    """
+    Xử lý yêu cầu quên mật khẩu.
+
+    Không tiết lộ email có tồn tại trong hệ thống hay không.
+    """
+
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == email)
+        .first()
+    )
+
+    # Không tiết lộ tài khoản có tồn tại
+    if not user:
+        return {
+            "message": (
+                "Nếu email tồn tại trong hệ thống, "
+                "hướng dẫn đặt lại mật khẩu sẽ được gửi đến email."
+            )
+        }
+
+    # ========================================================
+    # TẠO RESET TOKEN
+    # ========================================================
+
+    reset_token = create_access_token(
+        data={
+            "sub": str(user.NguoiDungId),
+            "purpose": "reset_password",
+        }
+    )
+
+    return {
+        "message": (
+            "Nếu email tồn tại trong hệ thống, "
+            "hướng dẫn đặt lại mật khẩu sẽ được gửi đến email."
+        ),
+        "reset_token": reset_token,
     }
 
 
@@ -805,372 +654,287 @@ def forgot_password(
 
 def reset_password(
     db: Session,
-    request: ResetPasswordRequest
-):
+    token: str,
+    new_password: str,
+) -> Dict[str, Any]:
+    """
+    Đặt lại mật khẩu bằng reset token.
+    """
 
-    token_hash = hashlib.sha256(
-        request.token.encode()
-    ).hexdigest()
+    payload = decode_access_token(token)
 
-    reset_token = (
-        db.query(TokenMatKhau)
-        .filter(
-            TokenMatKhau.Token == token_hash,
-            TokenMatKhau.DaSuDung == False
-        )
-        .first()
-    )
-
-    if not reset_token:
-
+    if not payload:
         raise HTTPException(
-            status_code=400,
-            detail="Token không hợp lệ"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token đặt lại mật khẩu không hợp lệ hoặc đã hết hạn",
         )
 
-    now = utc_now()
-
-    if reset_token.ThoiGianHetHan < now:
-
-        reset_token.DaSuDung = True
-
-        db.commit()
-
+    # Chỉ chấp nhận token dùng cho reset password
+    if payload.get("purpose") != "reset_password":
         raise HTTPException(
-            status_code=400,
-            detail="Token đã hết hạn"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token không hợp lệ",
+        )
+
+    user_id = payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token không hợp lệ",
         )
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.NguoiDungId
-            ==
-            reset_token.NguoiDungId
-        )
+        .filter(NguoiDung.NguoiDungId == int(user_id))
         .first()
     )
 
     if not user:
-
         raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy người dùng"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
         )
 
-    user.MatKhauHash = password_hash.hash(
-        request.new_password
-    )
-
     # ========================================================
-    # THU HỒI JWT CŨ
+    # HASH PASSWORD MỚI
     # ========================================================
 
-    user.TokenValidAfter = now
+    user.MatKhauHash = ph.hash(new_password)
 
+    # Reset trạng thái đăng nhập sai
+    user.SoLanDangNhapSai = 0
+    user.KhoaDen = None
+    user.LyDoKhoa = None
+    user.TrangThai = "HoatDong"
+
+    now = utc_now()
     user.NgayCapNhat = now
 
-    reset_token.DaSuDung = True
+    # Vô hiệu hóa các token cũ
+    if hasattr(user, "TokenValidAfter"):
+        user.TokenValidAfter = now
 
-    try:
-
-        db.commit()
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể đặt lại mật khẩu"
-        )
+    _commit_or_raise(db, "Đặt lại mật khẩu")
 
     return {
-
-        "message":
-            "Đặt lại mật khẩu thành công"
-
+        "message": "Đặt lại mật khẩu thành công",
     }
-
-
 # ============================================================
-# CẬP NHẬT USER
+# UPDATE USER
 # ============================================================
 
 def update_user(
     db: Session,
     user_id: int,
-    request
-):
+    request: NguoiDungUpdate,
+) -> Dict[str, Any]:
+    """
+    Cập nhật thông tin người dùng.
+    """
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.NguoiDungId
-            ==
-            user_id
-        )
+        .filter(NguoiDung.NguoiDungId == user_id)
         .first()
     )
 
     if not user:
-
         raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy người dùng"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
         )
 
-    if request.email:
+    # ========================================================
+    # KIỂM TRA EMAIL
+    # ========================================================
 
-        email = str(
-            request.email
-        ).strip().lower()
-
-        exists = (
+    if getattr(request, "Email", None):
+        existing_email = (
             db.query(NguoiDung)
             .filter(
-                NguoiDung.Email == email,
-                NguoiDung.NguoiDungId != user_id
+                NguoiDung.Email == request.Email,
+                NguoiDung.NguoiDungId != user_id,
             )
             .first()
         )
 
-        if exists:
-
+        if existing_email:
             raise HTTPException(
-                status_code=400,
-                detail="Email đã tồn tại"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email đã được sử dụng",
             )
 
-        user.Email = email
+        user.Email = request.Email
 
-    if request.ho_ten:
+    # ========================================================
+    # CẬP NHẬT HỌ TÊN
+    # ========================================================
 
-        user.HoTen = request.ho_ten.strip()
+    if getattr(request, "HoTen", None) is not None:
+        user.HoTen = request.HoTen
 
-    if request.so_dien_thoai:
+    # ========================================================
+    # CẬP NHẬT SỐ ĐIỆN THOẠI
+    # ========================================================
 
-        user.SoDienThoai = (
-            request.so_dien_thoai.strip()
+    if getattr(request, "SoDienThoai", None) is not None:
+        existing_phone = (
+            db.query(NguoiDung)
+            .filter(
+                NguoiDung.SoDienThoai == request.SoDienThoai,
+                NguoiDung.NguoiDungId != user_id,
+            )
+            .first()
         )
+
+        if existing_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+        user.SoDienThoai = request.SoDienThoai
+
+    # ========================================================
+    # CẬP NHẬT TRẠNG THÁI
+    # ========================================================
+
+    if getattr(request, "TrangThai", None) is not None:
+        user.TrangThai = request.TrangThai
 
     user.NgayCapNhat = utc_now()
 
-    try:
+    _commit_or_raise(db, "Cập nhật người dùng")
 
-        db.commit()
-
-        db.refresh(user)
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể cập nhật"
-        )
+    db.refresh(user)
 
     return {
-
-        "message":
-            "Cập nhật thành công"
-
+        "message": "Cập nhật người dùng thành công",
+        "user": _user_summary(user),
     }
 
 
 # ============================================================
-# KHÓA TÀI KHOẢN
+# LOCK USER
 # ============================================================
 
 def lock_user(
     db: Session,
     user_id: int,
-    ly_do_khoa: str | None = None
-):
+    request: Union[NguoiDungLock, str, None] = None,
+    ly_do_khoa: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Khóa tài khoản người dùng.
+
+    Có thể truyền lý do theo một trong hai dạng:
+    - request.LyDoKhoa
+    - ly_do_khoa
+    - request là chuỗi lý do
+    """
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.NguoiDungId
-            ==
-            user_id
-        )
+        .filter(NguoiDung.NguoiDungId == user_id)
         .first()
     )
 
     if not user:
-
         raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy người dùng"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
         )
 
     # ========================================================
-    # KHÓA VĨNH VIỄN BỞI ADMIN
+    # LẤY LÝ DO KHÓA
     # ========================================================
 
-    user.TrangThai = "BiKhoa"
+    reason = ly_do_khoa
 
-    user.KhoaDen = None
+    if isinstance(request, str):
+        reason = request
 
-    user.LyDoKhoa = (
-        ly_do_khoa.strip()
-        if ly_do_khoa
-        else "Bị khóa bởi quản trị viên"
-    )
+    elif request is not None:
+        reason = getattr(
+            request,
+            "LyDoKhoa",
+            None,
+        ) or reason
+
+    if not reason:
+        reason = "Tài khoản bị quản trị viên khóa"
 
     # ========================================================
-    # VÔ HIỆU HÓA TOÀN BỘ JWT CŨ
+    # KHÓA TÀI KHOẢN
     # ========================================================
 
     now = utc_now()
 
-    user.TokenValidAfter = now
-
+    user.TrangThai = "BiKhoa"
+    user.KhoaDen = None
+    user.LyDoKhoa = reason
     user.NgayCapNhat = now
 
-    try:
+    # Vô hiệu hóa token hiện tại
+    if hasattr(user, "TokenValidAfter"):
+        user.TokenValidAfter = now
 
-        db.commit()
+    _commit_or_raise(db, "Khóa tài khoản")
 
-        db.refresh(user)
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể khóa tài khoản"
-        )
+    db.refresh(user)
 
     return {
-
-        "message":
-            "Khóa tài khoản thành công",
-
-        "nguoiDungId":
-            user.NguoiDungId,
-
-        "trangThai":
-            user.TrangThai,
-
-        "lyDoKhoa":
-            user.LyDoKhoa
-
+        "message": "Khóa tài khoản thành công",
+        "user": _user_summary(user),
     }
 
 
 # ============================================================
-# MỞ KHÓA TÀI KHOẢN
+# UNLOCK USER
 # ============================================================
 
 def unlock_user(
     db: Session,
-    user_id: int
-):
-
-    # ========================================================
-    # TÌM USER
-    # ========================================================
+    user_id: int,
+) -> Dict[str, Any]:
+    """
+    Mở khóa tài khoản người dùng.
+    """
 
     user = (
         db.query(NguoiDung)
-        .filter(
-            NguoiDung.NguoiDungId
-            ==
-            user_id
-        )
+        .filter(NguoiDung.NguoiDungId == user_id)
         .first()
     )
 
     if not user:
-
         raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy người dùng"
-        )
-
-    # ========================================================
-    # KIỂM TRA USER ĐANG BỊ KHÓA
-    # ========================================================
-
-    if user.TrangThai != "BiKhoa":
-
-        raise HTTPException(
-            status_code=400,
-            detail="Tài khoản chưa bị khóa"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy người dùng",
         )
 
     # ========================================================
     # MỞ KHÓA
     # ========================================================
 
-    user.TrangThai = "HoatDong"
-
-    user.KhoaDen = None
-
-    user.LyDoKhoa = None
-
-    user.SoLanDangNhapSai = 0
-
-    # ========================================================
-    # THU HỒI TOKEN CŨ
-    # NGƯỜI DÙNG PHẢI ĐĂNG NHẬP LẠI
-    # ========================================================
-
     now = utc_now()
 
-    user.TokenValidAfter = now
-
+    user.TrangThai = "HoatDong"
+    user.KhoaDen = None
+    user.SoLanDangNhapSai = 0
+    user.LyDoKhoa = None
     user.NgayCapNhat = now
 
-    # ========================================================
-    # LƯU DATABASE
-    # ========================================================
+    # Vô hiệu hóa token cũ
+    if hasattr(user, "TokenValidAfter"):
+        user.TokenValidAfter = now
 
-    try:
+    _commit_or_raise(db, "Mở khóa tài khoản")
 
-        db.commit()
-
-        db.refresh(user)
-
-    except Exception:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Không thể mở khóa tài khoản"
-        )
-
-    # ========================================================
-    # RESPONSE
-    # ========================================================
+    db.refresh(user)
 
     return {
-
-        "message":
-            "Mở khóa tài khoản thành công",
-
-        "user": {
-
-            "nguoiDungId":
-                user.NguoiDungId,
-
-            "hoTen":
-                user.HoTen,
-
-            "email":
-                user.Email,
-
-            "trangThai":
-                user.TrangThai,
-
-            "ngayCapNhat":
-                user.NgayCapNhat
-
-        }
-
+        "message": "Mở khóa tài khoản thành công",
+        "user": _user_summary(user),
     }

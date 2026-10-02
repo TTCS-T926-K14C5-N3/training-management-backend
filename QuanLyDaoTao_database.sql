@@ -21,6 +21,7 @@ CREATE TABLE dbo.NguoiDung
     LyDoKhoa NVARCHAR(500) NULL,
     NgayTao DATETIME2(0) NOT NULL DEFAULT SYSDATETIME(),
     NgayCapNhat DATETIME2(0) NULL,
+    TokenValidAfter DATETIME2(0) NULL, -- Cột vừa được bổ sung
 
     CONSTRAINT PK_NguoiDung PRIMARY KEY (NguoiDungId),
     CONSTRAINT UQ_NguoiDung_Email UNIQUE (Email),
