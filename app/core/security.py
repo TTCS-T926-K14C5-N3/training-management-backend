@@ -90,17 +90,14 @@ def verify_access_token(
     db: Session,
 ) -> NguoiDung:
 
-    # --------------------------------------------------------
     # Decode JWT
-    # --------------------------------------------------------
-
     try:
         payload = decode_access_token(token)
 
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Phiên đăng nhập đã hết hạn",
+            detail="Token hết hạn",
         )
 
     except jwt.InvalidTokenError:
@@ -292,9 +289,7 @@ def verify_access_token(
     return user
 
 
-# ============================================================
 # LẤY USER HIỆN TẠI
-# ============================================================
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(
@@ -303,39 +298,26 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> NguoiDung:
 
-    # --------------------------------------------------------
     # Không có Authorization header
-    # --------------------------------------------------------
 
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Chưa đăng nhập",
-            headers={
-                "WWW-Authenticate": "Bearer"
-            },
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # --------------------------------------------------------
     # Lấy JWT từ Bearer
-    # --------------------------------------------------------
-
     token = credentials.credentials
-
-    # --------------------------------------------------------
-    # Xác thực JWT
-    # --------------------------------------------------------
-
+    
+    # Xác thực JWT--
     return verify_access_token(
         token=token,
         db=db,
     )
 
 
-# ============================================================
 # KIỂM TRA QUYỀN
-# ============================================================
-
 def require_permission(
     ma_quyen: str,
 ):
@@ -388,7 +370,7 @@ def require_permission(
                 q.QuyenId
             FROM Quyen q
 
-            INNER JOIN VaiTroQuyen vtq
+            INNER JOIN VaiTro_Quyen vtq
                 ON q.QuyenId = vtq.QuyenId
 
             INNER JOIN NguoiDung_VaiTro ndvt
