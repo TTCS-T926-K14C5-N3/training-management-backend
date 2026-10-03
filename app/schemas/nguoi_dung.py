@@ -56,3 +56,20 @@ class NguoiDungLock(BaseModel):
         default=None,
         max_length=255
     )
+    # ============================================================
+# PHẢN HỒI THÔNG TIN NGƯỜI DÙNG (CHO API /me)
+# ============================================================
+
+class NguoiDungResponse(BaseModel):
+    id: int
+    ho_ten: str
+    email: EmailStr
+    so_dien_thoai: str | None = None
+    trang_thai: str | None = None
+    
+    # 2 trường quan trọng cho task SCRUM-91
+    role: str | None = Field(default="STUDENT", description="Vai trò của người dùng (ADMIN, TRAINER, STUDENT,...)")
+    permissions: list[str] = Field(default=[], description="Danh sách quyền hạn của người dùng")
+
+    class Config:
+        from_attributes = True  # Giúp Pydantic tự chuyển đổi dữ liệu từ ORM model (SQLAlchemy)
