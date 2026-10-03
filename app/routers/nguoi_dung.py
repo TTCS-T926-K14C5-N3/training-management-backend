@@ -1,18 +1,20 @@
 from fastapi import (
     APIRouter,
     Depends,
+    HTTPException,
 )
 
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.core.security import require_permission
+from app.core.security import require_permission, get_current_user
 from app.models.nguoi_dung import NguoiDung
 
 from app.schemas.nguoi_dung import (
     NguoiDungCreate,
     NguoiDungUpdate,
     NguoiDungLock,
+    GanVaiTroRequest,
 )
 
 from app.services.auth_service import (
@@ -140,6 +142,7 @@ def lock_user_endpoint(
         request.ly_do_khoa
     )
 
+
 # ============================================================
 # MỞ KHÓA TÀI KHOẢN NGƯỜI DÙNG
 # ============================================================
@@ -160,3 +163,77 @@ def unlock_user_endpoint(
         db,
         nguoi_dung_id
     )
+
+
+# ============================================================
+# GÁN VAI TRÒ CHO NGƯỜI DÙNG
+# ============================================================
+
+@router.put(
+    "/{nguoi_dung_id}/assign-role",
+    dependencies=[
+        Depends(require_permission("USER_ASSIGN_ROLE"))
+    ],
+)
+def assign_role_to_user(
+    nguoi_dung_id: int,
+    request: GanVaiTroRequest,
+    db: Session = Depends(get_db),
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    # Ngăn quản trị viên tự thay đổi/thu hồi vai trò của chính mình
+    if current_user.NguoiDungId == nguoi_dung_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Quản trị viên không được phép tự thay đổi/thu hồi vai trò của chính mình"
+        )
+
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    user.VaiTroId = request.vai_tro_id
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Gán vai trò thành công và có hiệu lực ngay lập tức",
+        "nguoiDungId": user.NguoiDungId,
+        "vaiTroId": user.VaiTroId
+    }
+
+
+# ============================================================
+# THU HỒI VAI TRÒ KHỎI NGƯỜI DÙNG
+# ============================================================
+
+@router.delete(
+    "/{nguoi_dung_id}/revoke-role",
+    dependencies=[
+        Depends(require_permission("USER_REVOKE_ROLE"))
+    ],
+)
+def revoke_role_from_user(
+    nguoi_dung_id: int,
+    db: Session = Depends(get_db),
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    # Ngăn quản trị viên tự thu hồi vai trò quản trị của chính mình
+    if current_user.NguoiDungId == nguoi_dung_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Quản trị viên không được phép tự thu hồi vai trò quản trị của chính mình"
+        )
+
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    user.VaiTroId = None
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Thu hồi vai trò khỏi người dùng thành công và có hiệu lực ngay lập tức",
+        "nguoiDungId": user.NguoiDungId
+    }
