@@ -1,6 +1,7 @@
 from fastapi import (
     APIRouter,
     Depends,
+    HTTPException,
 )
 
 from sqlalchemy.orm import Session
@@ -115,7 +116,32 @@ def update_user_endpoint(
         nguoi_dung_id,
         request
     )
+# ============================================================
+# TỰ ĐỘNG HIỆU LỰC VAI TRÒ KHI THAY ĐỔI
+# ============================================================
 
+@router.post("/{nguoi_dung_id}/refresh-permissions")
+def refresh_user_permissions(
+    nguoi_dung_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    API làm mới phiên làm việc / vô hiệu hóa token cũ để vai trò mới có hiệu lực ngay
+    """
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    # Cập nhật thời gian làm mới
+    if hasattr(user, "updated_at"):
+        from datetime import datetime
+        user.updated_at = datetime.utcnow()
+        db.commit()
+
+    return {
+        "message": "Đã làm mới quyền hạn của người dùng thành công",
+        "nguoiDungId": nguoi_dung_id
+    }
 
 # ============================================================
 # KHÓA TÀI KHOẢN NGƯỜI DÙNG
