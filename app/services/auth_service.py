@@ -11,12 +11,13 @@ from app.models.nguoi_dung import NguoiDung
 from app.models.vai_tro import VaiTro
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 
-from app.schemas.auth_schema import (
+from app.schemas.nguoi_dung import (
     NguoiDungCreate,
-    NguoiDungLogin,
     NguoiDungUpdate,
     NguoiDungLock,
 )
+
+from app.schemas.login import LoginRequest
 
 from app.core.security import (
     create_access_token,
@@ -102,7 +103,7 @@ def register_user(
     # Kiểm tra email đã tồn tại
     existing_user = (
         db.query(NguoiDung)
-        .filter(NguoiDung.Email == request.Email)
+        .filter(NguoiDung.Email == request.email)
         .first()
     )
 
@@ -127,13 +128,13 @@ def register_user(
             )
 
     # Hash password
-    password_hash = ph.hash(request.MatKhau)
+    password_hash = ph.hash(request.password)
 
     now = utc_now()
 
     user = NguoiDung(
         HoTen=request.HoTen,
-        Email=request.Email,
+        Email=request.email,
         SoDienThoai=getattr(request, "SoDienThoai", None),
         MatKhauHash=password_hash,
         TrangThai="HoatDong",
@@ -195,7 +196,7 @@ def create_user(
     # Kiểm tra email
     existing_user = (
         db.query(NguoiDung)
-        .filter(NguoiDung.Email == request.Email)
+        .filter(NguoiDung.Email == request.email)
         .first()
     )
 
@@ -220,13 +221,13 @@ def create_user(
             )
 
     # Hash password
-    password_hash = ph.hash(request.MatKhau)
+    password_hash = ph.hash(request.password)
 
     now = utc_now()
 
     user = NguoiDung(
         HoTen=request.HoTen,
-        Email=request.Email,
+        Email=request.email,
         SoDienThoai=getattr(request, "SoDienThoai", None),
         MatKhauHash=password_hash,
         TrangThai="HoatDong",
@@ -277,7 +278,7 @@ def create_user(
 
 def login_user(
     db: Session,
-    request: NguoiDungLogin,
+    request: LoginRequest,
 ) -> Dict[str, Any]:
     """
     Đăng nhập tài khoản.
@@ -293,7 +294,7 @@ def login_user(
 
     user = (
         db.query(NguoiDung)
-        .filter(NguoiDung.Email == request.Email)
+        .filter(NguoiDung.Email == request.email)
         .first()
     )
 
@@ -363,7 +364,7 @@ def login_user(
     try:
         password_valid = ph.verify(
             user.MatKhauHash,
-            request.MatKhau,
+            request.password,
         )
 
     except (VerifyMismatchError, VerificationError):
@@ -753,7 +754,7 @@ def update_user(
         existing_email = (
             db.query(NguoiDung)
             .filter(
-                NguoiDung.Email == request.Email,
+                NguoiDung.Email == request.email,
                 NguoiDung.NguoiDungId != user_id,
             )
             .first()
@@ -765,7 +766,7 @@ def update_user(
                 detail="Email đã được sử dụng",
             )
 
-        user.Email = request.Email
+        user.Email = request.email
 
     # ========================================================
     # CẬP NHẬT HỌ TÊN
@@ -938,3 +939,6 @@ def unlock_user(
         "message": "Mở khóa tài khoản thành công",
         "user": _user_summary(user),
     }
+
+
+
