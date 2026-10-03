@@ -72,7 +72,7 @@ def get_me(
     "/",
     dependencies=[
         Depends(
-            require_permission("USER_VIEW")
+           require_permission("QUAN_LY_TAI_KHOAN")
         )
     ],
 )

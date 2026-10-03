@@ -58,7 +58,12 @@ app.include_router(
 from app.routers.nguoi_dung import (
     router as nguoi_dung_router
 )
-
+from app.routers.vai_tro import (
+    router as vai_tro_router
+)
 app.include_router(
     nguoi_dung_router
+)
+app.include_router(
+    vai_tro_router
 )

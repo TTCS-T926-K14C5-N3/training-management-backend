@@ -330,7 +330,7 @@ def require_permission(
             "/users",
             dependencies=[
                 Depends(
-                    require_permission("USER_CREATE")
+                    require_permission("QUAN_LY_TAI_KHOAN")
                 )
             ]
         )
