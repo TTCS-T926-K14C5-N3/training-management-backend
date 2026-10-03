@@ -1,6 +1,7 @@
 from fastapi import (
     APIRouter,
     Depends,
+    HTTPException,
 )
 
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from app.schemas.nguoi_dung import (
     NguoiDungCreate,
     NguoiDungUpdate,
     NguoiDungLock,
+    GanVaiTroRequest,
 )
 
 from app.services.auth_service import (
@@ -160,3 +162,35 @@ def unlock_user_endpoint(
         db,
         nguoi_dung_id
     )
+# ============================================================
+# GÁN VAI TRÒ CHO NGƯỜI DÙNG
+# ============================================================
+
+@router.put(
+    "/{nguoi_dung_id}/assign-role",
+    dependencies=[
+        Depends(require_permission("USER_ASSIGN_ROLE"))
+    ],
+)
+def assign_role_to_user(
+    nguoi_dung_id: int,
+    request: GanVaiTroRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    API gán vai trò cho người dùng theo nguoi_dung_id
+    """
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    # Cập nhật vai trò (điều chỉnh tên trường VaiTroId theo DB của dự án)
+    user.VaiTroId = request.vai_tro_id
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Gán vai trò cho người dùng thành công",
+        "nguoiDungId": user.NguoiDungId,
+        "vaiTroId": user.VaiTroId
+    }
