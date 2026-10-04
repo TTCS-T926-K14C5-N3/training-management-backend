@@ -6,13 +6,14 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.core.security import require_permission
+from app.core.security import require_permission, get_current_user
 from app.models.nguoi_dung import NguoiDung
 
 from app.schemas.nguoi_dung import (
     NguoiDungCreate,
     NguoiDungUpdate,
     NguoiDungLock,
+    NguoiDungResponse,
 )
 
 from app.services.auth_service import (
@@ -32,7 +33,37 @@ router = APIRouter(
     tags=["Users"],
 )
 
+# ============================================================
+# LẤY THÔNG TIN NGƯỜI DÙNG HIỆN TẠI (/me)
+# ============================================================
 
+@router.get(
+    "/me",
+    response_model=NguoiDungResponse,
+)
+def get_me(
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    """
+    Trả về thông tin người dùng đang đăng nhập kèm Role và Permissions
+    """
+    user_role = getattr(current_user, "vai_tro", "STUDENT")
+    
+    user_permissions = []
+    if hasattr(current_user, "get_permissions"):
+        user_permissions = current_user.get_permissions()
+    elif hasattr(current_user, "permissions"):
+        user_permissions = [p.ten_quyen for p in current_user.permissions]
+
+    return NguoiDungResponse(
+        id=current_user.NguoiDungId,
+        ho_ten=current_user.HoTen,
+        email=current_user.Email,
+        so_dien_thoai=current_user.SoDienThoai,
+        trang_thai=current_user.TrangThai,
+        role=str(user_role),
+        permissions=user_permissions,
+    )
 # ============================================================
 # XEM DANH SÁCH NGƯỜI DÙNG
 # ============================================================
@@ -41,7 +72,7 @@ router = APIRouter(
     "/",
     dependencies=[
         Depends(
-            require_permission("USER_VIEW")
+           require_permission("QUAN_LY_TAI_KHOAN")
         )
     ],
 )
