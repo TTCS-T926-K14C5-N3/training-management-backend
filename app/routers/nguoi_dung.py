@@ -217,3 +217,33 @@ def unlock_user_endpoint(
         db,
         nguoi_dung_id
     )
+# ============================================================
+# THU HỒI VAI TRÒ KHỎI NGƯỜI DÙNG
+# ============================================================
+
+@router.delete(
+    "/{nguoi_dung_id}/revoke-role",
+    dependencies=[
+        Depends(require_permission("USER_REVOKE_ROLE"))
+    ],
+)
+def revoke_role_from_user(
+    nguoi_dung_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    API thu hồi vai trò khỏi người dùng theo nguoi_dung_id
+    """
+    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    # Thu hồi vai trò bằng cách gán về None
+    user.VaiTroId = None
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Thu hồi vai trò khỏi người dùng thành công",
+        "nguoiDungId": user.NguoiDungId
+    }
