@@ -2,7 +2,7 @@ from sqlalchemy import (
     Column,
     Integer,
     DateTime,
-    ForeignKey
+    ForeignKey,
 )
 
 from app.database import Base
@@ -14,16 +14,16 @@ class NguoiDungVaiTro(Base):
     NguoiDungId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),
-        primary_key=True
+        primary_key=True,
     )
 
     VaiTroId = Column(
         Integer,
         ForeignKey("VaiTro.VaiTroId"),
-        primary_key=True
+        primary_key=True,
     )
 
     NgayGan = Column(
         DateTime,
-        nullable=False
+        nullable=False,
     )

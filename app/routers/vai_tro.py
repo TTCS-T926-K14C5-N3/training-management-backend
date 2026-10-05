@@ -27,9 +27,7 @@ router = APIRouter(
 @router.get(
     "/",
     dependencies=[
-        Depends(
-            require_permission("QUAN_LY_TAI_KHOAN")
-        )
+        Depends(require_permission("ROLE_VIEW"))
     ],
 )
 def get_roles(
@@ -37,6 +35,7 @@ def get_roles(
 ):
     roles = (
         db.query(VaiTro)
+        .filter(VaiTro.VaiTroId <= 8)
         .order_by(VaiTro.VaiTroId)
         .all()
     )
@@ -58,9 +57,7 @@ def get_roles(
 @router.get(
     "/users/{nguoi_dung_id}",
     dependencies=[
-        Depends(
-            require_permission("QUAN_LY_TAI_KHOAN")
-        )
+        Depends(require_permission("ROLE_VIEW"))
     ],
 )
 def get_user_roles(
@@ -93,7 +90,8 @@ def get_user_roles(
         )
         .filter(
             NguoiDungVaiTro.NguoiDungId
-            == nguoi_dung_id
+            == nguoi_dung_id,
+            VaiTro.VaiTroId <= 8,
         )
         .order_by(VaiTro.VaiTroId)
         .all()
@@ -117,9 +115,7 @@ def get_user_roles(
 @router.post(
     "/users/{nguoi_dung_id}/{vai_tro_id}",
     dependencies=[
-        Depends(
-            require_permission("GAN_VAI_TRO")
-        )
+        Depends(require_permission("ROLE_UPDATE"))
     ],
 )
 def assign_role(
@@ -144,7 +140,8 @@ def assign_role(
     role = (
         db.query(VaiTro)
         .filter(
-            VaiTro.VaiTroId == vai_tro_id
+            VaiTro.VaiTroId == vai_tro_id,
+            VaiTro.VaiTroId <= 8,
         )
         .first()
     )
@@ -180,7 +177,6 @@ def assign_role(
 
     db.add(user_role)
     db.commit()
-    db.refresh(user_role)
 
     return {
         "message": "Gán vai trò thành công.",
@@ -197,26 +193,20 @@ def assign_role(
 @router.delete(
     "/users/{nguoi_dung_id}/{vai_tro_id}",
     dependencies=[
-        Depends(
-            require_permission("GAN_VAI_TRO")
-        )
+        Depends(require_permission("ROLE_DELETE"))
     ],
 )
 def remove_role(
     nguoi_dung_id: int,
     vai_tro_id: int,
-    current_user: NguoiDung = Depends(
-        get_current_user
-    ),
+    current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     # --------------------------------------------------------
-    # KHÔNG CHO ADMIN TỰ THU HỒI VAI TRÒ CỦA CHÍNH MÌNH
+    # KHÔNG CHO ADMIN TỰ THU HỒI VAI TRÒ ADMIN CỦA CHÍNH MÌNH
     # --------------------------------------------------------
 
-    if (
-        current_user.NguoiDungId == nguoi_dung_id
-    ):
+    if current_user.NguoiDungId == nguoi_dung_id:
         role = (
             db.query(VaiTro)
             .filter(

@@ -12,6 +12,7 @@ from app.core.security import create_access_token, decode_access_token
 from app.models.nguoi_dung import NguoiDung
 from app.models.revoked_token import RevokedToken
 from app.models.token_mat_khau import TokenMatKhau
+from app.models.token_kich_hoat import TokenKichHoat
 from app.schemas.forgot_password import ForgotPasswordRequest
 from app.schemas.login import LoginRequest
 from app.schemas.nguoi_dung import NguoiDungCreate, NguoiDungLock
@@ -127,10 +128,18 @@ def login_user(db: Session, request: LoginRequest):
 
     if not password_correct:
         user.SoLanDangNhapSai = (user.SoLanDangNhapSai or 0) + 1
+
         if user.SoLanDangNhapSai >= 5:
             user.KhoaDen = now + timedelta(minutes=15)
-            user.TrangThai = "BiKhoa"
+            user.TrangThai = "KhoaTamThoi"
             user.LyDoKhoa = "Sai mật khẩu 5 lần liên tiếp"
+            db.commit()
+
+            raise HTTPException(
+                status_code=423,
+                detail="Tài khoản đã bị khóa tạm thời 15 phút do nhập sai mật khẩu 5 lần liên tiếp",
+            )
+
         db.commit()
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
 
@@ -158,7 +167,7 @@ def login_user(db: Session, request: LoginRequest):
         text("""
             SELECT DISTINCT q.QuyenId, q.MaQuyen, q.TenQuyen
             FROM NguoiDung_VaiTro ndvt
-            INNER JOIN VaiTro_Quyen vtq ON ndvt.VaiTroId = vtq.VaiTroId
+            INNER JOIN VaiTroQuyen vtq ON ndvt.VaiTroId = vtq.VaiTroId
             INNER JOIN Quyen q ON vtq.QuyenId = q.QuyenId
             WHERE ndvt.NguoiDungId = :nguoi_dung_id
             ORDER BY q.QuyenId
@@ -168,7 +177,11 @@ def login_user(db: Session, request: LoginRequest):
 
     return {
         "message": "Đăng nhập thành công",
-        "access_token": create_access_token({"sub": user.Email, "user_id": user_id}),
+        "access_token": create_access_token({
+            "sub": user.Email,
+            "user_id": user_id,
+            "roles": [role["TenVaiTro"] for role in roles],
+        }),
         "token_type": "bearer",
         "nguoiDungId": user.NguoiDungId,
         "hoTen": user.HoTen,
@@ -281,6 +294,109 @@ def forgot_password(db: Session, request: ForgotPasswordRequest):
         pass
     return {"message": message}
 
+def activate_account(db: Session, token: str):
+    raise HTTPException(
+        status_code=501,
+        detail="Chức năng kích hoạt tài khoản chưa được triển khai trong auth_service.py"
+    )
+
+def activate_account(db: Session, token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    activation_token = (
+        db.query(TokenKichHoat)
+        .filter(
+            TokenKichHoat.Token == token_hash,
+            TokenKichHoat.DaSuDung == False,
+        )
+        .first()
+    )
+
+    if not activation_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Token kích hoạt không hợp lệ",
+        )
+
+    now = datetime.now()
+
+    if activation_token.ThoiGianHetHan < now:
+        activation_token.DaSuDung = True
+        db.commit()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Token kích hoạt đã hết hạn",
+        )
+
+    user = (
+        db.query(NguoiDung)
+        .filter(
+            NguoiDung.NguoiDungId == activation_token.NguoiDungId
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy người dùng",
+        )
+
+    user.DaKichHoat = True
+    user.NgayCapNhat = now
+
+    activation_token.DaSuDung = True
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Không thể kích hoạt tài khoản",
+        )
+
+    return {
+        "message": "Kích hoạt tài khoản thành công",
+        "nguoiDungId": user.NguoiDungId,
+        "email": user.Email,
+        "daKichHoat": user.DaKichHoat,
+    }
+
+def validate_reset_token(db: Session, token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    reset_token = (
+        db.query(TokenMatKhau)
+        .filter(
+            TokenMatKhau.Token == token_hash,
+            TokenMatKhau.DaSuDung == False,
+        )
+        .first()
+    )
+
+    if not reset_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Token không hợp lệ",
+        )
+
+    now = datetime.now()
+
+    if reset_token.ThoiGianHetHan < now:
+        reset_token.DaSuDung = True
+        db.commit()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Token đã hết hạn",
+        )
+
+    return {
+        "message": "Token hợp lệ",
+    }
 
 def reset_password(db: Session, request: ResetPasswordRequest):
     token_hash = hashlib.sha256(request.token.encode()).hexdigest()

@@ -1,14 +1,22 @@
+from enum import Enum, IntEnum
+
 from fastapi import (
     APIRouter,
     Depends,
-    HTTPException,
+    Query,
 )
 
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.core.security import require_permission, get_current_user
+
+from app.core.security import (
+    require_permission,
+    get_current_user,
+)
+
 from app.models.nguoi_dung import NguoiDung
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 
 from app.schemas.nguoi_dung import (
     NguoiDungCreate,
@@ -25,18 +33,47 @@ from app.services.auth_service import (
 )
 
 
-# ============================================================
+# =========================================================
+# ENUM TRẠNG THÁI NGƯỜI DÙNG
+# =========================================================
+
+class TrangThaiNguoiDung(str, Enum):
+    HOAT_DONG = "HoatDong"
+    BI_KHOA = "BiKhoa"
+
+
+# =========================================================
+# ENUM ID VAI TRÒ
+#
+# Giới hạn role_id chỉ được phép từ 1 đến 8.
+# Swagger sẽ hiển thị danh sách lựa chọn.
+# =========================================================
+
+class VaiTroId(IntEnum):
+    GUEST = 1
+    STUDENT = 2
+    INSTRUCTOR = 3
+    TA = 4
+    ADMISSIONS = 5
+    ACCOUNTANT = 6
+    TRAINING_MANAGER = 7
+    ADMIN = 8
+
+
+# =========================================================
 # ROUTER
-# ============================================================
+# =========================================================
 
 router = APIRouter(
     prefix="/users",
     tags=["Users"],
 )
 
-# ============================================================
-# LẤY THÔNG TIN NGƯỜI DÙNG HIỆN TẠI (/me)
-# ============================================================
+
+# =========================================================
+# LẤY THÔNG TIN NGƯỜI DÙNG HIỆN TẠI
+# GET /users/me
+# =========================================================
 
 @router.get(
     "/me",
@@ -45,16 +82,28 @@ router = APIRouter(
 def get_me(
     current_user: NguoiDung = Depends(get_current_user),
 ):
-    """
-    Trả về thông tin người dùng đang đăng nhập kèm Role và Permissions
-    """
-    user_role = getattr(current_user, "vai_tro", "STUDENT")
-    
+    user_role = getattr(
+        current_user,
+        "vai_tro",
+        "STUDENT",
+    )
+
     user_permissions = []
-    if hasattr(current_user, "get_permissions"):
+
+    if hasattr(
+        current_user,
+        "get_permissions",
+    ):
         user_permissions = current_user.get_permissions()
-    elif hasattr(current_user, "permissions"):
-        user_permissions = [p.ten_quyen for p in current_user.permissions]
+
+    elif hasattr(
+        current_user,
+        "permissions",
+    ):
+        user_permissions = [
+            p.ten_quyen
+            for p in current_user.permissions
+        ]
 
     return NguoiDungResponse(
         id=current_user.NguoiDungId,
@@ -65,46 +114,184 @@ def get_me(
         role=str(user_role),
         permissions=user_permissions,
     )
-# ============================================================
-# XEM DANH SÁCH NGƯỜI DÙNG
-# ============================================================
+
+
+# =========================================================
+# LẤY DANH SÁCH NGƯỜI DÙNG
+#
+# GET /users/
+#
+# Hỗ trợ:
+# - Tìm kiếm theo họ tên
+# - Tìm kiếm theo email
+# - Tìm kiếm theo số điện thoại
+# - Lọc theo vai trò
+# - Lọc theo trạng thái
+# - Kết hợp các bộ lọc
+# - Phân trang
+# - Mặc định 20 người/trang
+# =========================================================
 
 @router.get(
     "/",
     dependencies=[
         Depends(
-           require_permission("QUAN_LY_TAI_KHOAN")
+            require_permission("USER_VIEW")
         )
     ],
 )
 def get_users(
+    search: str | None = Query(
+        default=None,
+        description=(
+            "Tìm kiếm theo họ tên, email "
+            "hoặc số điện thoại"
+        ),
+    ),
+
+    role_id: VaiTroId | None = Query(
+        default=None,
+        description="Lọc người dùng theo vai trò",
+    ),
+
+    status: TrangThaiNguoiDung | None = Query(
+        default=None,
+        description="Lọc theo trạng thái tài khoản",
+    ),
+
+    page: int = Query(
+        default=1,
+        ge=1,
+        description="Số trang",
+    ),
+
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Số người dùng mỗi trang",
+    ),
+
     db: Session = Depends(get_db),
 ):
+    # =====================================================
+    # QUERY CƠ BẢN
+    # =====================================================
+
+    query = db.query(NguoiDung)
+
+    # =====================================================
+    # TÌM KIẾM
+    #
+    # Họ tên / Email / Số điện thoại
+    # =====================================================
+
+    if search:
+        search_value = search.strip()
+
+        if search_value:
+            search_pattern = f"%{search_value}%"
+
+            query = query.filter(
+                (NguoiDung.HoTen.ilike(search_pattern))
+                |
+                (NguoiDung.Email.ilike(search_pattern))
+                |
+                (
+                    NguoiDung.SoDienThoai.ilike(
+                        search_pattern
+                    )
+                )
+            )
+
+    # =====================================================
+    # LỌC THEO VAI TRÒ
+    #
+    # Một người dùng có thể có nhiều vai trò.
+    # Sử dụng bảng NguoiDung_VaiTro.
+    # =====================================================
+
+    if role_id is not None:
+        query = query.filter(
+            NguoiDung.NguoiDungId.in_(
+                db.query(
+                    NguoiDungVaiTro.NguoiDungId
+                ).filter(
+                    NguoiDungVaiTro.VaiTroId == int(role_id)
+                )
+            )
+        )
+
+    # =====================================================
+    # LỌC THEO TRẠNG THÁI
+    #
+    # Chỉ cho phép:
+    # - HoatDong
+    # - BiKhoa
+    # =====================================================
+
+    if status is not None:
+        query = query.filter(
+            NguoiDung.TrangThai == status.value
+        )
+
+    # =====================================================
+    # TỔNG SỐ BẢN GHI SAU KHI LỌC
+    # =====================================================
+
+    total = query.count()
+
+    # =====================================================
+    # PHÂN TRANG
+    # =====================================================
+
+    offset = (page - 1) * limit
+
     users = (
-        db.query(NguoiDung)
+        query
         .order_by(
             NguoiDung.NguoiDungId
         )
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
-    return [
-        {
-            "nguoiDungId": user.NguoiDungId,
-            "hoTen": user.HoTen,
-            "email": user.Email,
-            "soDienThoai": user.SoDienThoai,
-            "trangThai": user.TrangThai,
-            "ngayTao": user.NgayTao,
-            "ngayCapNhat": user.NgayCapNhat,
-        }
-        for user in users
-    ]
+    # =====================================================
+    # TRẢ VỀ KẾT QUẢ
+    # =====================================================
+
+    return {
+        "data": [
+            {
+                "nguoiDungId": user.NguoiDungId,
+                "hoTen": user.HoTen,
+                "email": user.Email,
+                "soDienThoai": user.SoDienThoai,
+                "trangThai": user.TrangThai,
+                "ngayTao": user.NgayTao,
+                "ngayCapNhat": user.NgayCapNhat,
+            }
+            for user in users
+        ],
+
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "totalPages": (
+                (total + limit - 1) // limit
+                if total > 0
+                else 0
+            ),
+        },
+    }
 
 
-# ============================================================
+# =========================================================
 # TẠO NGƯỜI DÙNG
-# ============================================================
+# POST /users/
+# =========================================================
 
 @router.post(
     "/",
@@ -121,13 +308,14 @@ def create_user_endpoint(
 ):
     return create_user(
         db,
-        request
+        request,
     )
 
 
-# ============================================================
+# =========================================================
 # CẬP NHẬT NGƯỜI DÙNG
-# ============================================================
+# PUT /users/{nguoi_dung_id}
+# =========================================================
 
 @router.put(
     "/{nguoi_dung_id}",
@@ -145,38 +333,14 @@ def update_user_endpoint(
     return update_user(
         db,
         nguoi_dung_id,
-        request
+        request,
     )
-# ============================================================
-# TỰ ĐỘNG HIỆU LỰC VAI TRÒ KHI THAY ĐỔI
-# ============================================================
 
-@router.post("/{nguoi_dung_id}/refresh-permissions")
-def refresh_user_permissions(
-    nguoi_dung_id: int,
-    db: Session = Depends(get_db),
-):
-    """
-    API làm mới phiên làm việc / vô hiệu hóa token cũ để vai trò mới có hiệu lực ngay
-    """
-    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
 
-    # Cập nhật thời gian làm mới
-    if hasattr(user, "updated_at"):
-        from datetime import datetime
-        user.updated_at = datetime.utcnow()
-        db.commit()
-
-    return {
-        "message": "Đã làm mới quyền hạn của người dùng thành công",
-        "nguoiDungId": nguoi_dung_id
-    }
-
-# ============================================================
-# KHÓA TÀI KHOẢN NGƯỜI DÙNG
-# ============================================================
+# =========================================================
+# KHÓA NGƯỜI DÙNG
+# PUT /users/{nguoi_dung_id}/lock
+# =========================================================
 
 @router.put(
     "/{nguoi_dung_id}/lock",
@@ -194,12 +358,14 @@ def lock_user_endpoint(
     return lock_user(
         db,
         nguoi_dung_id,
-        request.ly_do_khoa
+        request,
     )
 
-# ============================================================
-# MỞ KHÓA TÀI KHOẢN NGƯỜI DÙNG
-# ============================================================
+
+# =========================================================
+# MỞ KHÓA NGƯỜI DÙNG
+# PUT /users/{nguoi_dung_id}/unlock
+# =========================================================
 
 @router.put(
     "/{nguoi_dung_id}/unlock",
@@ -215,35 +381,5 @@ def unlock_user_endpoint(
 ):
     return unlock_user(
         db,
-        nguoi_dung_id
+        nguoi_dung_id,
     )
-# ============================================================
-# THU HỒI VAI TRÒ KHỎI NGƯỜI DÙNG
-# ============================================================
-
-@router.delete(
-    "/{nguoi_dung_id}/revoke-role",
-    dependencies=[
-        Depends(require_permission("USER_REVOKE_ROLE"))
-    ],
-)
-def revoke_role_from_user(
-    nguoi_dung_id: int,
-    db: Session = Depends(get_db),
-):
-    """
-    API thu hồi vai trò khỏi người dùng theo nguoi_dung_id
-    """
-    user = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == nguoi_dung_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
-
-    # Thu hồi vai trò bằng cách gán về None
-    user.VaiTroId = None
-    db.commit()
-    db.refresh(user)
-
-    return {
-        "message": "Thu hồi vai trò khỏi người dùng thành công",
-        "nguoiDungId": user.NguoiDungId
-    }

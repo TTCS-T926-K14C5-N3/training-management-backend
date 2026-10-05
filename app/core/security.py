@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import jwt
 
@@ -68,6 +69,30 @@ def create_access_token(data: dict) -> str:
         algorithm=ALGORITHM,
     )
 
+# ============================================================
+# LÀM MỚI ACCESS TOKEN
+# ============================================================
+
+def refresh_access_token(
+    token: str,
+    db: Session,
+) -> str:
+
+    # Kiểm tra token hiện tại.
+    # Nếu token hết hạn / bị revoke / không hợp lệ
+    # thì hàm này sẽ trả về HTTP 401.
+    user = verify_access_token(
+        token,
+        db,
+    )
+
+    # Tạo token mới
+    new_token = create_access_token({
+        "sub": user.Email,
+        "user_id": user.NguoiDungId,
+    })
+
+    return new_token
 
 # ============================================================
 # GIẢI MÃ ACCESS TOKEN
@@ -90,7 +115,10 @@ def verify_access_token(
     db: Session,
 ) -> NguoiDung:
 
+    # --------------------------------------------------------
     # Decode JWT
+    # --------------------------------------------------------
+
     try:
         payload = decode_access_token(token)
 
@@ -123,10 +151,6 @@ def verify_access_token(
     # ========================================================
     # DEBUG - THÔNG TIN TOKEN
     # ========================================================
-    #
-    # Tạm thời dùng để kiểm tra token Swagger đang gửi.
-    # Sau khi xác định xong lỗi có thể xóa các dòng DEBUG này.
-    #
 
     print("=" * 60)
     print("KIỂM TRA ACCESS TOKEN")
@@ -208,8 +232,8 @@ def verify_access_token(
     if user.TokenValidAfter:
 
         # ----------------------------------------------------
-        # JWT "iat" sau khi decode thường là Unix timestamp
-        # nên chuyển về datetime UTC.
+        # JWT "iat" sau khi decode thường là Unix timestamp.
+        # Chuyển về datetime UTC.
         # ----------------------------------------------------
 
         token_issued_at = datetime.fromtimestamp(
@@ -217,29 +241,35 @@ def verify_access_token(
             tz=timezone.utc,
         )
 
-        valid_after = user.TokenValidAfter
-
         # ----------------------------------------------------
+        # TokenValidAfter lấy từ SQL Server.
+        #
         # SQL Server DATETIME/DATETIME2 không lưu timezone.
-        # Nếu không có timezone thì coi giá trị DB là UTC.
+        # Trong project này dữ liệu NgayCapNhat/
+        # TokenValidAfter đang được lưu theo giờ Việt Nam.
+        #
+        # Vì vậy cần gắn timezone Asia/Ho_Chi_Minh
+        # rồi chuyển sang UTC trước khi so sánh với JWT.
         # ----------------------------------------------------
+
+        valid_after = user.TokenValidAfter
 
         if valid_after.tzinfo is None:
             valid_after = valid_after.replace(
-                tzinfo=timezone.utc
-            )
+                tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")
+            ).astimezone(timezone.utc)
 
         # ----------------------------------------------------
         # JWT iat có độ chính xác đến giây.
         # SQL Server có thể lưu microsecond.
         #
-        # Vì vậy bỏ microsecond để tránh:
+        # Bỏ microsecond để tránh trường hợp:
         #
         # iat:
-        # 2026-10-01 01:20:15
+        # 2026-10-04 15:34:16
         #
         # valid_after:
-        # 2026-10-01 01:20:15.734821
+        # 2026-10-04 15:34:16.842152
         #
         # bị hiểu nhầm là token cũ.
         # ----------------------------------------------------
@@ -289,7 +319,9 @@ def verify_access_token(
     return user
 
 
+# ============================================================
 # LẤY USER HIỆN TẠI
+# ============================================================
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(
@@ -298,7 +330,9 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> NguoiDung:
 
+    # --------------------------------------------------------
     # Không có Authorization header
+    # --------------------------------------------------------
 
     if credentials is None:
         raise HTTPException(
@@ -307,17 +341,26 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # --------------------------------------------------------
     # Lấy JWT từ Bearer
+    # --------------------------------------------------------
+
     token = credentials.credentials
-    
-    # Xác thực JWT--
+
+    # --------------------------------------------------------
+    # Xác thực JWT
+    # --------------------------------------------------------
+
     return verify_access_token(
         token=token,
         db=db,
     )
 
 
+# ============================================================
 # KIỂM TRA QUYỀN
+# ============================================================
+
 def require_permission(
     ma_quyen: str,
 ):
@@ -370,7 +413,7 @@ def require_permission(
                 q.QuyenId
             FROM Quyen q
 
-            INNER JOIN VaiTro_Quyen vtq
+            INNER JOIN VaiTroQuyen vtq
                 ON q.QuyenId = vtq.QuyenId
 
             INNER JOIN NguoiDung_VaiTro ndvt
@@ -415,10 +458,9 @@ def require_permission(
             )
 
             raise HTTPException(
-              status_code=status.HTTP_403_FORBIDDEN,
-              detail="Bạn không có quyền thực hiện chức năng này.",
-            
-         )
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền thực hiện chức năng này.",
+            )
 
         # ----------------------------------------------------
         # Có quyền

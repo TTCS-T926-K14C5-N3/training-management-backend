@@ -1,3 +1,13 @@
+from app.schemas.activate_account import ActivateAccountRequest
+from app.services.auth_service import (
+    activate_account,
+)
+
+from app.core.security import (
+    verify_access_token,
+    require_permission,
+    refresh_access_token,
+)
 from fastapi import (
     APIRouter,
     Depends,
@@ -66,6 +76,26 @@ def login(
         request
     )
 
+# ============================================================
+# LÀM MỚI ACCESS TOKEN
+# ============================================================
+
+@router.post("/refresh")
+def refresh_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+):
+    token = credentials.credentials
+
+    new_token = refresh_access_token(
+        token,
+        db,
+    )
+
+    return {
+        "access_token": new_token,
+        "token_type": "bearer",
+    }
 
 # ============================================================
 # ĐĂNG XUẤT
@@ -127,7 +157,21 @@ def forgot_password_endpoint(
         request
     )
 
+# ============================================================
+# KIỂM TRA TOKEN ĐẶT LẠI MẬT KHẨU
+# ============================================================
 
+@router.get("/reset-password/validate-token")
+def validate_reset_token_endpoint(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    from app.services.auth_service import validate_reset_token
+
+    return validate_reset_token(
+        db,
+        token,
+    )
 # ============================================================
 # ĐẶT LẠI MẬT KHẨU
 # ============================================================
@@ -188,3 +232,13 @@ def test_permission():
     return {
         "message": "Bạn có quyền USER_CREATE"
     }
+
+@router.post("/activate-account")
+def activate_account_endpoint(
+    request: ActivateAccountRequest,
+    db: Session = Depends(get_db),
+):
+    return activate_account(
+        db,
+        request.token,
+    )

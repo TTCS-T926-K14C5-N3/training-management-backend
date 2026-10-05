@@ -2,7 +2,8 @@ from sqlalchemy import (
     Column,
     Integer,
     String,
-    DateTime
+    DateTime,
+    Boolean
 )
 
 from app.database import Base
@@ -41,6 +42,12 @@ class NguoiDung(Base):
     TrangThai = Column(
         String(50),
         nullable=False
+    )
+
+    DaKichHoat = Column(
+        Boolean,
+        nullable=False,
+        default=True
     )
 
     SoLanDangNhapSai = Column(
