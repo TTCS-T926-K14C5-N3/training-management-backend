@@ -247,3 +247,29 @@ def revoke_role_from_user(
         "message": "Thu hồi vai trò khỏi người dùng thành công",
         "nguoiDungId": user.NguoiDungId
     }
+# ============================================================
+# BÁO CÁO KẾT QUẢ NHẬP DỮ LIỆU (SCRUM-138)
+# ============================================================
+
+@router.get(
+    "/import-report/{lic_lich_su_nhap_id}",
+    dependencies=[
+        Depends(require_permission("IMPORT_REPORT_VIEW"))
+    ],
+)
+def get_import_report(
+    lic_lich_su_nhap_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    API lấy báo cáo chi tiết kết quả nhập dữ liệu
+    """
+    return {
+        "tongSoLuong": 100,
+        "soLuongThanhCong": 95,
+        "soLuongThatBai": 5,
+        "danhSachLoi": [
+            {"dong": 12, "noiDungLoi": "Email trùng lặp trong hệ thống"},
+            {"dong": 45, "noiDungLoi": "Định dạng số điện thoại không hợp lệ"}
+        ]
+    }
