@@ -358,13 +358,26 @@ def update_user(db: Session, user_id: int, request):
 
 def lock_user(db: Session, user_id: int, request: NguoiDungLock):
     user = _find_user(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+
+    # 1. Kiểm tra lý do khóa
+    ly_do = request.ly_do_khoa.strip() if request.ly_do_khoa else ""
+    if not ly_do:
+        raise HTTPException(status_code=400, detail="Lý do khóa tài khoản là bắt buộc")
+
+    # 2. Kiểm tra cảnh báo bàn giao (Ví dụ kiểm tra công việc/nhiệm vụ đang đảm nhận)
+    canh_bao_ban_giao = []
+    
+    # Kiểm tra xem người dùng có đang chủ trì công việc/lớp học nào chưa bàn giao hay không
+    # (Có thể query theo bảng nhiệm vụ / lớp học tương ứng trong DB của dự án)
+    if hasattr(user, "NhiemVuDangLam") and user.NhiemVuDangLam:
+        canh_bao_ban_giao.append(f"Người dùng hiện đang đảm nhận {len(user.NhiemVuDangLam)} nhiệm vụ chưa bàn giao.")
+
+    # 3. Tiến hành khóa tài khoản
     user.TrangThai = "BiKhoa"
     user.KhoaDen = None
-    user.LyDoKhoa = (
-        request.ly_do_khoa.strip()
-        if request.ly_do_khoa
-        else "Bị khóa bởi quản trị viên"
-    )
+    user.LyDoKhoa = ly_do
     user.TokenValidAfter = datetime.now()
     user.NgayCapNhat = datetime.now()
 
@@ -375,13 +388,18 @@ def lock_user(db: Session, user_id: int, request: NguoiDungLock):
         db.rollback()
         raise HTTPException(status_code=500, detail="Không thể khóa tài khoản")
 
-    return {
+    res = {
         "message": "Khóa tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "trangThai": user.TrangThai,
         "lyDoKhoa": user.LyDoKhoa,
     }
 
+    # Thêm thông tin cảnh báo bàn giao vào response nếu có
+    if canh_bao_ban_giao:
+        res["canhBaoBanGiao"] = canh_bao_ban_giao
+
+    return res
 
 def unlock_user(db: Session, user_id: int):
     user = _find_user(db, user_id)
