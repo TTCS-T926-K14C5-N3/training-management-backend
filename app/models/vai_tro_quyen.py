@@ -9,7 +9,7 @@ from app.database import Base
 
 
 class VaiTroQuyen(Base):
-    __tablename__ = "VaiTroQuyen"
+    __tablename__ = "VaiTro_Quyen"
 
     VaiTroQuyenId = Column(
         Integer,

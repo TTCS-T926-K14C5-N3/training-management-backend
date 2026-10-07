@@ -167,7 +167,7 @@ def login_user(db: Session, request: LoginRequest):
         text("""
             SELECT DISTINCT q.QuyenId, q.MaQuyen, q.TenQuyen
             FROM NguoiDung_VaiTro ndvt
-            INNER JOIN VaiTroQuyen vtq ON ndvt.VaiTroId = vtq.VaiTroId
+            INNER JOIN VaiTro_Quyen vtq ON ndvt.VaiTroId = vtq.VaiTroId
             INNER JOIN Quyen q ON vtq.QuyenId = q.QuyenId
             WHERE ndvt.NguoiDungId = :nguoi_dung_id
             ORDER BY q.QuyenId
