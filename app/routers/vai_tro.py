@@ -12,6 +12,8 @@ from app.core.security import (
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.vai_tro import VaiTro
+from app.models.vai_tro_quyen import VaiTroQuyen
+from app.models.quyen import Quyen
 
 
 router = APIRouter(
@@ -49,6 +51,57 @@ def get_roles(
         for role in roles
     ]
 
+# ============================================================
+# LẤY DANH SÁCH QUYỀN CỦA MỘT VAI TRÒ
+# ============================================================
+
+@router.get(
+    "/{vai_tro_id}/permissions",
+    dependencies=[
+        Depends(require_permission("ROLE_VIEW"))
+    ],
+)
+def get_role_permissions(
+    vai_tro_id: int,
+    db: Session = Depends(get_db),
+):
+    role = (
+        db.query(VaiTro)
+        .filter(
+            VaiTro.VaiTroId == vai_tro_id,
+            VaiTro.VaiTroId <= 8,
+        )
+        .first()
+    )
+
+    if not role:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vai trò không tồn tại.",
+        )
+
+    rows = (
+        db.query(Quyen)
+        .join(
+            VaiTroQuyen,
+            VaiTroQuyen.QuyenId == Quyen.QuyenId,
+        )
+        .filter(
+            VaiTroQuyen.VaiTroId == vai_tro_id,
+        )
+        .order_by(Quyen.QuyenId)
+        .all()
+    )
+
+    return [
+        {
+            "quyenId": permission.QuyenId,
+            "maQuyen": permission.MaQuyen,
+            "tenQuyen": permission.TenQuyen,
+            "moTa": permission.MoTa,
+        }
+        for permission in rows
+    ]
 
 # ============================================================
 # LẤY VAI TRÒ CỦA MỘT NGƯỜI DÙNG

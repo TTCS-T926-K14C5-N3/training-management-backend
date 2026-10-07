@@ -4,8 +4,12 @@ from fastapi import (
     APIRouter,
     Depends,
     Query,
+    UploadFile,
+    File,
+    HTTPException,
 )
-
+from pathlib import Path
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -18,6 +22,10 @@ from app.core.security import (
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 
+from app.schemas.admin_create_user import (
+    AdminCreateUserRequest,
+)
+
 from app.schemas.nguoi_dung import (
     NguoiDungCreate,
     NguoiDungUpdate,
@@ -26,10 +34,17 @@ from app.schemas.nguoi_dung import (
 )
 
 from app.services.auth_service import (
+    admin_create_user,
     create_user,
     update_user,
     lock_user,
     unlock_user,
+    delete_user,
+)
+
+from app.services.user_import_service import (
+    preview_user_import,
+    import_valid_users,
 )
 
 
@@ -44,9 +59,6 @@ class TrangThaiNguoiDung(str, Enum):
 
 # =========================================================
 # ENUM ID VAI TRÒ
-#
-# Giới hạn role_id chỉ được phép từ 1 đến 8.
-# Swagger sẽ hiển thị danh sách lựa chọn.
 # =========================================================
 
 class VaiTroId(IntEnum):
@@ -72,6 +84,7 @@ router = APIRouter(
 
 # =========================================================
 # LẤY THÔNG TIN NGƯỜI DÙNG HIỆN TẠI
+#
 # GET /users/me
 # =========================================================
 
@@ -122,14 +135,12 @@ def get_me(
 # GET /users/
 #
 # Hỗ trợ:
-# - Tìm kiếm theo họ tên
-# - Tìm kiếm theo email
-# - Tìm kiếm theo số điện thoại
-# - Lọc theo vai trò
-# - Lọc theo trạng thái
-# - Kết hợp các bộ lọc
+# - Tìm kiếm họ tên
+# - Tìm kiếm email
+# - Tìm kiếm số điện thoại
+# - Lọc vai trò
+# - Lọc trạng thái
 # - Phân trang
-# - Mặc định 20 người/trang
 # =========================================================
 
 @router.get(
@@ -182,8 +193,6 @@ def get_users(
 
     # =====================================================
     # TÌM KIẾM
-    #
-    # Họ tên / Email / Số điện thoại
     # =====================================================
 
     if search:
@@ -208,7 +217,6 @@ def get_users(
     # LỌC THEO VAI TRÒ
     #
     # Một người dùng có thể có nhiều vai trò.
-    # Sử dụng bảng NguoiDung_VaiTro.
     # =====================================================
 
     if role_id is not None:
@@ -217,17 +225,14 @@ def get_users(
                 db.query(
                     NguoiDungVaiTro.NguoiDungId
                 ).filter(
-                    NguoiDungVaiTro.VaiTroId == int(role_id)
+                    NguoiDungVaiTro.VaiTroId
+                    == int(role_id)
                 )
             )
         )
 
     # =====================================================
     # LỌC THEO TRẠNG THÁI
-    #
-    # Chỉ cho phép:
-    # - HoatDong
-    # - BiKhoa
     # =====================================================
 
     if status is not None:
@@ -236,7 +241,7 @@ def get_users(
         )
 
     # =====================================================
-    # TỔNG SỐ BẢN GHI SAU KHI LỌC
+    # TỔNG SỐ BẢN GHI
     # =====================================================
 
     total = query.count()
@@ -258,7 +263,7 @@ def get_users(
     )
 
     # =====================================================
-    # TRẢ VỀ KẾT QUẢ
+    # TRẢ VỀ
     # =====================================================
 
     return {
@@ -289,8 +294,239 @@ def get_users(
 
 
 # =========================================================
-# TẠO NGƯỜI DÙNG
+# =========================================================
+# IMPORT EXCEL NGƯỜI DÙNG
+# =========================================================
+# =========================================================
+
+
+# =========================================================
+# PREVIEW IMPORT EXCEL
+#
+# POST /users/import/preview
+#
+# Chức năng:
+# - Upload file Excel
+# - KHÔNG ghi dữ liệu vào database
+# - Kiểm tra từng dòng
+# - Kiểm tra họ tên
+# - Kiểm tra email
+# - Kiểm tra email trùng database
+# - Kiểm tra email trùng trong chính file
+# - Kiểm tra vai trò
+# - Xác định dòng hợp lệ / lỗi
+# =========================================================
+@router.get(
+    "/import/template",
+    dependencies=[
+        Depends(require_permission("USER_CREATE"))
+    ],
+)
+def download_user_import_template():
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "templates"
+        / "user_import_template.xlsx"
+    )
+
+    if not template_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy file Excel mẫu.",
+        )
+
+    return FileResponse(
+        path=template_path,
+        filename="user_import_template.xlsx",
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+    )
+@router.post(
+    "/import/preview",
+    dependencies=[
+        Depends(
+            require_permission("USER_CREATE")
+        )
+    ],
+)
+def preview_import_users(
+    file: UploadFile = File(
+        ...,
+        description=(
+            "File Excel (.xlsx) danh sách "
+            "người dùng cần kiểm tra"
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Preview file Excel.
+
+    Endpoint này CHỈ kiểm tra dữ liệu.
+    Không tạo tài khoản.
+    Không gửi email.
+    Không thay đổi database.
+    """
+
+    # -----------------------------------------------------
+    # Kiểm tra tên file cơ bản
+    # -----------------------------------------------------
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng chọn file Excel.",
+        )
+
+    filename = file.filename.lower()
+
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Chỉ hỗ trợ file Excel định dạng .xlsx."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Gọi service xử lý preview
+    # -----------------------------------------------------
+
+    return preview_user_import(
+        db=db,
+        file=file,
+    )
+
+
+# =========================================================
+# IMPORT EXCEL
+#
+# POST /users/import
+#
+# Chức năng:
+# - Đọc file Excel
+# - Kiểm tra từng dòng
+# - Bỏ qua dòng lỗi
+# - Chỉ tạo tài khoản hợp lệ
+# - Kiểm tra email trùng
+# - Kiểm tra vai trò
+# - Sinh mật khẩu tạm thời
+# - Hash mật khẩu
+# - Gán vai trò
+# - Bắt buộc đổi mật khẩu
+# - Gửi email mật khẩu tạm thời
+# - Trả về thống kê
+# =========================================================
+
+@router.post(
+    "/import",
+    status_code=201,
+    dependencies=[
+        Depends(
+            require_permission("USER_CREATE")
+        )
+    ],
+)
+def import_users(
+    file: UploadFile = File(
+        ...,
+        description=(
+            "File Excel (.xlsx) danh sách "
+            "người dùng cần import"
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Import người dùng từ Excel.
+
+    Dòng hợp lệ:
+        -> tạo tài khoản
+        -> gán vai trò
+        -> sinh mật khẩu tạm thời
+        -> gửi email
+
+    Dòng lỗi:
+        -> bỏ qua
+        -> không làm dừng toàn bộ quá trình
+    """
+
+    # -----------------------------------------------------
+    # Kiểm tra file
+    # -----------------------------------------------------
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng chọn file Excel.",
+        )
+
+    filename = file.filename.lower()
+
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Chỉ hỗ trợ file Excel định dạng .xlsx."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Gọi service import
+    # -----------------------------------------------------
+
+    return import_valid_users(
+        db=db,
+        file=file,
+    )
+
+
+# =========================================================
+# ADMIN TẠO TÀI KHOẢN THỦ CÔNG
+#
+# POST /users/create-account
+#
+# Admin chỉ nhập:
+# - Họ tên
+# - Email
+# - Vai trò
+#
+# Backend:
+# - Kiểm tra email
+# - Sinh mật khẩu tạm thời
+# - Hash mật khẩu
+# - Gán vai trò
+# - Bắt buộc đổi mật khẩu
+# - Gửi email
+# =========================================================
+
+@router.post(
+    "/create-account",
+    status_code=201,
+    dependencies=[
+        Depends(
+            require_permission("USER_CREATE")
+        )
+    ],
+)
+def admin_create_user_endpoint(
+    request: AdminCreateUserRequest,
+    db: Session = Depends(get_db),
+):
+    return admin_create_user(
+        db,
+        request,
+    )
+
+
+# =========================================================
+# TẠO NGƯỜI DÙNG API CŨ
+#
 # POST /users/
+#
+# Giữ nguyên để không ảnh hưởng chức năng hiện tại.
 # =========================================================
 
 @router.post(
@@ -314,6 +550,7 @@ def create_user_endpoint(
 
 # =========================================================
 # CẬP NHẬT NGƯỜI DÙNG
+#
 # PUT /users/{nguoi_dung_id}
 # =========================================================
 
@@ -339,6 +576,7 @@ def update_user_endpoint(
 
 # =========================================================
 # KHÓA NGƯỜI DÙNG
+#
 # PUT /users/{nguoi_dung_id}/lock
 # =========================================================
 
@@ -364,6 +602,7 @@ def lock_user_endpoint(
 
 # =========================================================
 # MỞ KHÓA NGƯỜI DÙNG
+#
 # PUT /users/{nguoi_dung_id}/unlock
 # =========================================================
 
@@ -380,6 +619,50 @@ def unlock_user_endpoint(
     db: Session = Depends(get_db),
 ):
     return unlock_user(
+        db,
+        nguoi_dung_id,
+    )
+
+
+# =========================================================
+# XÓA NGƯỜI DÙNG
+#
+# DELETE /users/{nguoi_dung_id}
+# =========================================================
+
+@router.delete(
+    "/{nguoi_dung_id}",
+    status_code=200,
+    dependencies=[
+        Depends(
+            require_permission("USER_DELETE")
+        )
+    ],
+)
+def delete_user_endpoint(
+    nguoi_dung_id: int,
+    current_user: NguoiDung = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+    # -----------------------------------------------------
+    # Không cho phép tự xóa tài khoản
+    # -----------------------------------------------------
+
+    if (
+        current_user.NguoiDungId
+        == nguoi_dung_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Không thể xóa tài khoản "
+                "đang đăng nhập"
+            ),
+        )
+
+    return delete_user(
         db,
         nguoi_dung_id,
     )
