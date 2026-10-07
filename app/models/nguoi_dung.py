@@ -3,7 +3,6 @@ from sqlalchemy import (
     Integer,
     String,
     DateTime,
-    Boolean
 )
 
 from app.database import Base
@@ -15,68 +14,57 @@ class NguoiDung(Base):
     NguoiDungId = Column(
         Integer,
         primary_key=True,
-        autoincrement=True
+        autoincrement=True,
     )
 
     HoTen = Column(
         String(100),
-        nullable=False
+        nullable=False,
     )
 
     Email = Column(
         String(255),
         nullable=False,
-        unique=True
+        unique=True,
     )
 
     SoDienThoai = Column(
         String(20),
-        nullable=True
+        nullable=True,
     )
 
     MatKhauHash = Column(
         String(255),
-        nullable=False
+        nullable=False,
     )
 
     TrangThai = Column(
         String(50),
-        nullable=False
-    )
-
-    DaKichHoat = Column(
-        Boolean,
         nullable=False,
-        default=True
     )
 
     SoLanDangNhapSai = Column(
         Integer,
         nullable=False,
-        default=0
+        default=0,
     )
 
     KhoaDen = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
     LyDoKhoa = Column(
         String(255),
-        nullable=True
+        nullable=True,
     )
 
     NgayTao = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
     NgayCapNhat = Column(
         DateTime,
-        nullable=True
-    )
-
-    TokenValidAfter = Column(
-        DateTime,
-        nullable=True
+        nullable=True,
     )

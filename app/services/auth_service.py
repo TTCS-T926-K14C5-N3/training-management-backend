@@ -85,7 +85,6 @@ def create_user(db: Session, request: NguoiDungCreate):
         SoLanDangNhapSai=0,
         KhoaDen=None,
         LyDoKhoa=None,
-        TokenValidAfter=None,
         NgayTao=datetime.now(),
         NgayCapNhat=datetime.now(),
     )
@@ -249,7 +248,6 @@ def update_password(
     now = datetime.now()
     user.MatKhauHash = password_hash.hash(new_password)
     user.NgayCapNhat = now
-    user.TokenValidAfter = now
 
     try:
         db.commit()
@@ -343,7 +341,6 @@ def activate_account(db: Session, token: str):
             detail="Không tìm thấy người dùng",
         )
 
-    user.DaKichHoat = True
     user.NgayCapNhat = now
 
     activation_token.DaSuDung = True
@@ -362,7 +359,7 @@ def activate_account(db: Session, token: str):
         "message": "Kích hoạt tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "email": user.Email,
-        "daKichHoat": user.DaKichHoat,
+        "daKichHoat": True,
     }
 
 def validate_reset_token(db: Session, token: str):
@@ -425,8 +422,7 @@ def reset_password(db: Session, request: ResetPasswordRequest):
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
 
-    user.MatKhauHash = password_hash.hash(request.new_password)
-    user.TokenValidAfter = now
+    user.MatKhauHash = password_hash.hash(new_password)
     user.NgayCapNhat = now
     reset_token.DaSuDung = True
 
@@ -481,7 +477,6 @@ def lock_user(db: Session, user_id: int, request: NguoiDungLock):
         if request.ly_do_khoa
         else "Bị khóa bởi quản trị viên"
     )
-    user.TokenValidAfter = datetime.now()
     user.NgayCapNhat = datetime.now()
 
     try:
@@ -508,7 +503,6 @@ def unlock_user(db: Session, user_id: int):
     user.KhoaDen = None
     user.LyDoKhoa = None
     user.SoLanDangNhapSai = 0
-    user.TokenValidAfter = datetime.now()
     user.NgayCapNhat = datetime.now()
 
     try:
