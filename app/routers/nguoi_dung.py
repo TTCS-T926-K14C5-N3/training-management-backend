@@ -247,3 +247,27 @@ def revoke_role_from_user(
         "message": "Thu hồi vai trò khỏi người dùng thành công",
         "nguoiDungId": user.NguoiDungId
     }
+# ============================================================
+# XEM HỒ SƠ CÁ NHÂN (SCRUM-147)
+# ============================================================
+
+@router.get(
+    "/me",
+    summary="Xem hồ sơ cá nhân của người dùng đang đăng nhập",
+)
+def get_my_profile(
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    """
+    API lấy thông tin chi tiết hồ sơ cá nhân của chính user đang đăng nhập
+    """
+    return {
+        "nguoiDungId": current_user.NguoiDungId,
+        "hoTen": current_user.HoTen,
+        "email": current_user.Email,
+        "soDienThoai": getattr(current_user, "SoDienThoai", None),
+        "trangThai": current_user.TrangThai,
+        "vaiTroId": getattr(current_user, "VaiTroId", None),
+        "ngayTao": getattr(current_user, "NgayTao", None),
+        "ngayCapNhat": getattr(current_user, "NgayCapNhat", None),
+    }
