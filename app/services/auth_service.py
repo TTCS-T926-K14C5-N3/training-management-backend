@@ -770,7 +770,7 @@ def login_user(
                 q.TenQuyen
             FROM NguoiDung_VaiTro ndvt
 
-                       INNER JOIN VaiTroQuyen vtq
+            INNER JOIN VaiTro_Quyen vtq
                 ON ndvt.VaiTroId = vtq.VaiTroId
             INNER JOIN Quyen q
                 ON vtq.QuyenId = q.QuyenId

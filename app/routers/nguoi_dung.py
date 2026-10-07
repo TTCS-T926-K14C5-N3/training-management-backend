@@ -10,6 +10,7 @@ from fastapi import (
 )
 from pathlib import Path
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -45,6 +46,10 @@ from app.services.auth_service import (
 from app.services.user_import_service import (
     preview_user_import,
     import_valid_users,
+)
+from app.services.avatar_service import (
+    avatar_path_for_user,
+    avatar_url_for_user,
 )
 
 
@@ -126,6 +131,38 @@ def get_me(
         trang_thai=current_user.TrangThai,
         role=str(user_role),
         permissions=user_permissions,
+        avatar_url=avatar_url_for_user(
+            current_user.NguoiDungId
+        ),
+    )
+
+
+@router.get(
+    "/{nguoi_dung_id}/avatar",
+    dependencies=[Depends(get_current_user)],
+    responses={
+        200: {
+            "content": {
+                "image/jpeg": {},
+            },
+        },
+    },
+)
+def get_user_avatar(nguoi_dung_id: int):
+    avatar_path = avatar_path_for_user(nguoi_dung_id)
+
+    if not avatar_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Người dùng chưa tải ảnh đại diện.",
+        )
+
+    return Response(
+        content=avatar_path.read_bytes(),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+        },
     )
 
 
@@ -273,6 +310,9 @@ def get_users(
                 "hoTen": user.HoTen,
                 "email": user.Email,
                 "soDienThoai": user.SoDienThoai,
+                "avatarUrl": avatar_url_for_user(
+                    user.NguoiDungId
+                ),
                 "trangThai": user.TrangThai,
                 "ngayTao": user.NgayTao,
                 "ngayCapNhat": user.NgayCapNhat,

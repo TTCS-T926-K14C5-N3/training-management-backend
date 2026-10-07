@@ -61,6 +61,7 @@ class NguoiDungResponse(BaseModel):
     email: EmailStr
     so_dien_thoai: str | None = None
     trang_thai: str | None = None
+    avatar_url: str | None = None
     
     # 2 trường quan trọng cho task SCRUM-91
     role: str | None = Field(default="STUDENT", description="Vai trò của người dùng (ADMIN, TRAINER, STUDENT,...)")

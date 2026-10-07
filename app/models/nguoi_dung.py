@@ -4,6 +4,7 @@ from sqlalchemy import (
     String,
     DateTime,
     Boolean,
+    Date,
 )
 from sqlalchemy.orm import synonym
 
@@ -38,10 +39,9 @@ class NguoiDung(Base):
         unique=True
     )
 
-    SoDienThoai = Column(
-        String(20),
-        nullable=True
-    )
+    SoDienThoai = Column(String(20), nullable=True)
+    NgaySinh = Column(Date, nullable=True)
+    DiaChi = Column(String(255), nullable=True)
 
     # =========================================================
     # MẬT KHẨU
