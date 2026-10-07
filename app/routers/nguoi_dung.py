@@ -271,3 +271,42 @@ def get_my_profile(
         "ngayTao": getattr(current_user, "NgayTao", None),
         "ngayCapNhat": getattr(current_user, "NgayCapNhat", None),
     }
+# ============================================================
+# CẬP NHẬT HỒ SƠ CÁ NHÂN (SCRUM-148)
+# ============================================================
+
+@router.put(
+    "/me",
+    summary="Cập nhật hồ sơ cá nhân của người dùng đang đăng nhập",
+)
+def update_my_profile(
+    request: CapNhatHoSoCaNhanRequest,
+    db: Session = Depends(get_db),
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    """
+    API cho phép chính user đang đăng nhập tự cập nhật thông tin cá nhân
+    """
+    if request.ho_ten is not None:
+        current_user.HoTen = request.ho_ten.strip()
+    
+    if request.so_dien_thoai is not None and hasattr(current_user, "SoDienThoai"):
+        current_user.SoDienThoai = request.so_dien_thoai.strip()
+
+    if hasattr(current_user, "NgayCapNhat"):
+        from datetime import datetime
+        current_user.NgayCapNhat = datetime.now()
+
+    try:
+        db.commit()
+        db.refresh(current_user)
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Không thể cập nhật thông tin cá nhân")
+
+    return {
+        "message": "Cập nhật hồ sơ cá nhân thành công",
+        "nguoiDungId": current_user.NguoiDungId,
+        "hoTen": current_user.HoTen,
+        "soDienThoai": getattr(current_user, "SoDienThoai", None),
+    }
