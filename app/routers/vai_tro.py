@@ -14,12 +14,28 @@ from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.vai_tro import VaiTro
 from app.models.vai_tro_quyen import VaiTroQuyen
 from app.models.quyen import Quyen
+from app.schemas.role_permissions import RolePermissionsUpdate
+from app.services.rbac_service import (
+    list_user_permissions,
+    list_permission_catalog,
+    replace_role_permissions,
+)
 
 
 router = APIRouter(
     prefix="/roles",
     tags=["Roles"],
 )
+
+
+@router.get(
+    "/permissions/catalog",
+    dependencies=[
+        Depends(require_permission("ROLE_VIEW"))
+    ],
+)
+def get_permission_catalog():
+    return list_permission_catalog()
 
 
 # ============================================================
@@ -50,6 +66,30 @@ def get_roles(
         }
         for role in roles
     ]
+
+
+@router.get(
+    "/users/{nguoi_dung_id}/permissions",
+    dependencies=[
+        Depends(require_permission("ROLE_VIEW"))
+    ],
+)
+def get_user_permissions(
+    nguoi_dung_id: int,
+    db: Session = Depends(get_db),
+):
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.NguoiDungId == nguoi_dung_id)
+        .first()
+    )
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Người dùng không tồn tại.",
+        )
+
+    return list_user_permissions(db, nguoi_dung_id)
 
 # ============================================================
 # LẤY DANH SÁCH QUYỀN CỦA MỘT VAI TRÒ
@@ -102,6 +142,38 @@ def get_role_permissions(
         }
         for permission in rows
     ]
+
+
+@router.put("/{vai_tro_id}/permissions")
+def update_role_permissions(
+    vai_tro_id: int,
+    request: RolePermissionsUpdate,
+    current_user: NguoiDung = Depends(require_permission("ROLE_UPDATE")),
+    db: Session = Depends(get_db),
+):
+    try:
+        permissions = replace_role_permissions(
+            db,
+            vai_tro_id,
+            request.permission_codes,
+        )
+    except ValueError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+    return {
+        "message": "Cập nhật quyền cho vai trò thành công.",
+        "vaiTroId": vai_tro_id,
+        "permissions": permissions,
+        "actorPermissions": list_user_permissions(
+            db,
+            current_user.NguoiDungId,
+        ),
+    }
+
 
 # ============================================================
 # LẤY VAI TRÒ CỦA MỘT NGƯỜI DÙNG

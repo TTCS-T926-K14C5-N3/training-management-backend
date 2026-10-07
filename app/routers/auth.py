@@ -62,10 +62,15 @@ def login(
     request: LoginRequest,
     db: Session = Depends(get_db)
 ):
-    return login_user(
+    response = login_user(
         db,
         request
     )
+    response["avatarUrl"] = avatar_url_for_user(
+        response["nguoiDungId"]
+    )
+
+    return response
 
 
 # ============================================================

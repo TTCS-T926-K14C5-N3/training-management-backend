@@ -2,6 +2,7 @@ from sqlalchemy import (
     Column,
     Integer,
     String,
+    Unicode,
     DateTime,
     Boolean,
     Date,
@@ -29,7 +30,7 @@ class NguoiDung(Base):
     # =========================================================
 
     HoTen = Column(
-        String(100),
+        Unicode(100),
         nullable=False
     )
 
@@ -41,7 +42,7 @@ class NguoiDung(Base):
 
     SoDienThoai = Column(String(20), nullable=True)
     NgaySinh = Column(Date, nullable=True)
-    DiaChi = Column(String(255), nullable=True)
+    DiaChi = Column(Unicode(255), nullable=True)
 
     # =========================================================
     # MẬT KHẨU

@@ -1,7 +1,7 @@
 from sqlalchemy import (
     Column,
     Integer,
-    String
+    Unicode,
 )
 
 from app.database import Base
@@ -17,11 +17,11 @@ class VaiTro(Base):
     )
 
     TenVaiTro = Column(
-        String(50),
+        Unicode(50),
         nullable=False
     )
 
     MoTa = Column(
-        String(255),
+        Unicode(255),
         nullable=True
     )

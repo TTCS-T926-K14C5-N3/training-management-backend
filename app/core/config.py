@@ -85,3 +85,8 @@ SMTP_FROM = os.getenv(
     "SMTP_FROM",
     SMTP_USERNAME
 )
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:5173"
+).rstrip("/")

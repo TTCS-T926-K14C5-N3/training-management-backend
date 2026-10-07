@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -8,6 +9,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
 from app.models.nguoi_dung import NguoiDung
 from app.models.revoked_token import RevokedToken
@@ -26,6 +28,7 @@ from app.services.email_service import (
 
 
 password_hash = PasswordHash.recommended()
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -685,8 +688,6 @@ def login_user(
                 now + timedelta(minutes=15)
             )
 
-            user.TrangThai = "KhoaTamThoi"
-
             user.LyDoKhoa = (
                 "Sai mật khẩu 5 lần liên tiếp"
             )
@@ -995,15 +996,24 @@ def forgot_password(
         db.add(reset_token)
         db.commit()
 
-    except Exception:
+    except Exception as exc:
         db.rollback()
 
-        return {
-            "message": message
-        }
+        logger.exception(
+            "Failed to save password-reset token for user_id=%s",
+            user.NguoiDungId,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Không thể tạo yêu cầu đặt lại mật khẩu lúc này. "
+                "Vui lòng thử lại sau."
+            ),
+        ) from exc
 
     reset_link = (
-        "http://localhost:5173/reset-password"
+        f"{FRONTEND_URL.rstrip('/')}/reset-password"
         f"?token={raw_token}"
     )
 
@@ -1013,8 +1023,30 @@ def forgot_password(
             reset_link=reset_link,
         )
 
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        logger.exception(
+            "Failed to send password-reset email for user_id=%s",
+            user.NguoiDungId,
+        )
+
+        try:
+            db.delete(reset_token)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Failed to remove undelivered password-reset token "
+                "for user_id=%s",
+                user.NguoiDungId,
+            )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Không thể gửi email đặt lại mật khẩu lúc này. "
+                "Vui lòng thử lại sau."
+            ),
+        ) from exc
 
     return {
         "message": message
