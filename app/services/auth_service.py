@@ -31,6 +31,10 @@ password_hash = PasswordHash.recommended()
 logger = logging.getLogger(__name__)
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 # ============================================================
 # SINH MẬT KHẨU TẠM THỜI
 # ============================================================
@@ -634,6 +638,12 @@ def login_user(
             detail="Email hoặc mật khẩu không đúng",
         )
 
+    if not getattr(user, "DaKichHoat", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Tài khoản chưa được kích hoạt",
+        )
+
     now = datetime.now()
 
     # ========================================================
@@ -927,7 +937,7 @@ def update_password(
     )
 
     user.NgayCapNhat = now
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
 
     user.BatBuocDoiMatKhau = False
     user.CanDoiMatKhau = False
@@ -1231,7 +1241,7 @@ def reset_password(
         request.new_password
     )
 
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     user.BatBuocDoiMatKhau = False
@@ -1416,7 +1426,7 @@ def lock_user(
     user.LyDoKhoa = request.ly_do_khoa.strip()
 
     now = datetime.now()
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     try:
@@ -1460,7 +1470,7 @@ def unlock_user(
     user.LyDoKhoa = None
     user.SoLanDangNhapSai = 0
     now = datetime.now()
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     try:

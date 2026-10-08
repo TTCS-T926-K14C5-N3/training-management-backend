@@ -3,6 +3,8 @@ from uuid import uuid4
 
 import jwt
 
+from logging import getLogger
+
 from fastapi import (
     Depends,
     HTTPException,
@@ -29,6 +31,7 @@ from app.models.revoked_token import RevokedToken
 SECRET_KEY = "training-management-secret-key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+logger = getLogger(__name__)
 
 
 # ============================================================
@@ -189,17 +192,6 @@ def verify_access_token(
             detail="Token không hợp lệ",
         )
 
-    # ========================================================
-    # DEBUG - THÔNG TIN TOKEN
-    # ========================================================
-
-    print("=" * 60)
-    print("KIỂM TRA ACCESS TOKEN")
-    print(f"User ID       : {user_id}")
-    print(f"JTI           : {jti}")
-    print(f"Issued At     : {issued_at}")
-    print("=" * 60)
-
     # --------------------------------------------------------
     # Kiểm tra token đã bị revoke chưa
     # --------------------------------------------------------
@@ -212,21 +204,7 @@ def verify_access_token(
         .first()
     )
 
-    # ========================================================
-    # DEBUG - KIỂM TRA REVOKED TOKEN
-    # ========================================================
-
-    print(
-        "Token có trong RevokedToken:",
-        revoked_token is not None,
-    )
-
     if revoked_token:
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: "
-            "ĐÃ CÓ TRONG RevokedToken"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Phiên đăng nhập đã bị thu hồi",
@@ -245,11 +223,6 @@ def verify_access_token(
     )
 
     if not user:
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: "
-            "NGƯỜI DÙNG KHÔNG TỒN TẠI"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Người dùng không tồn tại",
@@ -262,22 +235,24 @@ def verify_access_token(
         )
 
     if user.TokenValidAfter is not None:
-        issued_at_datetime = datetime.fromtimestamp(issued_at)
-        if issued_at_datetime <= user.TokenValidAfter:
+        token_valid_after = user.TokenValidAfter
+        if token_valid_after.tzinfo is None:
+            token_valid_after = token_valid_after.replace(
+                tzinfo=timezone.utc,
+            )
+        else:
+            token_valid_after = token_valid_after.astimezone(timezone.utc)
+
+        issued_at_datetime = datetime.fromtimestamp(
+            issued_at,
+            tz=timezone.utc,
+        )
+
+        if issued_at_datetime < token_valid_after:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Phiên đăng nhập đã bị thu hồi",
             )
-
-    # ========================================================
-    # TOKEN HỢP LỆ
-    # ========================================================
-
-    print(
-        ">>> TOKEN HỢP LỆ"
-    )
-
-    print("=" * 60)
 
     return user
 
