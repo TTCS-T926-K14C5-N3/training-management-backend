@@ -90,3 +90,13 @@ FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
     "http://localhost:5173"
 ).rstrip("/")
+
+ADMIN_CONTACT_PHONE = os.getenv(
+    "ADMIN_CONTACT_PHONE",
+    "0912345678",
+)
+
+ADMIN_CONTACT_EMAIL = os.getenv(
+    "ADMIN_CONTACT_EMAIL",
+    "lyachai2k@gmail.com",
+)

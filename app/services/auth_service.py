@@ -13,6 +13,9 @@ from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
 from app.models.nguoi_dung import NguoiDung
 from app.models.revoked_token import RevokedToken
+from app.models.diem import Diem
+from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.token_mat_khau import TokenMatKhau
 from app.models.token_kich_hoat import TokenKichHoat
 from app.schemas.forgot_password import ForgotPasswordRequest
@@ -1336,14 +1339,53 @@ def delete_user(
             detail="Không tìm thấy người dùng",
         )
 
+    has_grades = (
+        db.query(Diem.DiemId)
+        .filter(Diem.HocVienId == user_id)
+        .first()
+        is not None
+    )
+    if has_grades:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì người dùng đã có "
+                "dữ liệu điểm. Hãy khóa tài khoản để giữ lại "
+                "lịch sử đào tạo."
+            ),
+        )
+
     email = user.Email
     ho_ten = user.HoTen
 
     try:
+        # Bỏ liên kết lớp và giảng viên để không giữ khóa ngoại
+        # trỏ đến tài khoản đã xóa.
+        db.query(LopHocHocVien).filter(
+            LopHocHocVien.HocVienId == user_id
+        ).delete(synchronize_session=False)
+        db.query(LopHoc).filter(
+            LopHoc.GiangVienId == user_id
+        ).update(
+            {LopHoc.GiangVienId: None},
+            synchronize_session=False,
+        )
+
         # Xóa quan hệ người dùng - vai trò
         db.execute(
             text("""
                 DELETE FROM NguoiDung_VaiTro
+                WHERE NguoiDungId = :nguoi_dung_id
+            """),
+            {
+                "nguoi_dung_id": user_id
+            },
+        )
+
+        # Xóa phiên đăng nhập được lưu trong schema nền.
+        db.execute(
+            text("""
+                DELETE FROM PhienDangNhap
                 WHERE NguoiDungId = :nguoi_dung_id
             """),
             {

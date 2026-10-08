@@ -7,6 +7,8 @@ from app.core.config import (
     SMTP_USERNAME,
     SMTP_PASSWORD,
     SMTP_FROM,
+    ADMIN_CONTACT_PHONE,
+    ADMIN_CONTACT_EMAIL,
 )
 
 
@@ -50,6 +52,10 @@ vui lòng bỏ qua email này.
 
 Trân trọng,
 Hệ thống quản lý đào tạo
+
+Thông tin liên hệ quản trị viên:
+Số điện thoại: {ADMIN_CONTACT_PHONE}
+Email: {ADMIN_CONTACT_EMAIL}
 """
     )
 
@@ -127,6 +133,10 @@ vui lòng liên hệ quản trị viên.
 
 Trân trọng,
 Hệ thống quản lý đào tạo
+
+Thông tin liên hệ quản trị viên:
+Số điện thoại: {ADMIN_CONTACT_PHONE}
+Email: {ADMIN_CONTACT_EMAIL}
 """
     )
 
