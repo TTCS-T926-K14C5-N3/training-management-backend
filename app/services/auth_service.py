@@ -108,11 +108,10 @@ def login_user(db: Session, request: LoginRequest):
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
 
     now = datetime.now()
-    if user.TrangThai == "BiKhoa":
-        reason = f": {user.LyDoKhoa}" if user.LyDoKhoa else ""
-        raise HTTPException(status_code=423, detail=f"Tài khoản đã bị khóa{reason}")
-
     if user.KhoaDen and user.KhoaDen > now:
+        reason = f": {user.LyDoKhoa}" if user.LyDoKhoa else ""
+        if user.TrangThai == "BiKhoa":
+            raise HTTPException(status_code=423, detail=f"Tài khoản đã bị khóa{reason}")
         raise HTTPException(status_code=423, detail="Tài khoản đang bị khóa tạm thời")
 
     if user.KhoaDen and user.KhoaDen <= now:
@@ -120,6 +119,10 @@ def login_user(db: Session, request: LoginRequest):
         user.SoLanDangNhapSai = 0
         user.TrangThai = "HoatDong"
         user.LyDoKhoa = None
+
+    if user.TrangThai == "BiKhoa":
+        reason = f": {user.LyDoKhoa}" if user.LyDoKhoa else ""
+        raise HTTPException(status_code=423, detail=f"Tài khoản đã bị khóa{reason}")
 
     try:
         password_correct = password_hash.verify(request.password, user.MatKhauHash)
@@ -131,7 +134,7 @@ def login_user(db: Session, request: LoginRequest):
 
         if user.SoLanDangNhapSai >= 5:
             user.KhoaDen = now + timedelta(minutes=15)
-            user.TrangThai = "KhoaTamThoi"
+            user.TrangThai = "BiKhoa"
             user.LyDoKhoa = "Sai mật khẩu 5 lần liên tiếp"
             db.commit()
 
@@ -295,12 +298,6 @@ def forgot_password(db: Session, request: ForgotPasswordRequest):
     return {"message": message}
 
 def activate_account(db: Session, token: str):
-    raise HTTPException(
-        status_code=501,
-        detail="Chức năng kích hoạt tài khoản chưa được triển khai trong auth_service.py"
-    )
-
-def activate_account(db: Session, token: str):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
 
     activation_token = (
@@ -343,7 +340,6 @@ def activate_account(db: Session, token: str):
             detail="Không tìm thấy người dùng",
         )
 
-    user.DaKichHoat = True
     user.NgayCapNhat = now
 
     activation_token.DaSuDung = True
@@ -362,7 +358,6 @@ def activate_account(db: Session, token: str):
         "message": "Kích hoạt tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "email": user.Email,
-        "daKichHoat": user.DaKichHoat,
     }
 
 def validate_reset_token(db: Session, token: str):
