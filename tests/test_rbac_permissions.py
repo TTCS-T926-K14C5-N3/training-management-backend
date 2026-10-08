@@ -1,0 +1,128 @@
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from app.core.security import require_permission
+from app.models.vai_tro_quyen import VaiTroQuyen
+from app.services.rbac_service import (
+    DEFAULT_ROLE_PERMISSIONS,
+    PERMISSION_CATALOG,
+)
+
+
+class FakePermissionResult:
+    def __init__(self, allowed: bool):
+        self.allowed = allowed
+
+    def first(self):
+        return object() if self.allowed else None
+
+
+class FakePermissionDatabase:
+    def __init__(self, role_id: int):
+        self.role_id = role_id
+
+    def execute(self, query, parameters):
+        if "TenVaiTro" in str(query):
+            return FakePermissionResult(False)
+
+        granted_codes = set(DEFAULT_ROLE_PERMISSIONS[self.role_id])
+        return FakePermissionResult(
+            parameters["ma_quyen"] in granted_codes
+        )
+
+
+class LegacyAdminDatabase:
+    def execute(self, query, _parameters):
+        is_admin_role_query = "TenVaiTro" in str(query)
+        return FakePermissionResult(is_admin_role_query)
+
+
+@pytest.mark.parametrize(
+    ("role_id", "permission_code"),
+    [
+        (3, "GRADE_UPDATE"),
+        (6, "TUITION_UPDATE"),
+        (8, "ROLE_UPDATE"),
+    ],
+)
+def test_expected_role_permissions_are_allowed(role_id, permission_code):
+    check_permission = require_permission(permission_code)
+
+    user = SimpleNamespace(NguoiDungId=role_id)
+    result = check_permission(
+        current_user=user,
+        db=FakePermissionDatabase(role_id),
+    )
+
+    assert result is user
+
+
+@pytest.mark.parametrize(
+    ("role_id", "permission_code"),
+    [
+        (3, "TUITION_UPDATE"),
+        (6, "GRADE_UPDATE"),
+        (4, "GRADE_VIEW"),
+        (2, "USER_DELETE"),
+    ],
+)
+def test_missing_role_permissions_are_denied(role_id, permission_code):
+    check_permission = require_permission(permission_code)
+
+    with pytest.raises(HTTPException) as error:
+        check_permission(
+            current_user=SimpleNamespace(NguoiDungId=role_id),
+            db=FakePermissionDatabase(role_id),
+        )
+
+    assert error.value.status_code == 403
+    assert "Bạn không có quyền" in error.value.detail
+
+
+def test_legacy_named_admin_role_has_permissions_missing_from_old_rbac():
+    check_permission = require_permission("USER_VIEW")
+    user = SimpleNamespace(NguoiDungId=4)
+
+    result = check_permission(
+        current_user=user,
+        db=LegacyAdminDatabase(),
+    )
+
+    assert result is user
+
+
+def test_catalog_contains_all_eight_business_role_defaults():
+    codes = {code for code, _name, _description in PERMISSION_CATALOG}
+
+    assert set(DEFAULT_ROLE_PERMISSIONS) == set(range(1, 9))
+    assert "GRADE_UPDATE" in codes
+    assert "TUITION_UPDATE" in codes
+    assert "TUITION_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[3]
+    assert "GRADE_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[6]
+    assert "GRADE_VIEW" not in DEFAULT_ROLE_PERMISSIONS[4]
+    assert {
+        "GRADE_VIEW",
+        "GRADE_CREATE",
+        "GRADE_UPDATE",
+        "QUAN_LY_DIEM",
+        "CLASS_VIEW",
+    } <= set(DEFAULT_ROLE_PERMISSIONS[3])
+    assert {
+        "CLASS_VIEW",
+        "CLASS_CREATE",
+        "CLASS_UPDATE",
+        "CLASS_DELETE",
+        "QUAN_LY_LOP",
+    } <= set(DEFAULT_ROLE_PERMISSIONS[7])
+
+
+def test_role_permission_model_uses_existing_composite_primary_key():
+    primary_key_columns = {
+        column.name
+        for column in VaiTroQuyen.__table__.primary_key.columns
+    }
+
+    assert primary_key_columns == {"VaiTroId", "QuyenId"}
+    assert "VaiTroQuyenId" not in VaiTroQuyen.__table__.columns

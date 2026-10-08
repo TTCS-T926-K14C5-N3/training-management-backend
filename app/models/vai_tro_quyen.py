@@ -1,38 +1,21 @@
-from sqlalchemy import (
-    Column,
-    Integer,
-    ForeignKey,
-    UniqueConstraint
-)
+from sqlalchemy import Column, ForeignKey, Integer
 
 from app.database import Base
 
 
 class VaiTroQuyen(Base):
-    __tablename__ = "VaiTroQuyen"
-
-    VaiTroQuyenId = Column(
-        Integer,
-        primary_key=True,
-        autoincrement=True
-    )
+    __tablename__ = "VaiTro_Quyen"
 
     VaiTroId = Column(
         Integer,
         ForeignKey("VaiTro.VaiTroId"),
-        nullable=False
+        primary_key=True,
+        nullable=False,
     )
 
     QuyenId = Column(
         Integer,
         ForeignKey("Quyen.QuyenId"),
-        nullable=False
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "VaiTroId",
-            "QuyenId",
-            name="UQ_VaiTroQuyen"
-        ),
+        primary_key=True,
+        nullable=False,
     )
