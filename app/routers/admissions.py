@@ -1,0 +1,603 @@
+from datetime import date, datetime, time, timedelta
+import re
+import time as monotonic_time
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.core.security import get_current_user, require_permission
+from app.database import get_db
+from app.models.admissions import Lead, LeadAssignmentHistory
+from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
+from app.models.nguoi_dung import NguoiDung
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.schemas.admissions import (
+    LeadAssignmentsWrite,
+    LeadWrite,
+    PublicLeadCreate,
+)
+from app.services.academic_service import user_role_ids
+
+
+router = APIRouter(prefix="/admissions", tags=["Admissions"])
+
+TRAINING_MANAGER_ROLE_ID = 7
+ADMIN_ROLE_ID = 8
+ADMISSIONS_ROLE_ID = 5
+PUBLIC_LEAD_RATE_LIMIT = 5
+PUBLIC_LEAD_RATE_WINDOW_SECONDS = 60
+_public_submissions: dict[str, list[float]] = {}
+
+THANK_YOU_MESSAGE = (
+    "Cảm ơn bạn đã gửi thông tin. Bộ phận tư vấn sẽ liên hệ với bạn "
+    "trong vòng 1 ngày làm việc."
+)
+
+
+def _phone_digits(phone: str) -> str:
+    return re.sub(r"\D", "", phone)
+
+
+def _has_duplicate_phone(db: Session, phone: str, exclude_lead_id: int | None = None) -> bool:
+    normalized = _phone_digits(phone)
+    if not normalized:
+        return False
+    query = db.query(Lead)
+    if exclude_lead_id is not None:
+        query = query.filter(Lead.LeadId != exclude_lead_id)
+    return any(_phone_digits(lead.SoDienThoai) == normalized for lead in query.all())
+
+
+def _current_assignments(db: Session, lead_id: int) -> list[LeadAssignmentHistory]:
+    return (
+        db.query(LeadAssignmentHistory)
+        .filter(
+            LeadAssignmentHistory.LeadId == lead_id,
+            LeadAssignmentHistory.DangPhanCong.is_(True),
+        )
+        .order_by(
+            LeadAssignmentHistory.NgayPhanCong,
+            LeadAssignmentHistory.PhanCongId,
+        )
+        .all()
+    )
+
+
+def _lead_payload(db: Session, lead: Lead) -> dict:
+    program = db.query(ChuongTrinhDaoTao).filter(
+        ChuongTrinhDaoTao.ChuongTrinhId == lead.ChuongTrinhId
+    ).first()
+    active_assignments = _current_assignments(db, lead.LeadId)
+    return {
+        "leadId": lead.LeadId,
+        "hoTen": lead.HoTen,
+        "soDienThoai": lead.SoDienThoai,
+        "email": lead.Email,
+        "nguon": lead.Nguon,
+        "ghiChu": lead.GhiChu,
+        "chuongTrinhId": lead.ChuongTrinhId,
+        "maChuongTrinh": program.MaChuongTrinh if program else None,
+        "tenChuongTrinh": program.TenChuongTrinh if program else None,
+        "trangThai": lead.TrangThai,
+        "ngayTao": lead.NgayTao,
+        "ngayCapNhat": lead.NgayCapNhat,
+        "assignedUserIds": [row.NguoiDungId for row in active_assignments],
+        "nguoiPhuTrach": [
+            {
+                "nguoiDungId": row.NguoiDungId,
+                "hoTen": user.HoTen,
+            }
+            for row in active_assignments
+            if (user := db.query(NguoiDung).filter(
+                NguoiDung.NguoiDungId == row.NguoiDungId
+            ).first()) is not None
+        ],
+        "assignedUsers": [
+            {
+                "nguoiDungId": row.NguoiDungId,
+                "hoTen": user.HoTen,
+            }
+            for row in active_assignments
+            if (user := db.query(NguoiDung).filter(
+                NguoiDung.NguoiDungId == row.NguoiDungId
+            ).first()) is not None
+        ],
+        "lichSuBanGiao": _handoff_history_payload(db, lead.LeadId),
+        "duplicatePhone": _has_duplicate_phone(
+            db,
+            lead.SoDienThoai,
+            exclude_lead_id=lead.LeadId,
+        ),
+    }
+
+
+def _get_visible_lead(
+    db: Session,
+    lead_id: int,
+    user: NguoiDung,
+) -> Lead:
+    lead = db.query(Lead).filter(Lead.LeadId == lead_id).first()
+    if lead is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    roles = user_role_ids(db, user.NguoiDungId)
+    if roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+        return lead
+    assigned = (
+        db.query(LeadAssignmentHistory.PhanCongId)
+        .filter(
+            LeadAssignmentHistory.LeadId == lead_id,
+            LeadAssignmentHistory.NguoiDungId == user.NguoiDungId,
+            LeadAssignmentHistory.DangPhanCong.is_(True),
+        )
+        .first()
+    )
+    if ADMISSIONS_ROLE_ID not in roles or assigned is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    return lead
+
+
+def _handoff_history_payload(db: Session, lead_id: int) -> list[dict]:
+    assignments = (
+        db.query(LeadAssignmentHistory)
+        .filter(LeadAssignmentHistory.LeadId == lead_id)
+        .order_by(
+            LeadAssignmentHistory.NgayPhanCong,
+            LeadAssignmentHistory.PhanCongId,
+        )
+        .all()
+    )
+    history = []
+    for assignment in assignments:
+        sender = db.query(NguoiDung).filter(
+            NguoiDung.NguoiDungId == assignment.NguoiPhanCongId
+        ).first()
+        receiver = db.query(NguoiDung).filter(
+            NguoiDung.NguoiDungId == assignment.NguoiDungId
+        ).first()
+        history.append(
+            {
+                "nguoiBanGiao": sender.HoTen if sender else None,
+                "nguoiNhan": receiver.HoTen if receiver else None,
+                "nguoiBanGiaoId": assignment.NguoiPhanCongId,
+                "nguoiNhanId": assignment.NguoiDungId,
+                "thoiGian": assignment.NgayPhanCong,
+                "ngayBoPhanCong": assignment.NgayBoPhanCong,
+            }
+        )
+    return history
+
+
+def _get_active_program_or_422(db: Session, program_id: int) -> ChuongTrinhDaoTao:
+    program = db.query(ChuongTrinhDaoTao).filter(
+        ChuongTrinhDaoTao.ChuongTrinhId == program_id,
+        ChuongTrinhDaoTao.TrangThai == "Đang áp dụng",
+    ).first()
+    if program is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Chương trình không tồn tại hoặc đã ngừng áp dụng.",
+        )
+    return program
+
+
+def _validate_consultants(db: Session, user_ids: list[int]) -> None:
+    if not user_ids:
+        return
+    users = (
+        db.query(NguoiDung.NguoiDungId)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
+        )
+        .filter(
+            NguoiDung.NguoiDungId.in_(user_ids),
+            NguoiDungVaiTro.VaiTroId == ADMISSIONS_ROLE_ID,
+            NguoiDung.TrangThai == "HoatDong",
+        )
+        .all()
+    )
+    if {user_id for (user_id,) in users} != set(user_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Có tư vấn viên không tồn tại, chưa hoạt động hoặc không thuộc vai trò tuyển sinh.",
+        )
+
+
+def _commit(db: Session, error_detail: str) -> None:
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=error_detail,
+        ) from error
+
+
+def _create_lead(
+    db: Session,
+    *,
+    name: str,
+    phone: str,
+    email: str | None,
+    source: str,
+    note: str | None = None,
+    program_id: int,
+    status_value: str,
+    creator: NguoiDung | None,
+) -> Lead:
+    _get_active_program_or_422(db, program_id)
+    now = datetime.now()
+    lead = Lead(
+        HoTen=name.strip(),
+        SoDienThoai=phone.strip(),
+        Email=email,
+        Nguon=source.strip(),
+        GhiChu=note,
+        ChuongTrinhId=program_id,
+        TrangThai=status_value,
+        NgayTao=now,
+        NgayCapNhat=now,
+        NguoiTaoId=creator.NguoiDungId if creator else None,
+    )
+    db.add(lead)
+    db.flush()
+    if creator is not None and ADMISSIONS_ROLE_ID in user_role_ids(db, creator.NguoiDungId):
+        db.add(
+            LeadAssignmentHistory(
+                LeadId=lead.LeadId,
+                NguoiDungId=creator.NguoiDungId,
+                NguoiPhanCongId=creator.NguoiDungId,
+                NgayPhanCong=now,
+                DangPhanCong=True,
+            )
+        )
+    return lead
+
+
+@router.get("/program-options")
+def public_program_options(db: Session = Depends(get_db)):
+    programs = (
+        db.query(ChuongTrinhDaoTao)
+        .filter(ChuongTrinhDaoTao.TrangThai == "Đang áp dụng")
+        .order_by(ChuongTrinhDaoTao.TenChuongTrinh)
+        .all()
+    )
+    return [
+        {
+            "chuongTrinhId": program.ChuongTrinhId,
+            "maChuongTrinh": program.MaChuongTrinh,
+            "tenChuongTrinh": program.TenChuongTrinh,
+        }
+        for program in programs
+    ]
+
+
+@router.post(
+    "/public/leads",
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_public_lead(
+    request: PublicLeadCreate,
+    http_request: Request,
+    db: Session = Depends(get_db),
+):
+    now = monotonic_time.monotonic()
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    recent = [
+        submitted_at
+        for submitted_at in _public_submissions.get(client_ip, [])
+        if now - submitted_at < PUBLIC_LEAD_RATE_WINDOW_SECONDS
+    ]
+    if len(recent) >= PUBLIC_LEAD_RATE_LIMIT:
+        _public_submissions[client_ip] = recent
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Đã nhận quá nhiều yêu cầu. Vui lòng thử lại sau.",
+        )
+    recent.append(now)
+    _public_submissions[client_ip] = recent
+
+    # A populated honeypot receives the normal response but is never persisted.
+    if request.website:
+        return {
+            "message": THANK_YOU_MESSAGE,
+            "responseTimeAssurance": "Trong vòng 1 ngày làm việc.",
+        }
+    lead = _create_lead(
+        db,
+        name=request.ho_ten,
+        phone=request.so_dien_thoai,
+        email=request.email,
+        source=request.nguon,
+        note=None,
+        program_id=request.chuong_trinh_id,
+        status_value="Mới",
+        creator=None,
+    )
+    _commit(db, "Không thể ghi nhận yêu cầu tư vấn.")
+    return {
+        "message": THANK_YOU_MESSAGE,
+        "responseTimeAssurance": "Trong vòng 1 ngày làm việc.",
+        "duplicatePhone": _has_duplicate_phone(
+            db,
+            lead.SoDienThoai,
+            exclude_lead_id=lead.LeadId,
+        ),
+    }
+
+
+@router.get(
+    "/consultants",
+    dependencies=[Depends(require_permission("LEAD_ASSIGN"))],
+)
+def list_admissions_consultants(db: Session = Depends(get_db)):
+    users = (
+        db.query(NguoiDung)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
+        )
+        .filter(
+            NguoiDungVaiTro.VaiTroId == ADMISSIONS_ROLE_ID,
+            NguoiDung.TrangThai == "HoatDong",
+        )
+        .order_by(NguoiDung.HoTen)
+        .all()
+    )
+    return [
+        {
+            "nguoiDungId": user.NguoiDungId,
+            "hoTen": user.HoTen,
+            "email": user.Email,
+            "soDienThoai": user.SoDienThoai,
+        }
+        for user in users
+    ]
+
+
+@router.get(
+    "/leads",
+    dependencies=[Depends(require_permission("LEAD_VIEW"))],
+)
+def list_leads(
+    status_filter: str | None = Query(default=None, alias="status"),
+    source: str | None = Query(default=None),
+    assigned_user_id: int | None = Query(default=None),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    search: str | None = Query(default=None),
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    roles = user_role_ids(db, current_user.NguoiDungId)
+    query = db.query(Lead)
+    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+        if ADMISSIONS_ROLE_ID not in roles:
+            raise HTTPException(status_code=403, detail="Không có quyền xem khách hàng tiềm năng.")
+        assigned_lead_ids = (
+            db.query(LeadAssignmentHistory.LeadId)
+            .filter(
+                LeadAssignmentHistory.NguoiDungId == current_user.NguoiDungId,
+                LeadAssignmentHistory.DangPhanCong.is_(True),
+            )
+        )
+        query = query.filter(Lead.LeadId.in_(assigned_lead_ids))
+    if status_filter:
+        query = query.filter(Lead.TrangThai == status_filter)
+    if source:
+        query = query.filter(Lead.Nguon == source)
+    if assigned_user_id is not None:
+        assigned_lead_ids = (
+            db.query(LeadAssignmentHistory.LeadId)
+            .filter(
+                LeadAssignmentHistory.NguoiDungId == assigned_user_id,
+                LeadAssignmentHistory.DangPhanCong.is_(True),
+            )
+        )
+        query = query.filter(Lead.LeadId.in_(assigned_lead_ids))
+    if start_date:
+        query = query.filter(Lead.NgayTao >= datetime.combine(start_date, time.min))
+    if end_date:
+        query = query.filter(
+            Lead.NgayTao < datetime.combine(end_date + timedelta(days=1), time.min)
+        )
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                Lead.HoTen.ilike(term),
+                Lead.SoDienThoai.ilike(term),
+                Lead.Email.ilike(term),
+            )
+        )
+    return [
+        _lead_payload(db, lead)
+        for lead in query.distinct().order_by(Lead.NgayTao.desc(), Lead.LeadId.desc()).all()
+    ]
+
+
+@router.post(
+    "/leads",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("LEAD_CREATE"))],
+)
+def create_lead(
+    request: LeadWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lead = _create_lead(
+        db,
+        name=request.ho_ten,
+        phone=request.so_dien_thoai,
+        email=request.email,
+        source=request.nguon,
+        note=request.ghi_chu,
+        program_id=request.chuong_trinh_id,
+        status_value=request.trang_thai,
+        creator=current_user,
+    )
+    _commit(db, "Không thể tạo khách hàng tiềm năng.")
+    return _lead_payload(db, lead)
+
+
+@router.get(
+    "/leads/{lead_id}",
+    dependencies=[Depends(require_permission("LEAD_VIEW"))],
+)
+def get_lead(
+    lead_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _lead_payload(db, _get_visible_lead(db, lead_id, current_user))
+
+
+@router.put(
+    "/leads/{lead_id}",
+    dependencies=[Depends(require_permission("LEAD_UPDATE"))],
+)
+def update_lead(
+    lead_id: int,
+    request: LeadWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lead = _get_visible_lead(db, lead_id, current_user)
+    _get_active_program_or_422(db, request.chuong_trinh_id)
+    lead.HoTen = request.ho_ten.strip()
+    lead.SoDienThoai = request.so_dien_thoai.strip()
+    lead.Email = request.email
+    lead.Nguon = request.nguon.strip()
+    lead.GhiChu = request.ghi_chu
+    lead.ChuongTrinhId = request.chuong_trinh_id
+    lead.TrangThai = request.trang_thai
+    lead.NgayCapNhat = datetime.now()
+    _commit(db, "Không thể cập nhật khách hàng tiềm năng.")
+    return _lead_payload(db, lead)
+
+
+@router.delete(
+    "/leads/{lead_id}",
+    dependencies=[Depends(require_permission("LEAD_DELETE"))],
+)
+def delete_lead(
+    lead_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    roles = user_role_ids(db, current_user.NguoiDungId)
+    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo hoặc quản trị viên được xóa khách hàng tiềm năng.",
+        )
+    lead = db.query(Lead).filter(Lead.LeadId == lead_id).first()
+    if lead is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    db.query(LeadAssignmentHistory).filter(
+        LeadAssignmentHistory.LeadId == lead_id
+    ).delete(synchronize_session=False)
+    db.delete(lead)
+    _commit(db, "Không thể xóa khách hàng tiềm năng.")
+    return {"message": "Đã xóa khách hàng tiềm năng."}
+
+
+@router.get(
+    "/leads/{lead_id}/assignments",
+    dependencies=[Depends(require_permission("LEAD_VIEW"))],
+)
+def get_lead_assignments(
+    lead_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_visible_lead(db, lead_id, current_user)
+    assignments = (
+        db.query(LeadAssignmentHistory)
+        .filter(LeadAssignmentHistory.LeadId == lead_id)
+        .order_by(LeadAssignmentHistory.NgayPhanCong.desc())
+        .all()
+    )
+    result = []
+    for assignment in assignments:
+        consultant = db.query(NguoiDung).filter(
+            NguoiDung.NguoiDungId == assignment.NguoiDungId
+        ).first()
+        assigner = db.query(NguoiDung).filter(
+            NguoiDung.NguoiDungId == assignment.NguoiPhanCongId
+        ).first()
+        result.append({
+            "phanCongId": assignment.PhanCongId,
+            "nguoiDungId": assignment.NguoiDungId,
+            "hoTen": consultant.HoTen if consultant else None,
+            "nguoiPhanCongId": assignment.NguoiPhanCongId,
+            "nguoiPhanCong": assigner.HoTen if assigner else None,
+            "ngayPhanCong": assignment.NgayPhanCong,
+            "ngayBoPhanCong": assignment.NgayBoPhanCong,
+            "dangPhanCong": assignment.DangPhanCong,
+        })
+    return result
+
+
+@router.put(
+    "/leads/{lead_id}/assignments",
+    dependencies=[Depends(require_permission("LEAD_ASSIGN"))],
+)
+def replace_lead_assignments(
+    lead_id: int,
+    request: LeadAssignmentsWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    roles = user_role_ids(db, current_user.NguoiDungId)
+    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo hoặc quản trị viên được phân công tư vấn viên.",
+        )
+    lead = db.query(Lead).filter(Lead.LeadId == lead_id).first()
+    if lead is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    _validate_consultants(db, request.assigned_user_ids)
+    now = datetime.now()
+    current_rows = _current_assignments(db, lead_id)
+    current_ids = {row.NguoiDungId for row in current_rows}
+    desired_ids = set(request.assigned_user_ids)
+    for assignment in current_rows:
+        if assignment.NguoiDungId not in desired_ids:
+            assignment.DangPhanCong = False
+            assignment.NgayBoPhanCong = now
+    for user_id in sorted(desired_ids - current_ids):
+        db.add(
+            LeadAssignmentHistory(
+                LeadId=lead_id,
+                NguoiDungId=user_id,
+                NguoiPhanCongId=current_user.NguoiDungId,
+                NgayPhanCong=now,
+                DangPhanCong=True,
+            )
+        )
+    lead.NgayCapNhat = now
+    _commit(db, "Không thể lưu phân công tư vấn.")
+    return {
+        "leadId": lead_id,
+        "assignedUserIds": sorted(desired_ids),
+        "consultantIds": sorted(desired_ids),
+        "assignmentHistory": get_lead_assignments(lead_id, current_user, db),
+    }

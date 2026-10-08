@@ -43,6 +43,15 @@ PERMISSION_CATALOG = (
     ("CLASS_UPDATE", "Sửa lớp học", "Cập nhật lớp học."),
     ("CLASS_DELETE", "Xóa lớp học", "Xóa lớp học."),
     ("QUAN_LY_LOP", "Truy cập quản lý lớp", "Truy cập khu vực quản lý lớp."),
+    ("CURRICULUM_VIEW", "Xem danh mục đào tạo", "Xem môn học và cấu trúc chương trình."),
+    ("CURRICULUM_CREATE", "Tạo danh mục đào tạo", "Tạo môn học trong danh mục đào tạo."),
+    ("CURRICULUM_UPDATE", "Sửa danh mục đào tạo", "Sửa môn học và cấu trúc chương trình."),
+    ("CURRICULUM_DELETE", "Lưu trữ danh mục đào tạo", "Lưu trữ môn học trong danh mục đào tạo."),
+    ("LEAD_VIEW", "Xem khách hàng tiềm năng", "Xem hồ sơ tuyển sinh được phép truy cập."),
+    ("LEAD_CREATE", "Tạo khách hàng tiềm năng", "Tạo hồ sơ khách hàng tiềm năng."),
+    ("LEAD_UPDATE", "Sửa khách hàng tiềm năng", "Cập nhật hồ sơ khách hàng tiềm năng."),
+    ("LEAD_DELETE", "Xóa khách hàng tiềm năng", "Xóa hồ sơ khách hàng tiềm năng."),
+    ("LEAD_ASSIGN", "Phân công tư vấn", "Phân công khách hàng tiềm năng cho tư vấn viên."),
 )
 
 DEFAULT_ROLE_PERMISSIONS = {
@@ -56,7 +65,14 @@ DEFAULT_ROLE_PERMISSIONS = {
         "CLASS_VIEW",
     ),
     4: (),
-    5: ("USER_VIEW", "USER_CREATE", "USER_UPDATE"),
+    5: (
+        "USER_VIEW",
+        "USER_CREATE",
+        "USER_UPDATE",
+        "LEAD_VIEW",
+        "LEAD_CREATE",
+        "LEAD_UPDATE",
+    ),
     6: ("TUITION_VIEW", "TUITION_CREATE", "TUITION_UPDATE", "QUAN_LY_HOC_PHI"),
     7: (
         "USER_VIEW",
@@ -68,6 +84,15 @@ DEFAULT_ROLE_PERMISSIONS = {
         "CLASS_UPDATE",
         "CLASS_DELETE",
         "QUAN_LY_LOP",
+        "CURRICULUM_VIEW",
+        "CURRICULUM_CREATE",
+        "CURRICULUM_UPDATE",
+        "CURRICULUM_DELETE",
+        "LEAD_VIEW",
+        "LEAD_CREATE",
+        "LEAD_UPDATE",
+        "LEAD_DELETE",
+        "LEAD_ASSIGN",
     ),
     8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
 }

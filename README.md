@@ -34,6 +34,46 @@ Khởi tạo cấu trúc cơ sở dữ liệu bằng `QuanLyDaoTao_database.sql`
 các tập lệnh migration trong thư mục `migrations/` theo thứ tự số tăng dần nếu
 chúng chưa được áp dụng cho cơ sở dữ liệu.
 
+## Danh mục đào tạo và tuyển sinh
+
+Sau khi đã áp dụng các migration `002` và `003` và ứng dụng đã khởi tạo các vai
+trò hệ thống 1–8, áp dụng migration tính năng (có thể chạy lại an toàn) từ thư
+mục gốc trên Windows:
+
+```powershell
+sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_admissions.sql
+sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
+```
+
+`-E` dùng xác thực Windows. Nếu cấu hình SQL Server dùng tài khoản SQL, thay
+`-E` bằng `-U <DB_USER> -P <DB_PASSWORD>` (không ghi mật khẩu vào lịch sử lệnh
+hoặc kho mã nguồn).
+
+Các hợp đồng API chính (các trường JSON dùng camelCase):
+
+- `GET/POST /academic/subjects`, `PUT/DELETE /academic/subjects/{subject_id}`:
+  quản lý môn học gồm `maMonHoc`, `tenMonHoc`, `soBuoi`, `trongSo`,
+  `moTaChuanDauRa`, `trangThai`. `trongSo` là hệ số decimal trong khoảng
+  `[0, 1]`. `DELETE` lưu trữ thay vì xóa cứng.
+- `GET/PUT /academic/programs/{program_id}/subjects`: PUT nhận
+  `{ "subjects": [{ "monHocId": 1, "thuTu": 1, "monTienQuyetId": null }] }`.
+  GET trả về các môn theo thứ tự, kèm các `sessions`.
+- `GET/PUT /academic/programs/{program_id}/subjects/{subject_id}/sessions`:
+  PUT nhận `{ "sessions": [{ "soThuTu": 1, "chuDe": "...", "mucTieu": "..." }] }`.
+- `GET /admissions/program-options` và
+  `POST /admissions/public/leads` là endpoint công khai. Honeypot nhận trường
+  `website`; phản hồi xác nhận thời gian liên hệ trong một ngày làm việc.
+- `/admissions/leads` hỗ trợ CRUD và bộ lọc `status`, `source`,
+  `assigned_user_id`, `start_date`, `end_date`, `search`.
+  `PUT /admissions/leads/{lead_id}/assignments` nhận
+  `{ "consultantIds": [5, 6] }`; lịch sử bàn giao được trả trong `lichSuBanGiao`.
+  `GET /admissions/consultants` liệt kê tư vấn viên đang hoạt động.
+
+Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
+Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và
+`LEAD_ASSIGN` chỉ dành cho quản lý đào tạo/quản trị viên. Tư vấn viên tuyển sinh
+chỉ xem lead đang được phân công cho mình.
+
 ## Chạy API
 
 Chỉ cho phép truy cập từ máy hiện tại:

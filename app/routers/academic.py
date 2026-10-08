@@ -14,12 +14,21 @@ from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
+from app.models.program_subject import (
+    BuoiHoc,
+    ChuongTrinhMonHoc,
+    ChuongTrinhMonHocTienQuyet,
+)
 from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
     SubjectCreate,
     SubjectUpdate,
     TrainingProgramWrite,
+)
+from app.schemas.curriculum import (
+    ProgramSubjectsWrite,
+    SessionsWrite,
 )
 from app.services.academic_service import (
     INSTRUCTOR_ROLE_ID,
@@ -712,21 +721,26 @@ def delete_training_program(
 
 @router.get(
     "/subjects",
-    dependencies=[Depends(require_permission("CLASS_VIEW"))],
+    dependencies=[Depends(require_permission("CURRICULUM_VIEW"))],
 )
-def list_subjects(db: Session = Depends(get_db)):
-    subjects = (
-        db.query(MonHoc)
-        .filter(MonHoc.TrangThai == "Đang hoạt động")
-        .order_by(MonHoc.MaMonHoc)
-        .all()
-    )
+def list_subjects(
+    include_inactive: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    query = db.query(MonHoc)
+    if not include_inactive:
+        query = query.filter(MonHoc.TrangThai == "Đang hoạt động")
+    subjects = query.order_by(MonHoc.MaMonHoc).all()
     return [
         {
             "monHocId": subject.MonHocId,
             "maMonHoc": subject.MaMonHoc,
             "tenMonHoc": subject.TenMonHoc,
             "soTinChi": subject.SoTinChi,
+            "soBuoi": subject.SoBuoi,
+            "trongSo": float(subject.TrongSo),
+            "moTaChuanDauRa": subject.MoTaChuanDauRa,
+            "trangThai": subject.TrangThai,
         }
         for subject in subjects
     ]
@@ -735,7 +749,7 @@ def list_subjects(db: Session = Depends(get_db)):
 @router.post(
     "/subjects",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("CLASS_CREATE"))],
+    dependencies=[Depends(require_permission("CURRICULUM_CREATE"))],
 )
 def create_subject(
     request: SubjectCreate,
@@ -750,21 +764,19 @@ def create_subject(
         MaMonHoc=request.ma_mon_hoc.strip(),
         TenMonHoc=request.ten_mon_hoc.strip(),
         SoTinChi=request.so_tin_chi,
-        TrangThai="Đang hoạt động",
+        SoBuoi=request.so_buoi,
+        TrongSo=request.trong_so,
+        MoTaChuanDauRa=request.mo_ta_chuan_dau_ra,
+        TrangThai=request.trang_thai,
     )
     db.add(subject)
     _commit(db, "Mã môn học đã tồn tại.")
-    return {
-        "monHocId": subject.MonHocId,
-        "maMonHoc": subject.MaMonHoc,
-        "tenMonHoc": subject.TenMonHoc,
-        "soTinChi": subject.SoTinChi,
-    }
+    return _subject_payload(subject)
 
 
 @router.put(
     "/subjects/{subject_id}",
-    dependencies=[Depends(require_permission("CLASS_UPDATE"))],
+    dependencies=[Depends(require_permission("CURRICULUM_UPDATE"))],
 )
 def update_subject(
     subject_id: int,
@@ -785,18 +797,17 @@ def update_subject(
     subject.MaMonHoc = request.ma_mon_hoc.strip()
     subject.TenMonHoc = request.ten_mon_hoc.strip()
     subject.SoTinChi = request.so_tin_chi
+    subject.SoBuoi = request.so_buoi
+    subject.TrongSo = request.trong_so
+    subject.MoTaChuanDauRa = request.mo_ta_chuan_dau_ra
+    subject.TrangThai = request.trang_thai
     _commit(db, "Mã môn học đã tồn tại.")
-    return {
-        "monHocId": subject.MonHocId,
-        "maMonHoc": subject.MaMonHoc,
-        "tenMonHoc": subject.TenMonHoc,
-        "soTinChi": subject.SoTinChi,
-    }
+    return _subject_payload(subject)
 
 
 @router.delete(
     "/subjects/{subject_id}",
-    dependencies=[Depends(require_permission("CLASS_DELETE"))],
+    dependencies=[Depends(require_permission("CURRICULUM_DELETE"))],
 )
 def archive_subject(
     subject_id: int,
@@ -811,6 +822,303 @@ def archive_subject(
     subject.TrangThai = "Ngừng hoạt động"
     _commit(db, "Không thể lưu trữ môn học.")
     return {"message": "Đã lưu trữ môn học."}
+
+
+def _subject_payload(subject: MonHoc) -> dict:
+    return {
+        "monHocId": subject.MonHocId,
+        "maMonHoc": subject.MaMonHoc,
+        "tenMonHoc": subject.TenMonHoc,
+        "soTinChi": subject.SoTinChi,
+        "soBuoi": subject.SoBuoi,
+        "trongSo": float(subject.TrongSo),
+        "moTaChuanDauRa": subject.MoTaChuanDauRa,
+        "trangThai": subject.TrangThai,
+    }
+
+
+def _program_subject_row(
+    db: Session,
+    program_subject: ChuongTrinhMonHoc,
+) -> dict:
+    subject = db.query(MonHoc).filter(
+        MonHoc.MonHocId == program_subject.MonHocId
+    ).one()
+    prerequisites = (
+        db.query(ChuongTrinhMonHoc.MonHocId)
+        .join(
+            ChuongTrinhMonHocTienQuyet,
+            ChuongTrinhMonHoc.ChuongTrinhMonHocId
+            == ChuongTrinhMonHocTienQuyet.MonTienQuyetId,
+        )
+        .filter(
+            ChuongTrinhMonHocTienQuyet.ChuongTrinhMonHocId
+            == program_subject.ChuongTrinhMonHocId
+        )
+        .order_by(ChuongTrinhMonHoc.MonHocId)
+        .all()
+    )
+    sessions = (
+        db.query(BuoiHoc)
+        .filter(BuoiHoc.ChuongTrinhMonHocId == program_subject.ChuongTrinhMonHocId)
+        .order_by(BuoiHoc.SoThuTu)
+        .all()
+    )
+    return {
+        "monHocId": subject.MonHocId,
+        "maMonHoc": subject.MaMonHoc,
+        "tenMonHoc": subject.TenMonHoc,
+        "soBuoi": subject.SoBuoi,
+        "thuTu": program_subject.ThuTu,
+        "monTienQuyetId": prerequisites[0][0] if prerequisites else None,
+        "sessions": [
+            {
+                "buoiHocId": session.BuoiHocId,
+                "soThuTu": session.SoThuTu,
+                "chuDe": session.ChuDe,
+                "mucTieu": session.MucTieu,
+            }
+            for session in sessions
+        ],
+    }
+
+
+def _get_program_or_404(db: Session, program_id: int) -> ChuongTrinhDaoTao:
+    program = db.query(ChuongTrinhDaoTao).filter(
+        ChuongTrinhDaoTao.ChuongTrinhId == program_id
+    ).first()
+    if program is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy chương trình đào tạo.",
+        )
+    return program
+
+
+@router.get(
+    "/programs/{program_id}/subjects",
+    dependencies=[Depends(require_permission("CURRICULUM_VIEW"))],
+)
+def get_program_subjects(program_id: int, db: Session = Depends(get_db)):
+    _get_program_or_404(db, program_id)
+    associations = (
+        db.query(ChuongTrinhMonHoc)
+        .filter(ChuongTrinhMonHoc.ChuongTrinhId == program_id)
+        .order_by(ChuongTrinhMonHoc.ThuTu)
+        .all()
+    )
+    return [_program_subject_row(db, item) for item in associations]
+
+
+@router.put(
+    "/programs/{program_id}/subjects",
+    dependencies=[Depends(require_permission("CURRICULUM_UPDATE"))],
+)
+def replace_program_subjects(
+    program_id: int,
+    request: ProgramSubjectsWrite,
+    db: Session = Depends(get_db),
+):
+    _get_program_or_404(db, program_id)
+    rows_by_subject = {row.mon_hoc_id: row for row in request.subjects}
+    requested_subject_ids = set(rows_by_subject)
+    subject_by_id = {
+        subject.MonHocId: subject
+        for subject in db.query(MonHoc)
+        .filter(
+            MonHoc.MonHocId.in_(requested_subject_ids),
+            MonHoc.TrangThai == "Đang hoạt động",
+        )
+        .all()
+    } if requested_subject_ids else {}
+    if len(subject_by_id) != len(requested_subject_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Môn học không tồn tại hoặc đã lưu trữ.",
+        )
+    for row in request.subjects:
+        if row.mon_tien_quyet_id is not None:
+            if row.mon_tien_quyet_id == row.mon_hoc_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Môn học không thể là tiên quyết của chính nó.",
+                )
+            if row.mon_tien_quyet_id not in requested_subject_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Môn tiên quyết phải thuộc cùng chương trình.",
+                )
+
+    prerequisite_by_subject = {
+        row.mon_hoc_id: row.mon_tien_quyet_id
+        for row in request.subjects
+        if row.mon_tien_quyet_id is not None
+    }
+    for subject_id in requested_subject_ids:
+        seen = set()
+        cursor = subject_id
+        while cursor in prerequisite_by_subject:
+            cursor = prerequisite_by_subject[cursor]
+            if cursor in seen or cursor == subject_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Quan hệ môn tiên quyết không được tạo vòng lặp.",
+                )
+            seen.add(cursor)
+
+    current_rows = (
+        db.query(ChuongTrinhMonHoc)
+        .filter(ChuongTrinhMonHoc.ChuongTrinhId == program_id)
+        .all()
+    )
+    association_by_subject = {row.MonHocId: row for row in current_rows}
+    removed = set(association_by_subject) - requested_subject_ids
+    removed_ids = [
+        association_by_subject[subject_id].ChuongTrinhMonHocId
+        for subject_id in removed
+    ]
+    if removed_ids:
+        db.query(ChuongTrinhMonHocTienQuyet).filter(
+            (ChuongTrinhMonHocTienQuyet.ChuongTrinhMonHocId.in_(removed_ids))
+            | (ChuongTrinhMonHocTienQuyet.MonTienQuyetId.in_(removed_ids))
+        ).delete(synchronize_session=False)
+        db.query(BuoiHoc).filter(
+            BuoiHoc.ChuongTrinhMonHocId.in_(removed_ids)
+        ).delete(synchronize_session=False)
+        db.query(ChuongTrinhMonHoc).filter(
+            ChuongTrinhMonHoc.ChuongTrinhMonHocId.in_(removed_ids)
+        ).delete(synchronize_session=False)
+
+    # Shift existing sequence values above the current range before reordering;
+    # keep the database's positive-sequence check valid during the transaction.
+    highest_sequence = max(
+        (association.ThuTu for association in association_by_subject.values()),
+        default=0,
+    )
+    sequence_offset = highest_sequence + len(association_by_subject) + len(request.subjects) + 1
+    for association in association_by_subject.values():
+        if association.MonHocId in requested_subject_ids:
+            association.ThuTu += sequence_offset
+    db.flush()
+    for item in request.subjects:
+        association = association_by_subject.get(item.mon_hoc_id)
+        if association is None:
+            association = ChuongTrinhMonHoc(
+                ChuongTrinhId=program_id,
+                MonHocId=item.mon_hoc_id,
+                ThuTu=item.thu_tu,
+            )
+            db.add(association)
+            db.flush()
+            association_by_subject[item.mon_hoc_id] = association
+        association.ThuTu = item.thu_tu
+
+    assoc_ids = [
+        association_by_subject[subject_id].ChuongTrinhMonHocId
+        for subject_id in requested_subject_ids
+    ]
+    if assoc_ids:
+        db.query(ChuongTrinhMonHocTienQuyet).filter(
+            ChuongTrinhMonHocTienQuyet.ChuongTrinhMonHocId.in_(assoc_ids)
+        ).delete(synchronize_session=False)
+    for subject_id, prerequisite_id in prerequisite_by_subject.items():
+        db.add(
+            ChuongTrinhMonHocTienQuyet(
+                ChuongTrinhMonHocId=association_by_subject[
+                    subject_id
+                ].ChuongTrinhMonHocId,
+                MonTienQuyetId=association_by_subject[
+                    prerequisite_id
+                ].ChuongTrinhMonHocId,
+            )
+        )
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể lưu thứ tự hoặc môn học của chương trình.",
+        ) from error
+    return get_program_subjects(program_id, db)
+
+
+def _program_subject_or_404(
+    db: Session,
+    program_id: int,
+    subject_id: int,
+) -> ChuongTrinhMonHoc:
+    association = (
+        db.query(ChuongTrinhMonHoc)
+        .filter(
+            ChuongTrinhMonHoc.ChuongTrinhId == program_id,
+            ChuongTrinhMonHoc.MonHocId == subject_id,
+        )
+        .first()
+    )
+    if association is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Môn học chưa được gắn với chương trình này.",
+        )
+    return association
+
+
+@router.get(
+    "/programs/{program_id}/subjects/{subject_id}/sessions",
+    dependencies=[Depends(require_permission("CURRICULUM_VIEW"))],
+)
+def get_program_subject_sessions(
+    program_id: int,
+    subject_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_program_or_404(db, program_id)
+    association = _program_subject_or_404(db, program_id, subject_id)
+    return _program_subject_row(db, association)
+
+
+@router.put(
+    "/programs/{program_id}/subjects/{subject_id}/sessions",
+    dependencies=[Depends(require_permission("CURRICULUM_UPDATE"))],
+)
+def replace_program_subject_sessions(
+    program_id: int,
+    subject_id: int,
+    request: SessionsWrite,
+    db: Session = Depends(get_db),
+):
+    _get_program_or_404(db, program_id)
+    association = _program_subject_or_404(db, program_id, subject_id)
+    subject = db.query(MonHoc).filter(MonHoc.MonHocId == subject_id).one()
+    if len(request.sessions) > subject.SoBuoi:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Môn học chỉ được có tối đa {subject.SoBuoi} buổi.",
+        )
+    db.query(BuoiHoc).filter(
+        BuoiHoc.ChuongTrinhMonHocId == association.ChuongTrinhMonHocId
+    ).delete(synchronize_session=False)
+    db.add_all(
+        [
+            BuoiHoc(
+                ChuongTrinhMonHocId=association.ChuongTrinhMonHocId,
+                SoThuTu=item.so_thu_tu,
+                ChuDe=item.chu_de,
+                MucTieu=item.muc_tieu,
+            )
+            for item in request.sessions
+        ]
+    )
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể lưu danh sách buổi học.",
+        ) from error
+    return _program_subject_row(db, association)
 
 
 @router.get(

@@ -44,6 +44,38 @@ class SubjectCreate(BaseModel):
     ma_mon_hoc: str = Field(alias="maMonHoc", min_length=1, max_length=30)
     ten_mon_hoc: str = Field(alias="tenMonHoc", min_length=1, max_length=150)
     so_tin_chi: int | None = Field(default=None, alias="soTinChi", ge=1, le=30)
+    so_buoi: int = Field(default=1, alias="soBuoi", ge=1)
+    trong_so: Decimal = Field(
+        default=Decimal("1"),
+        alias="trongSo",
+        ge=0,
+        le=1,
+        max_digits=5,
+        decimal_places=2,
+    )
+    mo_ta_chuan_dau_ra: str | None = Field(
+        default=None,
+        alias="moTaChuanDauRa",
+        max_length=1000,
+    )
+    trang_thai: str = Field(default="Đang hoạt động", alias="trangThai")
+
+    @field_validator("ma_mon_hoc", "ten_mon_hoc", mode="before")
+    @classmethod
+    def strip_subject_text(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("mo_ta_chuan_dau_ra", mode="before")
+    @classmethod
+    def normalize_subject_description(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("trang_thai")
+    @classmethod
+    def validate_subject_status(cls, value: str) -> str:
+        if value not in {"Đang hoạt động", "Ngừng hoạt động"}:
+            raise ValueError("Trạng thái môn học không hợp lệ.")
+        return value
 
 
 class SubjectUpdate(SubjectCreate):

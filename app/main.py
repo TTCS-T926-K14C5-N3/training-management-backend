@@ -23,6 +23,9 @@ from app.routers.nguoi_dung import (
 from app.routers.academic import (
     router as academic_router
 )
+from app.routers.admissions import (
+    router as admissions_router
+)
 
 
 app = FastAPI(
@@ -79,4 +82,8 @@ app.include_router(
 
 app.include_router(
     academic_router
+)
+
+app.include_router(
+    admissions_router
 )
