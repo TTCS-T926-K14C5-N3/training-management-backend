@@ -7,14 +7,23 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user, require_permission
 from app.database import get_db
 from app.models.diem import Diem
+from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
-from app.schemas.academic import ClassWrite, GradeWrite, SubjectCreate, SubjectUpdate
+from app.schemas.academic import (
+    ClassWrite,
+    GradeWrite,
+    SubjectCreate,
+    SubjectUpdate,
+    TrainingProgramWrite,
+)
 from app.services.academic_service import (
+    INSTRUCTOR_ROLE_ID,
+    STUDENT_ROLE_ID,
     accessible_classes,
     accessible_grades_query,
     can_access_class,
@@ -63,6 +72,13 @@ def _ensure_class_scope(db: Session, user: NguoiDung, lop_hoc: LopHoc) -> None:
 
 
 def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
+    program = (
+        db.query(ChuongTrinhDaoTao)
+        .filter(ChuongTrinhDaoTao.ChuongTrinhId == lop_hoc.ChuongTrinhId)
+        .first()
+        if lop_hoc.ChuongTrinhId is not None
+        else None
+    )
     teacher = (
         db.query(NguoiDung)
         .filter(NguoiDung.NguoiDungId == lop_hoc.GiangVienId)
@@ -95,8 +111,12 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
         "maLop": lop_hoc.MaLop,
         "tenLop": lop_hoc.TenLop,
         "namHoc": lop_hoc.NamHoc,
+        "chuongTrinhId": lop_hoc.ChuongTrinhId,
+        "maChuongTrinh": program.MaChuongTrinh if program else None,
+        "tenChuongTrinh": program.TenChuongTrinh if program else None,
         "giangVienId": lop_hoc.GiangVienId,
         "giangVienTen": teacher.HoTen if teacher else None,
+        "canBanGiao": teacher is not None and teacher.TrangThai == "BiKhoa",
         "trangThai": lop_hoc.TrangThai,
         "hocVienIds": [student.NguoiDungId for student in students],
         "hocViens": [
@@ -170,6 +190,28 @@ def _apply_class_write(
             detail="Mã lớp và tên lớp không được để trống.",
         )
     ensure_valid_academic_year(request.nam_hoc)
+    program = None
+    if request.chuong_trinh_id is not None:
+        program = (
+            db.query(ChuongTrinhDaoTao)
+            .filter(
+                ChuongTrinhDaoTao.ChuongTrinhId == request.chuong_trinh_id
+            )
+            .first()
+        )
+        if program is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Chương trình đào tạo không tồn tại.",
+            )
+        if (
+            program.TrangThai != "Đang áp dụng"
+            and request.chuong_trinh_id != lop_hoc.ChuongTrinhId
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Chỉ được mở lớp bằng chương trình đang áp dụng.",
+            )
     student_ids = set(request.hoc_vien_ids)
     if len(student_ids) != len(request.hoc_vien_ids):
         raise HTTPException(
@@ -238,6 +280,7 @@ def _apply_class_write(
     lop_hoc.MaLop = request.ma_lop.strip()
     lop_hoc.TenLop = request.ten_lop.strip()
     lop_hoc.NamHoc = request.nam_hoc
+    lop_hoc.ChuongTrinhId = request.chuong_trinh_id
     lop_hoc.GiangVienId = request.giang_vien_id
 
     for student_id in current_students - student_ids:
@@ -352,7 +395,7 @@ def get_class_options(db: Session = Depends(get_db)):
             NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
         )
         .filter(
-            NguoiDungVaiTro.VaiTroId == 3,
+            NguoiDungVaiTro.VaiTroId == INSTRUCTOR_ROLE_ID,
             NguoiDung.TrangThai == "HoatDong",
         )
         .order_by(NguoiDung.HoTen)
@@ -365,7 +408,7 @@ def get_class_options(db: Session = Depends(get_db)):
             NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
         )
         .filter(
-            NguoiDungVaiTro.VaiTroId == 2,
+            NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID,
             NguoiDung.TrangThai == "HoatDong",
         )
         .order_by(NguoiDung.HoTen)
@@ -419,13 +462,30 @@ def create_class(
         MaLop=request.ma_lop.strip(),
         TenLop=request.ten_lop.strip(),
         NamHoc=request.nam_hoc,
+        ChuongTrinhId=request.chuong_trinh_id,
         TrangThai="Đang hoạt động",
         NgayTao=datetime.now(),
     )
+    if request.chuong_trinh_id is not None:
+        program = (
+            db.query(ChuongTrinhDaoTao)
+            .filter(
+                ChuongTrinhDaoTao.ChuongTrinhId == request.chuong_trinh_id
+            )
+            .first()
+        )
+        if program is None or program.TrangThai != "Đang áp dụng":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Chỉ được mở lớp bằng chương trình đang áp dụng.",
+            )
+        lop_hoc.TenLop = program.TenChuongTrinh
     db.add(lop_hoc)
     try:
         db.flush()
         _apply_class_write(db, lop_hoc, request)
+        if request.chuong_trinh_id is not None:
+            lop_hoc.TenLop = program.TenChuongTrinh
     except IntegrityError as error:
         db.rollback()
         raise HTTPException(
@@ -491,6 +551,163 @@ def archive_class(
     lop_hoc.TrangThai = "Ngừng hoạt động"
     _commit(db, "Không thể lưu trữ lớp học.")
     return {"message": "Đã lưu trữ lớp học."}
+
+
+def _training_program_payload(
+    db: Session,
+    program: ChuongTrinhDaoTao,
+) -> dict:
+    return {
+        "chuongTrinhId": program.ChuongTrinhId,
+        "maChuongTrinh": program.MaChuongTrinh,
+        "tenChuongTrinh": program.TenChuongTrinh,
+        "moTa": program.MoTa,
+        "tongThoiLuong": program.TongThoiLuong,
+        "hocPhiChuan": float(program.HocPhiChuan),
+        "trangThai": program.TrangThai,
+        "ngayTao": program.NgayTao,
+        "ngayCapNhat": program.NgayCapNhat,
+        "soLop": (
+            db.query(LopHoc)
+            .filter(LopHoc.ChuongTrinhId == program.ChuongTrinhId)
+            .count()
+        ),
+    }
+
+
+@router.get(
+    "/programs",
+    dependencies=[Depends(require_permission("CLASS_VIEW"))],
+)
+def list_training_programs(
+    include_inactive: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ChuongTrinhDaoTao)
+    if not include_inactive:
+        query = query.filter(
+            ChuongTrinhDaoTao.TrangThai == "Đang áp dụng"
+        )
+    return [
+        _training_program_payload(db, program)
+        for program in query.order_by(ChuongTrinhDaoTao.MaChuongTrinh).all()
+    ]
+
+
+@router.post(
+    "/programs",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("CLASS_CREATE"))],
+)
+def create_training_program(
+    request: TrainingProgramWrite,
+    db: Session = Depends(get_db),
+):
+    program = ChuongTrinhDaoTao(
+        MaChuongTrinh=request.ma_chuong_trinh,
+        TenChuongTrinh=request.ten_chuong_trinh,
+        MoTa=request.mo_ta,
+        TongThoiLuong=request.tong_thoi_luong,
+        HocPhiChuan=request.hoc_phi_chuan,
+        TrangThai=request.trang_thai,
+        NgayTao=datetime.now(),
+    )
+    db.add(program)
+    try:
+        db.commit()
+        db.refresh(program)
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Mã chương trình đã tồn tại.",
+        ) from error
+    return _training_program_payload(db, program)
+
+
+@router.put(
+    "/programs/{program_id}",
+    dependencies=[Depends(require_permission("CLASS_UPDATE"))],
+)
+def update_training_program(
+    program_id: int,
+    request: TrainingProgramWrite,
+    db: Session = Depends(get_db),
+):
+    program = (
+        db.query(ChuongTrinhDaoTao)
+        .filter(ChuongTrinhDaoTao.ChuongTrinhId == program_id)
+        .first()
+    )
+    if program is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy chương trình đào tạo.",
+        )
+
+    program.MaChuongTrinh = request.ma_chuong_trinh
+    program.TenChuongTrinh = request.ten_chuong_trinh
+    program.MoTa = request.mo_ta
+    program.TongThoiLuong = request.tong_thoi_luong
+    program.HocPhiChuan = request.hoc_phi_chuan
+    program.TrangThai = request.trang_thai
+    program.NgayCapNhat = datetime.now()
+    try:
+        db.commit()
+        db.refresh(program)
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Mã chương trình đã tồn tại.",
+        ) from error
+    return _training_program_payload(db, program)
+
+
+@router.delete(
+    "/programs/{program_id}",
+    dependencies=[Depends(require_permission("CLASS_DELETE"))],
+)
+def delete_training_program(
+    program_id: int,
+    db: Session = Depends(get_db),
+):
+    program = (
+        db.query(ChuongTrinhDaoTao)
+        .filter(ChuongTrinhDaoTao.ChuongTrinhId == program_id)
+        .first()
+    )
+    if program is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy chương trình đào tạo.",
+        )
+    if (
+        db.query(LopHoc.LopHocId)
+        .filter(LopHoc.ChuongTrinhId == program_id)
+        .first()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Chương trình đã được gắn với lớp học nên không thể xóa. "
+                "Hãy ngừng áp dụng chương trình để giữ lịch sử lớp."
+            ),
+        )
+    db.delete(program)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Chương trình đã được gắn với lớp học nên không thể xóa. "
+                "Hãy ngừng áp dụng chương trình để giữ lịch sử lớp."
+            ),
+        ) from error
+    return {"message": "Đã xóa chương trình đào tạo."}
 
 
 @router.get(

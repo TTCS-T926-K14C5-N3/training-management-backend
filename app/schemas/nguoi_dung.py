@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 # ============================================================
@@ -47,11 +47,21 @@ class NguoiDungUpdate(BaseModel):
 # ============================================================
 
 class NguoiDungLock(BaseModel):
-    ly_do_khoa: str | None = Field(
-        default=None,
-        max_length=255
+    model_config = ConfigDict(populate_by_name=True)
+
+    ly_do_khoa: str = Field(
+        alias="lyDoKhoa",
+        min_length=1,
+        max_length=255,
     )
-    # ============================================================
+
+    @field_validator("ly_do_khoa", mode="before")
+    @classmethod
+    def strip_lock_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+
+# ============================================================
 # PHẢN HỒI THÔNG TIN NGƯỜI DÙNG (CHO API /me)
 # ============================================================
 

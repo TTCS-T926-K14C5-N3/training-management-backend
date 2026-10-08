@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.models.diem import Diem
+from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
@@ -16,16 +17,26 @@ from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
 from app.models.vai_tro import VaiTro
 from app.routers.academic import (
+    _class_payload,
     archive_class,
     create_class,
     create_grade,
     create_subject,
+    create_training_program,
+    delete_training_program,
     delete_grade,
+    get_class_options,
     list_grades,
     update_class,
     update_grade,
+    update_training_program,
 )
-from app.schemas.academic import ClassWrite, GradeWrite, SubjectCreate
+from app.schemas.academic import (
+    ClassWrite,
+    GradeWrite,
+    SubjectCreate,
+    TrainingProgramWrite,
+)
 from app.services.academic_service import (
     accessible_classes,
     ensure_valid_academic_year,
@@ -228,6 +239,175 @@ def test_class_update_and_archive_keep_class_history(db: Session):
     assert archived.TrangThai == "Ngừng hoạt động"
 
 
+def test_classes_with_locked_instructors_are_flagged_for_handover(db: Session):
+    teacher, _student, _second_student, _subject, record = setup_academic_class(db)
+    teacher.TrangThai = "BiKhoa"
+    db.commit()
+
+    lop_hoc = db.query(LopHoc).filter(
+        LopHoc.LopHocId == record["lopHocId"]
+    ).one()
+
+    assert _class_payload(db, lop_hoc)["canBanGiao"] is True
+
+
+def test_class_options_list_active_users_by_assigned_role(db: Session):
+    teacher = add_user(db, 50, 3, "Giảng viên đang hoạt động")
+    student = add_user(db, 51, 2, "Học viên đang hoạt động")
+    locked_teacher = add_user(db, 52, 3, "Giảng viên đã khóa")
+    locked_teacher.TrangThai = "BiKhoa"
+    create_subject(
+        SubjectCreate(
+            maMonHoc="OPTIONS-01",
+            tenMonHoc="Môn học đang hoạt động",
+            soTinChi=3,
+        ),
+        db,
+    )
+    inactive_subject = create_subject(
+        SubjectCreate(
+            maMonHoc="OPTIONS-02",
+            tenMonHoc="Môn học sẽ ngừng",
+            soTinChi=2,
+        ),
+        db,
+    )
+    db.query(MonHoc).filter(
+        MonHoc.MonHocId == inactive_subject["monHocId"]
+    ).one().TrangThai = "Ngừng hoạt động"
+    db.commit()
+
+    options = get_class_options(db=db)
+
+    assert [item["nguoiDungId"] for item in options["giangViens"]] == [
+        teacher.NguoiDungId
+    ]
+    assert [item["nguoiDungId"] for item in options["hocViens"]] == [
+        student.NguoiDungId
+    ]
+    assert [item["tenMonHoc"] for item in options["monHocs"]] == [
+        "Môn học đang hoạt động"
+    ]
+
+
+def test_training_program_code_must_be_unique(db: Session):
+    request = TrainingProgramWrite(
+        maChuongTrinh="PROG-01",
+        tenChuongTrinh="Chương trình kiểm thử",
+        tongThoiLuong=120,
+        hocPhiChuan=1500000,
+    )
+    create_training_program(request, db)
+
+    with pytest.raises(HTTPException) as error:
+        create_training_program(request, db)
+
+    assert error.value.status_code == 409
+    assert db.query(ChuongTrinhDaoTao).count() == 1
+
+
+def test_class_uses_program_and_linked_program_cannot_be_deleted(db: Session):
+    program = create_training_program(
+        TrainingProgramWrite(
+            maChuongTrinh="PROG-02",
+            tenChuongTrinh="Lập trình Python",
+            moTa="Chương trình nền tảng",
+            tongThoiLuong=80,
+            hocPhiChuan=2500000,
+        ),
+        db,
+    )
+
+    result = create_class(
+        ClassWrite(
+            maLop="PY-2026",
+            tenLop="Tên gửi từ client",
+            namHoc="2026-2027",
+            chuongTrinhId=program["chuongTrinhId"],
+            giangVienId=None,
+            hocVienIds=[],
+            monHocIds=[],
+        ),
+        db,
+    )
+
+    assert result["tenLop"] == "Lập trình Python"
+    assert result["chuongTrinhId"] == program["chuongTrinhId"]
+    with pytest.raises(HTTPException) as error:
+        delete_training_program(program["chuongTrinhId"], db)
+    assert error.value.status_code == 409
+
+
+def test_program_with_active_class_can_be_discontinued_but_not_deleted(
+    db: Session,
+):
+    program = create_training_program(
+        TrainingProgramWrite(
+            maChuongTrinh="PROG-04",
+            tenChuongTrinh="Chương trình đang chạy",
+            tongThoiLuong=40,
+            hocPhiChuan=900000,
+        ),
+        db,
+    )
+    create_class(
+        ClassWrite(
+            maLop="RUNNING-01",
+            tenLop="Tên lớp",
+            namHoc="2026-2027",
+            chuongTrinhId=program["chuongTrinhId"],
+            hocVienIds=[],
+            monHocIds=[],
+        ),
+        db,
+    )
+    stopped_program = update_training_program(
+        program["chuongTrinhId"],
+        TrainingProgramWrite(
+            maChuongTrinh="PROG-04",
+            tenChuongTrinh="Chương trình đang chạy",
+            tongThoiLuong=40,
+            hocPhiChuan=900000,
+            trangThai="Ngừng áp dụng",
+        ),
+        db,
+    )
+
+    assert stopped_program["trangThai"] == "Ngừng áp dụng"
+    assert stopped_program["soLop"] == 1
+    with pytest.raises(HTTPException) as error:
+        delete_training_program(program["chuongTrinhId"], db)
+    assert error.value.status_code == 409
+
+
+def test_stopped_program_cannot_be_used_to_open_new_class(db: Session):
+    program = ChuongTrinhDaoTao(
+        MaChuongTrinh="PROG-03",
+        TenChuongTrinh="Chương trình ngừng",
+        TongThoiLuong=60,
+        HocPhiChuan=0,
+        TrangThai="Ngừng áp dụng",
+        NgayTao=datetime.now(),
+    )
+    db.add(program)
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        create_class(
+            ClassWrite(
+                maLop="STOPPED-01",
+                tenLop="Không được tạo",
+                namHoc="2026-2027",
+                chuongTrinhId=program.ChuongTrinhId,
+                hocVienIds=[],
+                monHocIds=[],
+            ),
+            db,
+        )
+    assert error.value.status_code == 422
+    assert db.query(LopHoc).count() == 0
+
+
 def test_grade_update_and_delete_are_supported(db: Session):
     teacher, student, _second_student, subject, lop_hoc = setup_academic_class(db)
     request = GradeWrite(
@@ -370,5 +550,7 @@ def test_academic_routes_are_registered_in_the_fastapi_app():
     paths = set(app.openapi()["paths"])
 
     assert "/academic/classes" in paths
+    assert "/academic/programs" in paths
+    assert "/academic/programs/{program_id}" in paths
     assert "/academic/grades" in paths
     assert "/academic/subjects" in paths

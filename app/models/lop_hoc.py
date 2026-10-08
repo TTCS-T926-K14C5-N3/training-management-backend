@@ -8,8 +8,13 @@ class LopHoc(Base):
 
     LopHocId = Column(Integer, primary_key=True, autoincrement=True)
     MaLop = Column(Unicode(30), nullable=False, unique=True)
-    TenLop = Column(Unicode(100), nullable=False)
+    TenLop = Column(Unicode(150), nullable=False)
     NamHoc = Column(Unicode(9), nullable=False)
+    ChuongTrinhId = Column(
+        Integer,
+        ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),
+        nullable=True,
+    )
     GiangVienId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),

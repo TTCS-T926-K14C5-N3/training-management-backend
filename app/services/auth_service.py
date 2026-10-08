@@ -1413,14 +1413,11 @@ def lock_user(
     user.TrangThai = "BiKhoa"
     user.KhoaDen = None
 
-    user.LyDoKhoa = (
-        request.ly_do_khoa.strip()
-        if request.ly_do_khoa
-        else "Bị khóa bởi quản trị viên"
-    )
+    user.LyDoKhoa = request.ly_do_khoa.strip()
 
-    user.TokenValidAfter = datetime.now()
-    user.NgayCapNhat = datetime.now()
+    now = datetime.now()
+    user.TokenValidAfter = now
+    user.NgayCapNhat = now
 
     try:
         db.commit()
@@ -1462,8 +1459,9 @@ def unlock_user(
     user.KhoaDen = None
     user.LyDoKhoa = None
     user.SoLanDangNhapSai = 0
-    user.TokenValidAfter = datetime.now()
-    user.NgayCapNhat = datetime.now()
+    now = datetime.now()
+    user.TokenValidAfter = now
+    user.NgayCapNhat = now
 
     try:
         db.commit()

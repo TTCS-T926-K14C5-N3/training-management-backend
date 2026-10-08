@@ -729,6 +729,7 @@ def import_valid_users(
             "validRows": 0,
             "invalidRows": len(invalid_rows),
             "createdRows": 0,
+            "failedRows": 0,
             "createdUsers": [],
             "invalidData": invalid_rows,
             "failedData": [],

@@ -29,12 +29,16 @@ control navigation and are not an authorization boundary.
 The academic API uses the SQL Server schema in
 `migrations/002_academic_management.sql`. Start the backend once so RBAC
 initializes its roles and permission catalog, run that migration against the
-configured database, then restart the backend.
+configured database, then run `migrations/003_training_programs.sql` and
+`migrations/004_seed_training_catalog.sql` in order before restarting the
+backend. The last migration inserts starter IT programs and subjects only when
+their codes do not already exist; it can be rerun without replacing existing
+catalog entries.
 
-The migration creates subjects, classes, class/student and class/subject
-assignments, and term-based grades. Class and subject removal is archival;
-grades are retained. A student can only read their own grades, instructors can
-read and edit grades for classes assigned to them, and training managers and
-system administrators have the broader view granted to their roles. All API
-handlers enforce server-side permissions, and the service additionally applies
-these record-level scopes.
+The academic migrations create subject and program catalogs, classes,
+class/student and class/subject assignments, and term-based grades. Class and
+subject removal is archival; grades are retained. A student can only read
+their own grades, instructors can read and edit grades for classes assigned
+to them, and training managers and system administrators have the broader view
+granted to their roles. All API handlers enforce server-side permissions, and
+the service additionally applies these record-level scopes.

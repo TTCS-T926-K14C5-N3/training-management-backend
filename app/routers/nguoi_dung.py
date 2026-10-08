@@ -22,6 +22,7 @@ from app.core.security import (
 
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.vai_tro import VaiTro
 
 from app.schemas.admin_create_user import (
     AdminCreateUserRequest,
@@ -299,6 +300,31 @@ def get_users(
         .all()
     )
 
+    role_rows = (
+        db.query(
+            NguoiDungVaiTro.NguoiDungId,
+            VaiTro.TenVaiTro,
+        )
+        .join(
+            VaiTro,
+            VaiTro.VaiTroId == NguoiDungVaiTro.VaiTroId,
+        )
+        .filter(
+            NguoiDungVaiTro.NguoiDungId.in_(
+                [user.NguoiDungId for user in users]
+            )
+        )
+        .order_by(
+            NguoiDungVaiTro.NguoiDungId,
+            NguoiDungVaiTro.VaiTroId,
+        )
+        .all()
+    ) if users else []
+
+    roles_by_user: dict[int, list[str]] = {}
+    for user_id, role_name in role_rows:
+        roles_by_user.setdefault(user_id, []).append(role_name)
+
     # =====================================================
     # TRẢ VỀ
     # =====================================================
@@ -314,6 +340,9 @@ def get_users(
                     user.NguoiDungId
                 ),
                 "trangThai": user.TrangThai,
+                "vaiTro": ", ".join(
+                    roles_by_user.get(user.NguoiDungId, [])
+                ),
                 "ngayTao": user.NgayTao,
                 "ngayCapNhat": user.NgayCapNhat,
             }

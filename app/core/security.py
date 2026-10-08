@@ -63,7 +63,7 @@ def create_access_token(data: dict) -> str:
     payload.update(
         {
             # Thời điểm token được tạo
-            "iat": now,
+            "iat": now.timestamp(),
 
             # Thời điểm token hết hạn
             "exp": now
@@ -254,6 +254,20 @@ def verify_access_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Người dùng không tồn tại",
         )
+
+    if user.TrangThai == "BiKhoa":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tài khoản đã bị khóa; phiên đăng nhập đã bị thu hồi",
+        )
+
+    if user.TokenValidAfter is not None:
+        issued_at_datetime = datetime.fromtimestamp(issued_at)
+        if issued_at_datetime <= user.TokenValidAfter:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Phiên đăng nhập đã bị thu hồi",
+            )
 
     # ========================================================
     # TOKEN HỢP LỆ
