@@ -64,3 +64,29 @@ def test_user_list_includes_all_assigned_role_names(db):
     )
 
     assert result["data"][0]["vaiTro"] == "Học viên, Giảng viên"
+
+
+def test_user_list_shows_newest_users_first(db):
+    users = [
+        NguoiDung(
+            NguoiDungId=user_id,
+            HoTen=f"Người dùng {user_id}",
+            Email=f"user{user_id}@example.com",
+            MatKhauHash="not-a-real-password-hash",
+            TrangThai="HoatDong",
+        )
+        for user_id in (1, 2)
+    ]
+    db.add_all(users)
+    db.commit()
+
+    result = get_users(
+        search=None,
+        role_id=None,
+        status=None,
+        page=1,
+        limit=1,
+        db=db,
+    )
+
+    assert [user["nguoiDungId"] for user in result["data"]] == [2]
