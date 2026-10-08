@@ -1,3 +1,4 @@
+from sqlalchemy import false
 from sqlalchemy.orm import Session
 
 from app.models.diem import Diem
@@ -12,6 +13,11 @@ ADMIN_ROLE_ID = 8
 TRAINING_MANAGER_ROLE_ID = 7
 INSTRUCTOR_ROLE_ID = 3
 STUDENT_ROLE_ID = 2
+
+# Exact status strings persisted by the user writers (auth_service,
+# user_import_service) and guarded by the CK_NguoiDung_TrangThai constraint.
+ACTIVE_USER_STATUS = "HoatDong"
+LOCKED_USER_STATUS = "BiKhoa"
 
 
 def user_role_ids(db: Session, user_id: int) -> set[int]:
@@ -90,7 +96,7 @@ def accessible_grades_query(db: Session, user: NguoiDung):
         )
     if STUDENT_ROLE_ID in roles:
         return query.filter(Diem.HocVienId == user.NguoiDungId)
-    return query.filter(Diem.DiemId == -1)
+    return query.filter(false())
 
 
 def ensure_valid_academic_year(value: str) -> None:
@@ -113,7 +119,7 @@ def ensure_active_student(db: Session, user_id: int) -> NguoiDung:
         .filter(
             NguoiDung.NguoiDungId == user_id,
             NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID,
-            NguoiDung.TrangThai == "HoatDong",
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
         )
         .first()
     )
@@ -132,7 +138,7 @@ def ensure_active_instructor(db: Session, user_id: int) -> NguoiDung:
         .filter(
             NguoiDung.NguoiDungId == user_id,
             NguoiDungVaiTro.VaiTroId == INSTRUCTOR_ROLE_ID,
-            NguoiDung.TrangThai == "HoatDong",
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
         )
         .first()
     )
@@ -159,3 +165,45 @@ def ensure_active_subjects(db: Session, subject_ids: list[int]) -> list[MonHoc]:
     if len(subjects) != len(requested_ids):
         raise ValueError("Có môn học không tồn tại hoặc đã ngừng hoạt động.")
     return subjects
+
+
+def build_prerequisite_map(
+    items: list[tuple[int, int | None]],
+) -> dict[int, int]:
+    """Kiểm tra quan hệ môn tiên quyết của một chương trình.
+
+    `items` là danh sách (mon_hoc_id, mon_tien_quyet_id) của chương trình.
+    Trả về map mon_hoc_id -> mon_tien_quyet_id cho các môn có tiên quyết.
+
+    Raise ValueError khi:
+    - môn học là tiên quyết của chính nó
+    - môn tiên quyết không thuộc cùng chương trình
+    - quan hệ tiên quyết tạo vòng lặp
+    """
+
+    requested_subject_ids = {mon_hoc_id for mon_hoc_id, _ in items}
+
+    for mon_hoc_id, mon_tien_quyet_id in items:
+        if mon_tien_quyet_id is None:
+            continue
+        if mon_tien_quyet_id == mon_hoc_id:
+            raise ValueError("Môn học không thể là tiên quyết của chính nó.")
+        if mon_tien_quyet_id not in requested_subject_ids:
+            raise ValueError("Môn tiên quyết phải thuộc cùng chương trình.")
+
+    prerequisite_by_subject = {
+        mon_hoc_id: mon_tien_quyet_id
+        for mon_hoc_id, mon_tien_quyet_id in items
+        if mon_tien_quyet_id is not None
+    }
+
+    for subject_id in requested_subject_ids:
+        seen = set()
+        cursor = subject_id
+        while cursor in prerequisite_by_subject:
+            cursor = prerequisite_by_subject[cursor]
+            if cursor in seen or cursor == subject_id:
+                raise ValueError("Quan hệ môn tiên quyết không được tạo vòng lặp.")
+            seen.add(cursor)
+
+    return prerequisite_by_subject

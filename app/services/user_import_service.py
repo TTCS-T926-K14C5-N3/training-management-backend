@@ -14,6 +14,7 @@ from pwdlib import PasswordHash
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.token_kich_hoat import TokenKichHoat
+from app.services.auth_service import generate_temporary_password
 from app.services.email_service import send_activation_email
 
 password_hash = PasswordHash.recommended()
@@ -66,37 +67,6 @@ def normalize_email(value) -> str:
     Chuẩn hóa email.
     """
     return normalize_text(value).lower()
-
-
-def generate_temporary_password(length: int = 12) -> str:
-    """
-    Tạo mật khẩu tạm thời gồm:
-    - chữ thường
-    - chữ hoa
-    - số
-    """
-
-    if length < 3:
-        raise ValueError("Độ dài mật khẩu phải >= 3")
-
-    lowercase = "abcdefghijklmnopqrstuvwxyz"
-    uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    digits = "0123456789"
-
-    password = [
-        secrets.choice(lowercase),
-        secrets.choice(uppercase),
-        secrets.choice(digits),
-    ]
-
-    all_chars = lowercase + uppercase + digits
-
-    for _ in range(length - 3):
-        password.append(secrets.choice(all_chars))
-
-    secrets.SystemRandom().shuffle(password)
-
-    return "".join(password)
 
 
 def generate_activation_token() -> tuple[str, str]:
@@ -662,15 +632,26 @@ def create_user_from_excel_row(
     )
 
     # --------------------------------------------------------
-    # Gửi email
+    # Commit tài khoản + vai trò + token TRƯỚC khi gửi email.
+    #
+    # Nếu gửi email thất bại, tài khoản vẫn được giữ lại và
+    # lỗi được ghi nhận ở trường canhBao thay vì rollback.
     # --------------------------------------------------------
 
-    send_activation_email(
-        recipient_email=email,
-        ho_ten=ho_ten,
-        temporary_password=temporary_password,
-        activation_link=activation_link,
-    )
+    db.commit()
+    db.refresh(user)
+
+    canh_bao = None
+
+    try:
+        send_activation_email(
+            recipient_email=email,
+            ho_ten=ho_ten,
+            temporary_password=temporary_password,
+            activation_link=activation_link,
+        )
+    except Exception as exc:
+        canh_bao = f"Không thể gửi email kích hoạt: {exc}"
 
     return {
         "nguoiDungId": user.NguoiDungId,
@@ -679,6 +660,7 @@ def create_user_from_excel_row(
         "vaiTroId": role_id,
         "vaiTro": ROLE_ID_TO_NAME.get(role_id),
         "matKhauTamThoiHetHan": password_expiry,
+        "canhBao": canh_bao,
     }
 
 
@@ -748,11 +730,9 @@ def import_valid_users(
                 row=row,
             )
 
-            # Commit từng user.
-            #
-            # Nếu một dòng lỗi thì những dòng trước
-            # vẫn giữ nguyên.
-            db.commit()
+            # create_user_from_excel_row đã commit tài khoản, vai trò và
+            # token trước khi gửi email, nên tài khoản đã tạo sẽ không bị
+            # mất nếu bước gửi email thất bại (lỗi được trả ở canhBao).
 
             created_users.append(
                 {

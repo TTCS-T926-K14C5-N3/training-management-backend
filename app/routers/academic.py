@@ -35,6 +35,7 @@ from app.services.academic_service import (
     STUDENT_ROLE_ID,
     accessible_classes,
     accessible_grades_query,
+    build_prerequisite_map,
     can_access_class,
     ensure_active_instructor,
     ensure_active_student,
@@ -138,11 +139,7 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
         ],
         "monHocIds": [subject.MonHocId for subject in subjects],
         "monHocs": [
-            {
-                "monHocId": subject.MonHocId,
-                "maMonHoc": subject.MaMonHoc,
-                "tenMonHoc": subject.TenMonHoc,
-            }
+            _subject_option(subject)
             for subject in subjects
         ],
     }
@@ -447,12 +444,7 @@ def get_class_options(db: Session = Depends(get_db)):
             for user in students
         ],
         "monHocs": [
-            {
-                "monHocId": subject.MonHocId,
-                "maMonHoc": subject.MaMonHoc,
-                "tenMonHoc": subject.TenMonHoc,
-                "soTinChi": subject.SoTinChi,
-            }
+            _subject_option_with_credit(subject)
             for subject in subjects
         ],
     }
@@ -837,6 +829,27 @@ def _subject_payload(subject: MonHoc) -> dict:
     }
 
 
+def _subject_option(subject: MonHoc) -> dict:
+    """Dạng rút gọn của môn học cho danh sách lựa chọn/tùy chọn."""
+    payload = _subject_payload(subject)
+    return {
+        "monHocId": payload["monHocId"],
+        "maMonHoc": payload["maMonHoc"],
+        "tenMonHoc": payload["tenMonHoc"],
+    }
+
+
+def _subject_option_with_credit(subject: MonHoc) -> dict:
+    """Dạng rút gọn kèm số tín chỉ cho danh sách tùy chọn lớp."""
+    payload = _subject_payload(subject)
+    return {
+        "monHocId": payload["monHocId"],
+        "maMonHoc": payload["maMonHoc"],
+        "tenMonHoc": payload["tenMonHoc"],
+        "soTinChi": payload["soTinChi"],
+    }
+
+
 def _program_subject_row(
     db: Session,
     program_subject: ChuongTrinhMonHoc,
@@ -949,22 +962,18 @@ def replace_program_subjects(
                     detail="Môn tiên quyết phải thuộc cùng chương trình.",
                 )
 
-    prerequisite_by_subject = {
-        row.mon_hoc_id: row.mon_tien_quyet_id
-        for row in request.subjects
-        if row.mon_tien_quyet_id is not None
-    }
-    for subject_id in requested_subject_ids:
-        seen = set()
-        cursor = subject_id
-        while cursor in prerequisite_by_subject:
-            cursor = prerequisite_by_subject[cursor]
-            if cursor in seen or cursor == subject_id:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="Quan hệ môn tiên quyết không được tạo vòng lặp.",
-                )
-            seen.add(cursor)
+    try:
+        prerequisite_by_subject = build_prerequisite_map(
+            [
+                (row.mon_hoc_id, row.mon_tien_quyet_id)
+                for row in request.subjects
+            ]
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
 
     current_rows = (
         db.query(ChuongTrinhMonHoc)
@@ -1176,11 +1185,7 @@ def get_grade_options(
                     for student in students
                 ],
                 "monHocs": [
-                    {
-                        "monHocId": subject.MonHocId,
-                        "maMonHoc": subject.MaMonHoc,
-                        "tenMonHoc": subject.TenMonHoc,
-                    }
+                    _subject_option(subject)
                     for subject in subjects
                 ],
             }

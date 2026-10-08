@@ -232,26 +232,35 @@ def replace_role_permissions(
         .filter(Quyen.MaQuyen.in_(requested_codes))
         .all()
     }
+    missing_codes = requested_codes - set(permissions)
+    if missing_codes:
+        raise ValueError(
+            f"Quyền chưa được khởi tạo: {', '.join(sorted(missing_codes))}."
+        )
+
     current_links = (
         db.query(VaiTroQuyen)
         .filter(VaiTroQuyen.VaiTroId == role_id)
         .all()
     )
-    for link in current_links:
-        db.delete(link)
 
-    for code in sorted(requested_codes):
-        permission = permissions.get(code)
-        if permission is None:
-            raise ValueError(f"Quyền {code} chưa được khởi tạo.")
-        db.add(
-            VaiTroQuyen(
-                VaiTroId=role_id,
-                QuyenId=permission.QuyenId,
+    try:
+        for link in current_links:
+            db.delete(link)
+
+        for code in sorted(requested_codes):
+            db.add(
+                VaiTroQuyen(
+                    VaiTroId=role_id,
+                    QuyenId=permissions[code].QuyenId,
+                )
             )
-        )
 
-    db.commit()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     return [
         {
             "quyenId": permissions[code].QuyenId,

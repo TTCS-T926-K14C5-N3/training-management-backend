@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
 from app.models.nguoi_dung import NguoiDung
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.revoked_token import RevokedToken
 from app.models.diem import Diem
 from app.models.lop_hoc import LopHoc
@@ -245,6 +246,95 @@ def create_user(
 # ADMIN TẠO TÀI KHOẢN
 # ============================================================
 
+def _resolve_selected_role(db: Session, vai_tro_id) -> dict:
+    """Chuẩn hóa và xác thực vai trò được chọn khi tạo tài khoản.
+
+    Luôn truy vấn theo đúng VaiTroId được chọn, không dùng index
+    của danh sách vai trò.
+    """
+
+    try:
+        selected_role_id = int(vai_tro_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Vai trò không hợp lệ",
+        )
+
+    if selected_role_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Vai trò không hợp lệ",
+        )
+
+    role = db.execute(
+        text("""
+            SELECT
+                VaiTroId,
+                TenVaiTro
+            FROM VaiTro
+            WHERE VaiTroId = :vai_tro_id
+        """),
+        {
+            "vai_tro_id": selected_role_id,
+        },
+    ).mappings().first()
+
+    if not role:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Vai trò có ID {selected_role_id} "
+                "không tồn tại"
+            ),
+        )
+
+    # Kiểm tra thêm để chắc chắn DB trả đúng ID
+    database_role_id = int(role["VaiTroId"])
+
+    if database_role_id != selected_role_id:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "ID vai trò được chọn không khớp "
+                "với dữ liệu trong cơ sở dữ liệu"
+            ),
+        )
+
+    return {
+        "vaiTroId": selected_role_id,
+        "tenVaiTro": role["TenVaiTro"],
+    }
+
+
+def _create_activation_token(
+    db: Session,
+    user: NguoiDung,
+    expiry: datetime,
+    now: datetime,
+) -> str:
+    """Tạo token kích hoạt và trả về link kích hoạt dùng cho email."""
+
+    raw_activation_token = secrets.token_urlsafe(32)
+
+    activation_token = TokenKichHoat(
+        NguoiDungId=user.NguoiDungId,
+        Token=hashlib.sha256(
+            raw_activation_token.encode()
+        ).hexdigest(),
+        ThoiGianTao=now,
+        ThoiGianHetHan=expiry,
+        DaSuDung=False,
+    )
+
+    db.add(activation_token)
+
+    return (
+        f"{FRONTEND_URL}/login"
+        f"?activate={raw_activation_token}"
+    )
+
+
 def admin_create_user(
     db: Session,
     request: AdminCreateUserRequest,
@@ -286,19 +376,8 @@ def admin_create_user(
     # 2. LẤY CHÍNH XÁC VAI TRÒ ĐƯỢC CHỌN
     # ========================================================
 
-    try:
-        selected_role_id = int(request.vai_tro_id)
-    except (TypeError, ValueError):
-        raise HTTPException(
-            status_code=400,
-            detail="Vai trò không hợp lệ",
-        )
-
-    if selected_role_id <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Vai trò không hợp lệ",
-        )
+    role = _resolve_selected_role(db, request.vai_tro_id)
+    selected_role_id = role["vaiTroId"]
 
     # ========================================================
     # 3. KIỂM TRA EMAIL ĐÃ TỒN TẠI
@@ -317,66 +396,16 @@ def admin_create_user(
         )
 
     # ========================================================
-    # 4. KIỂM TRA VAI TRÒ
-    #
-    # QUAN TRỌNG:
-    # Luôn truy vấn theo đúng selected_role_id.
-    # Không dùng index của danh sách vai trò.
-    # ========================================================
-
-    role = db.execute(
-        text("""
-            SELECT
-                VaiTroId,
-                TenVaiTro
-            FROM VaiTro
-            WHERE VaiTroId = :vai_tro_id
-        """),
-        {
-            "vai_tro_id": selected_role_id,
-        },
-    ).mappings().first()
-
-    if not role:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Vai trò có ID {selected_role_id} "
-                "không tồn tại"
-            ),
-        )
-
-    # Kiểm tra thêm để chắc chắn DB trả đúng ID
-    database_role_id = int(role["VaiTroId"])
-
-    if database_role_id != selected_role_id:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "ID vai trò được chọn không khớp "
-                "với dữ liệu trong cơ sở dữ liệu"
-            ),
-        )
-
-    # ========================================================
-    # 5. SINH MẬT KHẨU TẠM THỜI
+    # 4. SINH MẬT KHẨU TẠM THỜI VÀ THỜI GIAN
     # ========================================================
 
     temporary_password = generate_temporary_password()
-
-    # ========================================================
-    # 6. THỜI GIAN
-    # ========================================================
 
     now = datetime.now()
 
     temporary_password_expiry = (
         now + timedelta(hours=24)
     )
-
-    # ========================================================
-    # 7. TẠO USER
-    # ========================================================
 
     user = NguoiDung(
         HoTen=ho_ten,
@@ -409,7 +438,7 @@ def admin_create_user(
 
     try:
         # ====================================================
-        # 8. INSERT USER
+        # 5. INSERT USER
         # ====================================================
 
         db.add(user)
@@ -424,106 +453,33 @@ def admin_create_user(
             )
 
         # ====================================================
-        # 9. GÁN VAI TRÒ
-        #
-        # ĐÂY LÀ PHẦN SỬA QUAN TRỌNG NHẤT
+        # 6. GÁN VAI TRÒ
         #
         # Luôn sử dụng selected_role_id.
         # Không sử dụng index của danh sách vai trò.
         # ====================================================
 
-        db.execute(
-            text("""
-                INSERT INTO NguoiDung_VaiTro
-                (
-                    NguoiDungId,
-                    VaiTroId
-                )
-                VALUES
-                (
-                    :nguoi_dung_id,
-                    :vai_tro_id
-                )
-            """),
-            {
-                "nguoi_dung_id": user.NguoiDungId,
-                "vai_tro_id": selected_role_id,
-            },
-        )
-
-        # ====================================================
-        # 10. KIỂM TRA LẠI VAI TRÒ VỪA INSERT
-        #
-        # Nếu DB lưu sai ID -> rollback ngay.
-        # ====================================================
-
-        inserted_role = db.execute(
-            text("""
-                SELECT TOP 1
-                    ndvt.VaiTroId
-                FROM NguoiDung_VaiTro ndvt
-                WHERE ndvt.NguoiDungId = :nguoi_dung_id
-                ORDER BY ndvt.VaiTroId
-            """),
-            {
-                "nguoi_dung_id": user.NguoiDungId,
-            },
-        ).scalar()
-
-        if inserted_role is None:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Không thể gán vai trò "
-                    "cho tài khoản"
-                ),
+        db.add(
+            NguoiDungVaiTro(
+                NguoiDungId=user.NguoiDungId,
+                VaiTroId=selected_role_id,
             )
-
-        inserted_role_id = int(inserted_role)
-
-        if inserted_role_id != selected_role_id:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Lỗi gán vai trò: "
-                    f"đã chọn VaiTroId={selected_role_id} "
-                    f"nhưng DB ghi VaiTroId={inserted_role_id}"
-                ),
-            )
-
-        # ====================================================
-        # 11. TẠO TOKEN KÍCH HOẠT
-        # ====================================================
-
-        raw_activation_token = (
-            secrets.token_urlsafe(32)
         )
-
-        activation_token = TokenKichHoat(
-            NguoiDungId=user.NguoiDungId,
-            Token=hashlib.sha256(
-                raw_activation_token.encode()
-            ).hexdigest(),
-            ThoiGianTao=now,
-            ThoiGianHetHan=(
-                temporary_password_expiry
-            ),
-            DaSuDung=False,
-        )
-
-        db.add(activation_token)
+        db.flush()
 
         # ====================================================
-        # 12. LINK KÍCH HOẠT
+        # 7. TẠO TOKEN KÍCH HOẠT VÀ LINK KÍCH HOẠT
         # ====================================================
 
-        activation_link = (
-            f"{FRONTEND_URL}/login"
-            f"?activate={raw_activation_token}"
+        activation_link = _create_activation_token(
+            db=db,
+            user=user,
+            expiry=temporary_password_expiry,
+            now=now,
         )
 
         # ====================================================
-        # 13. GỬI EMAIL
+        # 8. GỬI EMAIL
         # ====================================================
 
         send_activation_email(
@@ -534,7 +490,7 @@ def admin_create_user(
         )
 
         # ====================================================
-        # 14. COMMIT
+        # 9. COMMIT
         # ====================================================
 
         db.commit()
@@ -556,50 +512,16 @@ def admin_create_user(
             ),
         )
 
-    # ========================================================
-    # 15. LẤY LẠI VAI TRÒ SAU KHI GÁN
-    #
-    # Response lấy trực tiếp từ quan hệ DB.
-    # ========================================================
-
-    final_role = db.execute(
-        text("""
-            SELECT TOP 1
-                vt.VaiTroId,
-                vt.TenVaiTro
-            FROM NguoiDung_VaiTro ndvt
-            INNER JOIN VaiTro vt
-                ON ndvt.VaiTroId = vt.VaiTroId
-            WHERE ndvt.NguoiDungId = :nguoi_dung_id
-              AND ndvt.VaiTroId = :vai_tro_id
-        """),
-        {
-            "nguoi_dung_id": user.NguoiDungId,
-            "vai_tro_id": selected_role_id,
-        },
-    ).mappings().first()
-
-    if not final_role:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Không thể xác nhận vai trò "
-                "của tài khoản vừa tạo"
-            ),
-        )
-
     return {
         "message": "Tạo tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "hoTen": user.HoTen,
         "email": user.Email,
 
-        # Vai trò lấy trực tiếp từ quan hệ DB
+        # Vai trò lấy từ bản ghi vừa gán
         "vaiTro": {
-            "vaiTroId": int(
-                final_role["VaiTroId"]
-            ),
-            "tenVaiTro": final_role["TenVaiTro"],
+            "vaiTroId": selected_role_id,
+            "tenVaiTro": role["tenVaiTro"],
         },
 
         "daKichHoat": user.DaKichHoat,

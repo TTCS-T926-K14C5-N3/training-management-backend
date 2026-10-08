@@ -16,6 +16,7 @@ from fastapi.security import (
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from typing import TypedDict
 
 from app.database import get_db
 from app.models.nguoi_dung import NguoiDung
@@ -44,7 +45,19 @@ bearer_scheme = HTTPBearer(
 # TẠO ACCESS TOKEN
 # ============================================================
 
-def create_access_token(data: dict) -> str:
+class TokenPayload(TypedDict, total=False):
+    """Payload được lưu trong JWT access token."""
+
+    sub: str
+    user_id: int
+    roles: list[str]
+    yeuCauDoiMatKhau: bool
+    iat: float
+    exp: datetime
+    jti: str
+
+
+def create_access_token(data: TokenPayload) -> str:
     """
     Tạo JWT access token.
 
@@ -120,7 +133,7 @@ def refresh_access_token(
 # GIẢI MÃ ACCESS TOKEN
 # ============================================================
 
-def decode_access_token(token: str) -> dict:
+def decode_access_token(token: str) -> TokenPayload:
     """
     Giải mã và kiểm tra chữ ký JWT.
 
@@ -189,17 +202,6 @@ def verify_access_token(
             detail="Token không hợp lệ",
         )
 
-    # ========================================================
-    # DEBUG - THÔNG TIN TOKEN
-    # ========================================================
-
-    print("=" * 60)
-    print("KIỂM TRA ACCESS TOKEN")
-    print(f"User ID       : {user_id}")
-    print(f"JTI           : {jti}")
-    print(f"Issued At     : {issued_at}")
-    print("=" * 60)
-
     # --------------------------------------------------------
     # Kiểm tra token đã bị revoke chưa
     # --------------------------------------------------------
@@ -212,21 +214,7 @@ def verify_access_token(
         .first()
     )
 
-    # ========================================================
-    # DEBUG - KIỂM TRA REVOKED TOKEN
-    # ========================================================
-
-    print(
-        "Token có trong RevokedToken:",
-        revoked_token is not None,
-    )
-
     if revoked_token:
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: "
-            "ĐÃ CÓ TRONG RevokedToken"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Phiên đăng nhập đã bị thu hồi",
@@ -245,11 +233,6 @@ def verify_access_token(
     )
 
     if not user:
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: "
-            "NGƯỜI DÙNG KHÔNG TỒN TẠI"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Người dùng không tồn tại",
@@ -272,12 +255,6 @@ def verify_access_token(
     # ========================================================
     # TOKEN HỢP LỆ
     # ========================================================
-
-    print(
-        ">>> TOKEN HỢP LỆ"
-    )
-
-    print("=" * 60)
 
     return user
 
@@ -401,31 +378,11 @@ def require_permission(
             },
         ).first()
 
-        # ====================================================
-        # DEBUG - KIỂM TRA QUYỀN
-        # ====================================================
-
-        print(
-            f"User {current_user.NguoiDungId} "
-            f"đang yêu cầu quyền: {ma_quyen}"
-        )
-
-        print(
-            "Có quyền:",
-            permission is not None,
-        )
-
         # ----------------------------------------------------
         # Không có quyền
         # ----------------------------------------------------
 
         if not permission:
-            print(
-                ">>> 403 FORBIDDEN: "
-                f"User {current_user.NguoiDungId} "
-                f"không có quyền {ma_quyen}"
-            )
-
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -437,11 +394,6 @@ def require_permission(
         # ----------------------------------------------------
         # Có quyền
         # ----------------------------------------------------
-
-        print(
-            f">>> 200: User {current_user.NguoiDungId} "
-            f"có quyền {ma_quyen}"
-        )
 
         return current_user
 
