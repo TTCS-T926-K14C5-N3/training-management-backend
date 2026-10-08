@@ -6,3 +6,5 @@ python-dotenv
 pwdlib[argon2]
 email-validator
 PyJWT
+Pillow>=11.0.0
+openpyxl

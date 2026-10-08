@@ -3,6 +3,8 @@ from uuid import uuid4
 
 import jwt
 
+from logging import getLogger
+
 from fastapi import (
     Depends,
     HTTPException,
@@ -29,6 +31,7 @@ from app.models.revoked_token import RevokedToken
 SECRET_KEY = "training-management-secret-key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+logger = getLogger(__name__)
 
 
 # ============================================================
@@ -45,22 +48,36 @@ bearer_scheme = HTTPBearer(
 # ============================================================
 
 def create_access_token(data: dict) -> str:
+    """
+    Tạo JWT access token.
+
+    Payload gồm:
+    - sub: email người dùng
+    - user_id: ID người dùng
+    - iat: thời điểm tạo token
+    - exp: thời điểm token hết hạn
+    - jti: ID duy nhất của token
+    """
+
     payload = data.copy()
 
     now = datetime.now(timezone.utc)
 
-    payload.update({
-        # Thời điểm token được tạo
-        "iat": now,
+    payload.update(
+        {
+            # Thời điểm token được tạo
+            "iat": now.timestamp(),
 
-        # Thời điểm token hết hạn
-        "exp": now + timedelta(
-            minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-        ),
+            # Thời điểm token hết hạn
+            "exp": now
+            + timedelta(
+                minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+            ),
 
-        # ID duy nhất của token
-        "jti": str(uuid4()),
-    })
+            # ID duy nhất của token
+            "jti": str(uuid4()),
+        }
+    )
 
     return jwt.encode(
         payload,
@@ -70,10 +87,52 @@ def create_access_token(data: dict) -> str:
 
 
 # ============================================================
+# LÀM MỚI ACCESS TOKEN
+# ============================================================
+
+def refresh_access_token(
+    token: str,
+    db: Session,
+) -> str:
+    """
+    Kiểm tra token hiện tại rồi tạo token mới.
+
+    Token cũ phải:
+    - hợp lệ
+    - chưa hết hạn
+    - chưa bị revoke
+    - người dùng vẫn tồn tại
+    """
+
+    user = verify_access_token(
+        token,
+        db,
+    )
+
+    new_token = create_access_token(
+        {
+            "sub": user.Email,
+            "user_id": user.NguoiDungId,
+        }
+    )
+
+    return new_token
+
+
+# ============================================================
 # GIẢI MÃ ACCESS TOKEN
 # ============================================================
 
 def decode_access_token(token: str) -> dict:
+    """
+    Giải mã và kiểm tra chữ ký JWT.
+
+    PyJWT sẽ tự kiểm tra:
+    - chữ ký
+    - thuật toán
+    - exp nếu token đã hết hạn
+    """
+
     return jwt.decode(
         token,
         SECRET_KEY,
@@ -89,8 +148,21 @@ def verify_access_token(
     token: str,
     db: Session,
 ) -> NguoiDung:
+    """
+    Xác thực access token và trả về người dùng hiện tại.
 
+    Kiểm tra:
+    1. JWT hợp lệ
+    2. Token chưa hết hạn
+    3. JWT có user_id, jti, iat
+    4. Token chưa nằm trong RevokedToken
+    5. Người dùng còn tồn tại
+    """
+
+    # --------------------------------------------------------
     # Decode JWT
+    # --------------------------------------------------------
+
     try:
         payload = decode_access_token(token)
 
@@ -120,21 +192,6 @@ def verify_access_token(
             detail="Token không hợp lệ",
         )
 
-    # ========================================================
-    # DEBUG - THÔNG TIN TOKEN
-    # ========================================================
-    #
-    # Tạm thời dùng để kiểm tra token Swagger đang gửi.
-    # Sau khi xác định xong lỗi có thể xóa các dòng DEBUG này.
-    #
-
-    print("=" * 60)
-    print("KIỂM TRA ACCESS TOKEN")
-    print(f"User ID       : {user_id}")
-    print(f"JTI           : {jti}")
-    print(f"Issued At     : {issued_at}")
-    print("=" * 60)
-
     # --------------------------------------------------------
     # Kiểm tra token đã bị revoke chưa
     # --------------------------------------------------------
@@ -147,21 +204,7 @@ def verify_access_token(
         .first()
     )
 
-    # ========================================================
-    # DEBUG - KIỂM TRA REVOKED TOKEN
-    # ========================================================
-
-    print(
-        "Token có trong RevokedToken:",
-        revoked_token is not None
-    )
-
     if revoked_token:
-
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: ĐÃ CÓ TRONG RevokedToken"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Phiên đăng nhập đã bị thu hồi",
@@ -180,116 +223,43 @@ def verify_access_token(
     )
 
     if not user:
-
-        print(
-            ">>> TOKEN BỊ TỪ CHỐI: NGƯỜI DÙNG KHÔNG TỒN TẠI"
-        )
-
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Người dùng không tồn tại",
         )
 
-    # ========================================================
-    # DEBUG - TOKEN VALID AFTER
-    # ========================================================
+    if user.TrangThai == "BiKhoa":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tài khoản đã bị khóa; phiên đăng nhập đã bị thu hồi",
+        )
 
-    print(
-        f"TokenValidAfter: {user.TokenValidAfter}"
-    )
+    if user.TokenValidAfter is not None:
+        token_valid_after = user.TokenValidAfter
+        if token_valid_after.tzinfo is None:
+            token_valid_after = token_valid_after.replace(
+                tzinfo=timezone.utc,
+            )
+        else:
+            token_valid_after = token_valid_after.astimezone(timezone.utc)
 
-    # --------------------------------------------------------
-    # Kiểm tra TokenValidAfter
-    #
-    # Token được tạo trước thời điểm TokenValidAfter
-    # sẽ bị coi là token cũ và không được sử dụng.
-    # --------------------------------------------------------
-
-    if user.TokenValidAfter:
-
-        # ----------------------------------------------------
-        # JWT "iat" sau khi decode thường là Unix timestamp
-        # nên chuyển về datetime UTC.
-        # ----------------------------------------------------
-
-        token_issued_at = datetime.fromtimestamp(
+        issued_at_datetime = datetime.fromtimestamp(
             issued_at,
             tz=timezone.utc,
         )
 
-        valid_after = user.TokenValidAfter
-
-        # ----------------------------------------------------
-        # SQL Server DATETIME/DATETIME2 không lưu timezone.
-        # Nếu không có timezone thì coi giá trị DB là UTC.
-        # ----------------------------------------------------
-
-        if valid_after.tzinfo is None:
-            valid_after = valid_after.replace(
-                tzinfo=timezone.utc
-            )
-
-        # ----------------------------------------------------
-        # JWT iat có độ chính xác đến giây.
-        # SQL Server có thể lưu microsecond.
-        #
-        # Vì vậy bỏ microsecond để tránh:
-        #
-        # iat:
-        # 2026-10-01 01:20:15
-        #
-        # valid_after:
-        # 2026-10-01 01:20:15.734821
-        #
-        # bị hiểu nhầm là token cũ.
-        # ----------------------------------------------------
-
-        valid_after = valid_after.replace(
-            microsecond=0
-        )
-
-        # ====================================================
-        # DEBUG - SO SÁNH THỜI GIAN
-        # ====================================================
-
-        print(
-            f"Token issued at : {token_issued_at}"
-        )
-
-        print(
-            f"Valid after     : {valid_after}"
-        )
-
-        # ----------------------------------------------------
-        # Token được tạo trước TokenValidAfter
-        # => token đã bị vô hiệu hóa
-        # ----------------------------------------------------
-
-        if token_issued_at < valid_after:
-
-            print(
-                ">>> TOKEN BỊ TỪ CHỐI: TOKEN CŨ HƠN TokenValidAfter"
-            )
-
+        if issued_at_datetime < token_valid_after:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Phiên đăng nhập đã bị thu hồi",
             )
 
-    # ========================================================
-    # TOKEN HỢP LỆ
-    # ========================================================
-
-    print(
-        ">>> TOKEN HỢP LỆ"
-    )
-
-    print("=" * 60)
-
     return user
 
 
+# ============================================================
 # LẤY USER HIỆN TẠI
+# ============================================================
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(
@@ -297,27 +267,43 @@ def get_current_user(
     ),
     db: Session = Depends(get_db),
 ) -> NguoiDung:
+    """
+    Lấy người dùng hiện tại từ Authorization: Bearer <token>.
+    """
 
+    # --------------------------------------------------------
     # Không có Authorization header
+    # --------------------------------------------------------
 
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Chưa đăng nhập",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
         )
 
+    # --------------------------------------------------------
     # Lấy JWT từ Bearer
+    # --------------------------------------------------------
+
     token = credentials.credentials
-    
-    # Xác thực JWT--
+
+    # --------------------------------------------------------
+    # Xác thực JWT
+    # --------------------------------------------------------
+
     return verify_access_token(
         token=token,
         db=db,
     )
 
 
+# ============================================================
 # KIỂM TRA QUYỀN
+# ============================================================
+
 def require_permission(
     ma_quyen: str,
 ):
@@ -330,9 +316,9 @@ def require_permission(
             "/users",
             dependencies=[
                 Depends(
-                    require_permission("QUAN_LY_TAI_KHOAN")
+                    require_permission("USER_CREATE")
                 )
-            ]
+            ],
         )
 
     Có quyền:
@@ -365,7 +351,8 @@ def require_permission(
         # Quyen
         # ----------------------------------------------------
 
-        permission_query = text("""
+        permission_query = text(
+            """
             SELECT TOP 1
                 q.QuyenId
             FROM Quyen q
@@ -378,7 +365,8 @@ def require_permission(
 
             WHERE ndvt.NguoiDungId = :nguoi_dung_id
               AND q.MaQuyen = :ma_quyen
-        """)
+            """
+        )
 
         permission = db.execute(
             permission_query,
@@ -388,46 +376,14 @@ def require_permission(
             },
         ).first()
 
-        # ====================================================
-        # DEBUG - KIỂM TRA QUYỀN
-        # ====================================================
-
-        print(
-            f"User {current_user.NguoiDungId} "
-            f"đang yêu cầu quyền: {ma_quyen}"
-        )
-
-        print(
-            "Có quyền:",
-            permission is not None
-        )
-
-        # ----------------------------------------------------
-        # Không có quyền
-        # ----------------------------------------------------
-
         if not permission:
-
-            print(
-                f">>> 403 FORBIDDEN: "
-                f"User {current_user.NguoiDungId} "
-                f"không có quyền {ma_quyen}"
-            )
-
             raise HTTPException(
-              status_code=status.HTTP_403_FORBIDDEN,
-              detail="Bạn không có quyền thực hiện chức năng này.",
-            
-         )
-
-        # ----------------------------------------------------
-        # Có quyền
-        # ----------------------------------------------------
-
-        print(
-            f">>> 200: User {current_user.NguoiDungId} "
-            f"có quyền {ma_quyen}"
-        )
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Bạn không có quyền "
+                    "thực hiện chức năng này."
+                ),
+            )
 
         return current_user
 

@@ -1,0 +1,267 @@
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+from app.models.quyen import Quyen
+from app.models.vai_tro import VaiTro
+from app.models.vai_tro_quyen import VaiTroQuyen
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+
+
+ROLE_NAMES = {
+    1: ("Khách", "Người dùng chưa đăng nhập."),
+    2: ("Sinh viên", "Người học trong hệ thống."),
+    3: ("Giảng viên", "Phụ trách giảng dạy và nhập điểm."),
+    4: ("Trợ giảng", "Hỗ trợ hoạt động giảng dạy."),
+    5: ("Tuyển sinh", "Quản lý công tác tuyển sinh."),
+    6: ("Kế toán", "Quản lý nghiệp vụ học phí."),
+    7: ("Quản lý đào tạo", "Điều phối hoạt động đào tạo."),
+    8: ("Quản trị hệ thống", "Quản trị người dùng và phân quyền."),
+}
+
+PERMISSION_CATALOG = (
+    ("USER_VIEW", "Xem người dùng", "Xem danh sách và thông tin người dùng."),
+    ("USER_CREATE", "Tạo người dùng", "Tạo hoặc nhập tài khoản người dùng."),
+    ("USER_UPDATE", "Sửa người dùng", "Cập nhật thông tin người dùng."),
+    ("USER_LOCK", "Khóa người dùng", "Khóa tài khoản người dùng."),
+    ("USER_UNLOCK", "Mở khóa người dùng", "Mở khóa tài khoản người dùng."),
+    ("USER_DELETE", "Xóa người dùng", "Xóa tài khoản người dùng."),
+    ("ROLE_VIEW", "Xem vai trò và quyền", "Xem cấu hình vai trò và quyền."),
+    ("ROLE_UPDATE", "Cấu hình vai trò và quyền", "Gán quyền cho vai trò và vai trò cho người dùng."),
+    ("ROLE_DELETE", "Thu hồi vai trò", "Thu hồi vai trò khỏi người dùng."),
+    ("GRADE_VIEW", "Xem điểm", "Xem dữ liệu điểm."),
+    ("GRADE_CREATE", "Tạo điểm", "Tạo dữ liệu điểm."),
+    ("GRADE_UPDATE", "Sửa điểm", "Thêm hoặc sửa điểm."),
+    ("GRADE_DELETE", "Xóa điểm", "Xóa dữ liệu điểm."),
+    ("QUAN_LY_DIEM", "Truy cập quản lý điểm", "Truy cập khu vực quản lý điểm."),
+    ("TUITION_VIEW", "Xem học phí", "Xem dữ liệu học phí."),
+    ("TUITION_CREATE", "Tạo học phí", "Tạo khoản thu học phí."),
+    ("TUITION_UPDATE", "Sửa học phí", "Cập nhật học phí hoặc trạng thái thanh toán."),
+    ("TUITION_DELETE", "Xóa học phí", "Xóa dữ liệu học phí."),
+    ("QUAN_LY_HOC_PHI", "Truy cập quản lý học phí", "Truy cập khu vực quản lý học phí."),
+    ("CLASS_VIEW", "Xem lớp học", "Xem dữ liệu lớp học."),
+    ("CLASS_CREATE", "Tạo lớp học", "Tạo lớp học."),
+    ("CLASS_UPDATE", "Sửa lớp học", "Cập nhật lớp học."),
+    ("CLASS_DELETE", "Xóa lớp học", "Xóa lớp học."),
+    ("QUAN_LY_LOP", "Truy cập quản lý lớp", "Truy cập khu vực quản lý lớp."),
+)
+
+DEFAULT_ROLE_PERMISSIONS = {
+    1: (),
+    2: ("GRADE_VIEW", "TUITION_VIEW"),
+    3: (
+        "GRADE_VIEW",
+        "GRADE_CREATE",
+        "GRADE_UPDATE",
+        "QUAN_LY_DIEM",
+        "CLASS_VIEW",
+    ),
+    4: (),
+    5: ("USER_VIEW", "USER_CREATE", "USER_UPDATE"),
+    6: ("TUITION_VIEW", "TUITION_CREATE", "TUITION_UPDATE", "QUAN_LY_HOC_PHI"),
+    7: (
+        "USER_VIEW",
+        "ROLE_VIEW",
+        "GRADE_VIEW",
+        "TUITION_VIEW",
+        "CLASS_VIEW",
+        "CLASS_CREATE",
+        "CLASS_UPDATE",
+        "CLASS_DELETE",
+        "QUAN_LY_LOP",
+    ),
+    8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
+}
+
+
+def initialize_role_permissions(db: Session) -> None:
+    """Create the eight system roles and permission catalog if they are absent."""
+    existing_roles = {
+        role_id
+        for (role_id,) in db.query(VaiTro.VaiTroId)
+        .filter(VaiTro.VaiTroId.between(1, 8))
+        .all()
+    }
+    missing_roles = [
+        (role_id, name, description)
+        for role_id, (name, description) in ROLE_NAMES.items()
+        if role_id not in existing_roles
+    ]
+
+    if missing_roles:
+        db.execute(text("SET IDENTITY_INSERT dbo.VaiTro ON"))
+        try:
+            for role_id, name, description in missing_roles:
+                db.execute(
+                    text("""
+                    INSERT INTO dbo.VaiTro (VaiTroId, TenVaiTro, MoTa)
+                    VALUES (:role_id, :name, :description)
+                    """),
+                    {
+                        "role_id": role_id,
+                        "name": name,
+                        "description": description,
+                    },
+                )
+        finally:
+            db.execute(text("SET IDENTITY_INSERT dbo.VaiTro OFF"))
+
+    permissions_by_code = {
+        permission.MaQuyen: permission
+        for permission in db.query(Quyen).all()
+    }
+    new_permission_codes = set()
+    for code, name, description in PERMISSION_CATALOG:
+        if code not in permissions_by_code:
+            permission = Quyen(
+                MaQuyen=code,
+                TenQuyen=name,
+                MoTa=description,
+            )
+            db.add(permission)
+            permissions_by_code[code] = permission
+            new_permission_codes.add(code)
+
+    db.flush()
+
+    role_permission_count = db.query(VaiTroQuyen).count()
+    if role_permission_count == 0:
+        for role_id, permission_codes in DEFAULT_ROLE_PERMISSIONS.items():
+            for code in permission_codes:
+                db.add(
+                    VaiTroQuyen(
+                        VaiTroId=role_id,
+                        QuyenId=permissions_by_code[code].QuyenId,
+                    )
+                )
+    else:
+        for role_id, permission_codes in DEFAULT_ROLE_PERMISSIONS.items():
+            for code in permission_codes:
+                if code in new_permission_codes:
+                    db.add(
+                        VaiTroQuyen(
+                            VaiTroId=role_id,
+                            QuyenId=permissions_by_code[code].QuyenId,
+                        )
+                    )
+
+        db.flush()
+        admin_roles = db.query(VaiTro).filter(
+            (VaiTro.VaiTroId == 8) | (VaiTro.VaiTroId == 1) | (VaiTro.TenVaiTro.ilike("%admin%"))
+        ).all()
+        for a_role in admin_roles:
+            curr_perms = {
+                link.QuyenId
+                for link in db.query(VaiTroQuyen)
+                .filter(VaiTroQuyen.VaiTroId == a_role.VaiTroId)
+                .all()
+            }
+            for code, _, _ in PERMISSION_CATALOG:
+                perm = permissions_by_code.get(code)
+                if perm and perm.QuyenId not in curr_perms:
+                    db.add(
+                        VaiTroQuyen(
+                            VaiTroId=a_role.VaiTroId,
+                            QuyenId=perm.QuyenId,
+                        )
+                    )
+
+    db.commit()
+
+
+def list_permission_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "maQuyen": code,
+            "tenQuyen": name,
+            "moTa": description,
+        }
+        for code, name, description in PERMISSION_CATALOG
+    ]
+
+
+def replace_role_permissions(
+    db: Session,
+    role_id: int,
+    permission_codes: list[str],
+) -> list[dict[str, str | int]]:
+    role = (
+        db.query(VaiTro)
+        .filter(VaiTro.VaiTroId == role_id, VaiTro.VaiTroId <= 8)
+        .first()
+    )
+    if role is None:
+        raise ValueError("Vai trò không tồn tại.")
+
+    available_codes = {code for code, _name, _description in PERMISSION_CATALOG}
+    requested_codes = set(permission_codes)
+    unknown_codes = requested_codes - available_codes
+    if unknown_codes:
+        raise ValueError(
+            f"Mã quyền không hợp lệ: {', '.join(sorted(unknown_codes))}."
+        )
+
+    if role_id == 8 and not {"ROLE_VIEW", "ROLE_UPDATE"} <= requested_codes:
+        raise ValueError(
+            "Quản trị hệ thống phải giữ quyền xem và cấu hình vai trò."
+        )
+
+    permissions = {
+        permission.MaQuyen: permission
+        for permission in db.query(Quyen)
+        .filter(Quyen.MaQuyen.in_(requested_codes))
+        .all()
+    }
+    current_links = (
+        db.query(VaiTroQuyen)
+        .filter(VaiTroQuyen.VaiTroId == role_id)
+        .all()
+    )
+    for link in current_links:
+        db.delete(link)
+
+    for code in sorted(requested_codes):
+        permission = permissions.get(code)
+        if permission is None:
+            raise ValueError(f"Quyền {code} chưa được khởi tạo.")
+        db.add(
+            VaiTroQuyen(
+                VaiTroId=role_id,
+                QuyenId=permission.QuyenId,
+            )
+        )
+
+    db.commit()
+    return [
+        {
+            "quyenId": permissions[code].QuyenId,
+            "maQuyen": code,
+            "tenQuyen": permissions[code].TenQuyen,
+        }
+        for code in sorted(requested_codes)
+    ]
+
+
+def list_user_permissions(db: Session, user_id: int) -> list[dict[str, str | int]]:
+    permissions = (
+        db.query(Quyen)
+        .join(
+            VaiTroQuyen,
+            VaiTroQuyen.QuyenId == Quyen.QuyenId,
+        )
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.VaiTroId == VaiTroQuyen.VaiTroId,
+        )
+        .filter(NguoiDungVaiTro.NguoiDungId == user_id)
+        .order_by(Quyen.QuyenId)
+        .all()
+    )
+    unique_permissions = {permission.MaQuyen: permission for permission in permissions}
+    return [
+        {
+            "quyenId": permission.QuyenId,
+            "maQuyen": permission.MaQuyen,
+            "tenQuyen": permission.TenQuyen,
+        }
+        for permission in unique_permissions.values()
+    ]

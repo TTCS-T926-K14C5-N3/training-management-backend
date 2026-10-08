@@ -1,7 +1,8 @@
 from sqlalchemy import (
     Column,
     Integer,
-    String
+    String,
+    Unicode,
 )
 
 from app.database import Base
@@ -23,11 +24,11 @@ class Quyen(Base):
     )
 
     TenQuyen = Column(
-        String(150),
+        Unicode(150),
         nullable=False
     )
 
     MoTa = Column(
-        String(255),
+        Unicode(255),
         nullable=True
     )
