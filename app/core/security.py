@@ -376,31 +376,7 @@ def require_permission(
             },
         ).first()
 
-        # ====================================================
-        # DEBUG - KIỂM TRA QUYỀN
-        # ====================================================
-
-        print(
-            f"User {current_user.NguoiDungId} "
-            f"đang yêu cầu quyền: {ma_quyen}"
-        )
-
-        print(
-            "Có quyền:",
-            permission is not None,
-        )
-
-        # ----------------------------------------------------
-        # Không có quyền
-        # ----------------------------------------------------
-
         if not permission:
-            print(
-                ">>> 403 FORBIDDEN: "
-                f"User {current_user.NguoiDungId} "
-                f"không có quyền {ma_quyen}"
-            )
-
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -408,15 +384,6 @@ def require_permission(
                     "thực hiện chức năng này."
                 ),
             )
-
-        # ----------------------------------------------------
-        # Có quyền
-        # ----------------------------------------------------
-
-        print(
-            f">>> 200: User {current_user.NguoiDungId} "
-            f"có quyền {ma_quyen}"
-        )
 
         return current_user
 

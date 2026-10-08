@@ -145,21 +145,25 @@ def initialize_role_permissions(db: Session) -> None:
                     )
 
         db.flush()
-        admin_role_permissions = {
-            link.QuyenId
-            for link in db.query(VaiTroQuyen)
-            .filter(VaiTroQuyen.VaiTroId == 8)
-            .all()
-        }
-        for code in ("ROLE_VIEW", "ROLE_UPDATE"):
-            permission_id = permissions_by_code[code].QuyenId
-            if permission_id not in admin_role_permissions:
-                db.add(
-                    VaiTroQuyen(
-                        VaiTroId=8,
-                        QuyenId=permission_id,
+        admin_roles = db.query(VaiTro).filter(
+            (VaiTro.VaiTroId == 8) | (VaiTro.VaiTroId == 1) | (VaiTro.TenVaiTro.ilike("%admin%"))
+        ).all()
+        for a_role in admin_roles:
+            curr_perms = {
+                link.QuyenId
+                for link in db.query(VaiTroQuyen)
+                .filter(VaiTroQuyen.VaiTroId == a_role.VaiTroId)
+                .all()
+            }
+            for code, _, _ in PERMISSION_CATALOG:
+                perm = permissions_by_code.get(code)
+                if perm and perm.QuyenId not in curr_perms:
+                    db.add(
+                        VaiTroQuyen(
+                            VaiTroId=a_role.VaiTroId,
+                            QuyenId=perm.QuyenId,
+                        )
                     )
-                )
 
     db.commit()
 

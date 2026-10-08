@@ -6,7 +6,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 # ============================================================
 
 class NguoiDungCreate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     ho_ten: str = Field(
+        alias="hoTen",
         min_length=1,
         max_length=100
     )
@@ -21,6 +24,7 @@ class NguoiDungCreate(BaseModel):
 
     so_dien_thoai: str | None = Field(
         default=None,
+        alias="soDienThoai",
         max_length=20
     )
 
@@ -29,8 +33,11 @@ class NguoiDungCreate(BaseModel):
 # ============================================================
 
 class NguoiDungUpdate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     ho_ten: str | None = Field(
         default=None,
+        alias="hoTen",
         min_length=1,
         max_length=100
     )
@@ -39,11 +46,13 @@ class NguoiDungUpdate(BaseModel):
 
     so_dien_thoai: str | None = Field(
         default=None,
+        alias="soDienThoai",
         max_length=20
     )
 
     trang_thai: str | None = Field(
         default=None,
+        alias="trangThai",
         max_length=50
     )
 
@@ -72,6 +81,8 @@ class NguoiDungLock(BaseModel):
 # ============================================================
 
 class NguoiDungResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     ho_ten: str
     email: EmailStr
@@ -81,7 +92,4 @@ class NguoiDungResponse(BaseModel):
     
     # 2 trường quan trọng cho task SCRUM-91
     role: str | None = Field(default="STUDENT", description="Vai trò của người dùng (ADMIN, TRAINER, STUDENT,...)")
-    permissions: list[str] = Field(default=[], description="Danh sách quyền hạn của người dùng")
-
-    class Config:
-        from_attributes = True  # Giúp Pydantic tự chuyển đổi dữ liệu từ ORM model (SQLAlchemy)
+    permissions: list[str] = Field(default=[], description="Danh sách quyền hạn của người dùng")
