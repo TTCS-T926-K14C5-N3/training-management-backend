@@ -1297,13 +1297,15 @@ def update_user(
 
         user.Email = email
 
-    if request.ho_ten:
+    if request.ho_ten is not None:
         user.HoTen = request.ho_ten.strip()
 
-    if request.so_dien_thoai:
-        user.SoDienThoai = (
-            request.so_dien_thoai.strip()
-        )
+    # Cho phép cập nhật hoặc xóa số điện thoại
+    if hasattr(request, "so_dien_thoai"):
+        if request.so_dien_thoai is not None:
+            user.SoDienThoai = request.so_dien_thoai.strip() or None
+        else:
+            user.SoDienThoai = None
 
     user.NgayCapNhat = datetime.now()
 

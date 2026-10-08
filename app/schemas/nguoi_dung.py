@@ -13,6 +13,12 @@ class NguoiDungCreate(BaseModel):
 
     email: EmailStr
 
+    password: str = Field(
+        min_length=6,
+        max_length=128,
+        description="Mật khẩu người dùng (tối thiểu 6 ký tự)"
+    )
+
     so_dien_thoai: str | None = Field(
         default=None,
         max_length=20
