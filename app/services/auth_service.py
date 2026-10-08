@@ -518,7 +518,7 @@ def admin_create_user(
         # ====================================================
 
         activation_link = (
-            "http://localhost:5173/login"
+            f"{FRONTEND_URL}/login"
             f"?activate={raw_activation_token}"
         )
 
@@ -736,6 +736,14 @@ def login_user(
     user.LyDoKhoa = None
     user.TrangThai = "HoatDong"
     user.NgayCapNhat = now
+
+    if user.TokenValidAfter and user.TokenValidAfter > now:
+        logger.warning(
+            "TokenValidAfter for user %s is in the future; "
+            "clamping it to the successful login time.",
+            user.NguoiDungId,
+        )
+        user.TokenValidAfter = now
 
     db.commit()
     db.refresh(user)
@@ -1293,9 +1301,11 @@ def update_user(
     if request.ho_ten:
         user.HoTen = request.ho_ten.strip()
 
-    if request.so_dien_thoai:
+    if "so_dien_thoai" in request.model_fields_set:
         user.SoDienThoai = (
             request.so_dien_thoai.strip()
+            if request.so_dien_thoai
+            else None
         )
 
     user.NgayCapNhat = datetime.now()

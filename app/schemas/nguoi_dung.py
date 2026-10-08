@@ -1,3 +1,5 @@
+import re
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
@@ -40,6 +42,37 @@ class NguoiDungUpdate(BaseModel):
         default=None,
         max_length=50
     )
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_domain(cls, value: EmailStr | None) -> EmailStr | None:
+        if value is None:
+            return None
+
+        top_level_domain = str(value).rsplit(".", maxsplit=1)[-1]
+        if len(top_level_domain) < 2:
+            raise ValueError("Email không đúng định dạng")
+
+        return value
+
+    @field_validator("so_dien_thoai")
+    @classmethod
+    def validate_so_dien_thoai(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None or value.strip() == "":
+            return None
+
+        value = value.strip()
+        pattern = r"^(0|\+84)(3|5|7|8|9)[0-9]{8}$"
+
+        if not re.fullmatch(pattern, value):
+            raise ValueError(
+                "Số điện thoại Việt Nam không hợp lệ"
+            )
+
+        return value
 
 
 # ============================================================

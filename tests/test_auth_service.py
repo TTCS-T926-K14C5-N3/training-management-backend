@@ -3,10 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import Unicode
 
 from app.schemas.login import LoginRequest
 from app.models.nguoi_dung import NguoiDung
+from app.schemas.nguoi_dung import NguoiDungUpdate
 from app.services import auth_service
 
 
@@ -39,6 +41,9 @@ class FakeSession:
 
     def commit(self):
         self.commit_count += 1
+
+    def refresh(self, _item):
+        pass
 
     def rollback(self):
         pass
@@ -143,3 +148,72 @@ def test_forgot_password_uses_configured_frontend_url(monkeypatch):
 def test_vietnamese_profile_fields_use_unicode_database_types():
     assert isinstance(NguoiDung.HoTen.type, Unicode)
     assert isinstance(NguoiDung.DiaChi.type, Unicode)
+
+
+def test_update_user_can_clear_phone_number():
+    user = SimpleNamespace(
+        NguoiDungId=19,
+        Email="user@example.com",
+        HoTen="Người dùng kiểm thử",
+        SoDienThoai="0912345678",
+        NgayCapNhat=None,
+    )
+    db = FakeSession(user)
+
+    auth_service.update_user(
+        db,
+        user.NguoiDungId,
+        NguoiDungUpdate(so_dien_thoai=None),
+    )
+
+    assert user.SoDienThoai is None
+    assert db.commit_count == 1
+
+
+@pytest.mark.parametrize(
+    "phone_number",
+    ["0912345678", "+84912345678", None, ""],
+)
+def test_user_update_accepts_valid_vietnamese_phone_numbers(phone_number):
+    request = NguoiDungUpdate(so_dien_thoai=phone_number)
+
+    assert request.so_dien_thoai == (
+        phone_number.strip() if phone_number else None
+    )
+
+
+@pytest.mark.parametrize(
+    "phone_number",
+    ["09222", "0123456789", "091 234 5678", "+84123456789"],
+)
+def test_user_update_rejects_invalid_vietnamese_phone_numbers(phone_number):
+    with pytest.raises(ValidationError):
+        NguoiDungUpdate(so_dien_thoai=phone_number)
+
+
+def test_user_update_rejects_invalid_email():
+    with pytest.raises(ValidationError):
+        NguoiDungUpdate(email="not-an-email")
+
+
+@pytest.mark.parametrize(
+    "email",
+    ["test@gmail.co", "user.name@example.com"],
+)
+def test_user_update_accepts_well_formed_email(email):
+    assert str(NguoiDungUpdate(email=email).email) == email
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "not-an-email",
+        "user@@example.com",
+        "user..name@example.com",
+        "user@-example.com",
+        "user@example.c",
+    ],
+)
+def test_user_update_rejects_malformed_email(email):
+    with pytest.raises(ValidationError):
+        NguoiDungUpdate(email=email)

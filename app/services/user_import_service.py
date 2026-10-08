@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import FRONTEND_URL
 from pwdlib import PasswordHash
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
@@ -656,7 +657,7 @@ def create_user_from_excel_row(
     # --------------------------------------------------------
 
     activation_link = (
-        "http://localhost:5173/login"
+        f"{FRONTEND_URL}/login"
         f"?activate={raw_token}"
     )
 

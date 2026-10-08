@@ -27,34 +27,24 @@ if not DB_SERVER:
         "Hay tao file .env tu .env.example."
     )
 
-import os
+DB_TRUSTED_CONNECTION = os.getenv(
+    "DB_TRUSTED_CONNECTION",
+    "yes",
+).strip().lower() in {"1", "true", "yes", "y"}
 
-from dotenv import load_dotenv
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-
-load_dotenv()
-
-
-DB_SERVER = os.getenv(
-    "DB_SERVER"
-)
-
-DB_NAME = os.getenv(
-    "DB_NAME",
-    "QuanLyDaoTao"
-)
-
-DB_DRIVER = os.getenv(
-    "DB_DRIVER",
-    "ODBC Driver 18 for SQL Server"
-)
-
-
-if not DB_SERVER:
+if not DB_TRUSTED_CONNECTION and not (DB_USER and DB_PASSWORD):
     raise ValueError(
-        "Chua cau hinh DB_SERVER. "
-        "Hay tao file .env tu .env.example."
+        "Can cau hinh DB_USER va DB_PASSWORD khi "
+        "DB_TRUSTED_CONNECTION=no."
     )
+
+DB_TRUST_SERVER_CERTIFICATE = os.getenv(
+    "DB_TRUST_SERVER_CERTIFICATE",
+    "yes",
+).strip().lower() in {"1", "true", "yes", "y"}
 
 
 # ============================================================
@@ -90,6 +80,15 @@ FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
     "http://localhost:5173"
 ).rstrip("/")
+
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 ADMIN_CONTACT_PHONE = os.getenv(
     "ADMIN_CONTACT_PHONE",
