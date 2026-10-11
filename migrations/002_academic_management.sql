@@ -75,6 +75,14 @@ BEGIN
     );
 END;
 
+IF COL_LENGTH(N'dbo.LopHoc_MonHoc', N'ThuTu') IS NULL
+BEGIN
+    ALTER TABLE dbo.LopHoc_MonHoc
+    ADD ThuTu INT NOT NULL
+        CONSTRAINT DF_LopHoc_MonHoc_ThuTu DEFAULT 1;
+END;
+
+
 IF OBJECT_ID(N'dbo.Diem', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.Diem

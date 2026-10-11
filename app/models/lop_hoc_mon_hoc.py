@@ -1,3 +1,4 @@
+
 from sqlalchemy import Column, ForeignKey, Integer
 
 from app.database import Base
@@ -15,4 +16,9 @@ class LopHocMonHoc(Base):
         Integer,
         ForeignKey("MonHoc.MonHocId"),
         primary_key=True,
+    )
+    ThuTu = Column(
+        Integer,
+        nullable=False,
+        default=1,
     )

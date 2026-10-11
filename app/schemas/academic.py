@@ -94,3 +94,14 @@ class GradeWrite(BaseModel):
         max_digits=4,
         decimal_places=2,
     )
+
+class SubjectOrderItem(BaseModel):
+    mon_hoc_id: int = Field(alias="monHocId", gt=0)
+    thu_tu: int = Field(alias="thuTu", ge=1)
+
+
+class SubjectOrderUpdate(BaseModel):
+    mon_hocs: list[SubjectOrderItem] = Field(
+        alias="monHocs",
+        min_length=1,
+    )

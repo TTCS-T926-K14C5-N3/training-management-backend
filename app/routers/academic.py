@@ -14,13 +14,16 @@ from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
+    
 from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
     SubjectCreate,
+    SubjectOrderUpdate,
     SubjectUpdate,
     TrainingProgramWrite,
 )
+
 from app.services.academic_service import (
     INSTRUCTOR_ROLE_ID,
     STUDENT_ROLE_ID,
@@ -103,7 +106,7 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
             LopHocMonHoc.MonHocId == MonHoc.MonHocId,
         )
         .filter(LopHocMonHoc.LopHocId == lop_hoc.LopHocId)
-        .order_by(MonHoc.MaMonHoc)
+        .order_by(LopHocMonHoc.ThuTu, MonHoc.MaMonHoc)
         .all()
     )
     return {
@@ -537,6 +540,78 @@ def update_class(
     return _class_payload(db, lop_hoc)
 
 
+@router.put(
+    "/classes/{class_id}/subject-order",
+    dependencies=[Depends(require_permission("CLASS_UPDATE"))],
+)
+def update_class_subject_order(
+    class_id: int,
+    request: SubjectOrderUpdate,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lop_hoc = _get_class_or_404(db, class_id)
+    _ensure_class_scope(db, current_user, lop_hoc)
+
+    if lop_hoc.TrangThai != "Đang hoạt động":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể chỉnh sửa lớp đã ngừng hoạt động.",
+        )
+
+    items = request.mon_hocs
+    subject_ids = [item.mon_hoc_id for item in items]
+    orders = [item.thu_tu for item in items]
+
+    if len(subject_ids) != len(set(subject_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Danh sách có môn học bị trùng.",
+        )
+
+    if len(orders) != len(set(orders)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Thứ tự môn học không được trùng.",
+        )
+
+    class_subjects = (
+        db.query(LopHocMonHoc)
+        .filter(LopHocMonHoc.LopHocId == class_id)
+        .all()
+    )
+    existing_ids = {item.MonHocId for item in class_subjects}
+
+    if set(subject_ids) != existing_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Danh sách phải chứa đúng các môn học hiện có của lớp.",
+        )
+
+    try:
+        for item in items:
+            db.query(LopHocMonHoc).filter(
+                LopHocMonHoc.LopHocId == class_id,
+                LopHocMonHoc.MonHocId == item.mon_hoc_id,
+            ).update(
+                {LopHocMonHoc.ThuTu: item.thu_tu},
+                synchronize_session=False,
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "message": "Đã cập nhật thứ tự môn học.",
+        "lopHocId": class_id,
+        "monHocs": [
+            {"monHocId": item.mon_hoc_id, "thuTu": item.thu_tu}
+            for item in items
+        ],
+    }
+
+
 @router.delete(
     "/classes/{class_id}",
     dependencies=[Depends(require_permission("CLASS_DELETE"))],
@@ -851,7 +926,7 @@ def get_grade_options(
                 LopHocMonHoc.LopHocId == lop_hoc.LopHocId,
                 MonHoc.TrangThai == "Đang hoạt động",
             )
-            .order_by(MonHoc.MaMonHoc)
+            .order_by(LopHocMonHoc.ThuTu, MonHoc.MaMonHoc)
             .all()
         )
         payload.append(
