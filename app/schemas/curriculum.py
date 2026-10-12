@@ -46,3 +46,8 @@ class SessionsWrite(BaseModel):
         if len(sequences) != len(set(sequences)):
             raise ValueError("Thứ tự buổi học không được trùng lặp.")
         return self
+
+
+class SessionCloneWrite(BaseModel):
+    source_subject_id: int = Field(alias="sourceSubjectId", gt=0)
+    source_program_id: int | None = Field(default=None, alias="sourceProgramId", gt=0)

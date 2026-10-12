@@ -28,6 +28,7 @@ from app.schemas.academic import (
 )
 from app.schemas.curriculum import (
     ProgramSubjectsWrite,
+    SessionCloneWrite,
     SessionsWrite,
 )
 from app.services.academic_service import (
@@ -811,6 +812,16 @@ def archive_subject(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Không tìm thấy môn học.",
         )
+    if (
+        db.query(LopHocMonHoc.MonHocId)
+        .filter(LopHocMonHoc.MonHocId == subject_id)
+        .first()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Môn học đã có lớp học nên không thể xóa.",
+        )
     subject.TrangThai = "Ngừng hoạt động"
     _commit(db, "Không thể lưu trữ môn học.")
     return {"message": "Đã lưu trữ môn học."}
@@ -1128,6 +1139,98 @@ def replace_program_subject_sessions(
             detail="Không thể lưu danh sách buổi học.",
         ) from error
     return _program_subject_row(db, association)
+
+
+@router.post(
+    "/programs/{program_id}/subjects/{subject_id}/sessions/clone",
+    dependencies=[Depends(require_permission("CURRICULUM_UPDATE"))],
+)
+def clone_program_subject_sessions(
+    program_id: int,
+    subject_id: int,
+    request: SessionCloneWrite,
+    db: Session = Depends(get_db),
+):
+    _get_program_or_404(db, program_id)
+    target_association = _program_subject_or_404(db, program_id, subject_id)
+    target_subject = db.query(MonHoc).filter(MonHoc.MonHocId == subject_id).one()
+
+    source_assoc = None
+    if request.source_program_id is not None:
+        source_assoc = (
+            db.query(ChuongTrinhMonHoc)
+            .filter(
+                ChuongTrinhMonHoc.ChuongTrinhId == request.source_program_id,
+                ChuongTrinhMonHoc.MonHocId == request.source_subject_id,
+            )
+            .first()
+        )
+    else:
+        source_assoc = (
+            db.query(ChuongTrinhMonHoc)
+            .filter(
+                ChuongTrinhMonHoc.ChuongTrinhId == program_id,
+                ChuongTrinhMonHoc.MonHocId == request.source_subject_id,
+            )
+            .first()
+        )
+        if source_assoc is None:
+            source_assoc = (
+                db.query(ChuongTrinhMonHoc)
+                .join(
+                    BuoiHoc,
+                    BuoiHoc.ChuongTrinhMonHocId == ChuongTrinhMonHoc.ChuongTrinhMonHocId,
+                )
+                .filter(ChuongTrinhMonHoc.MonHocId == request.source_subject_id)
+                .first()
+            )
+
+    if source_assoc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy môn học nguồn hoặc môn học nguồn chưa được cấu hình buổi học.",
+        )
+
+    source_sessions = (
+        db.query(BuoiHoc)
+        .filter(BuoiHoc.ChuongTrinhMonHocId == source_assoc.ChuongTrinhMonHocId)
+        .order_by(BuoiHoc.SoThuTu)
+        .all()
+    )
+
+    if not source_sessions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Môn học nguồn chưa có danh sách buổi học để nhân bản.",
+        )
+
+    cloned_sessions = source_sessions[: target_subject.SoBuoi]
+
+    db.query(BuoiHoc).filter(
+        BuoiHoc.ChuongTrinhMonHocId == target_association.ChuongTrinhMonHocId
+    ).delete(synchronize_session=False)
+
+    db.add_all(
+        [
+            BuoiHoc(
+                ChuongTrinhMonHocId=target_association.ChuongTrinhMonHocId,
+                SoThuTu=index + 1,
+                ChuDe=item.ChuDe,
+                MucTieu=item.MucTieu,
+            )
+            for index, item in enumerate(cloned_sessions)
+        ]
+    )
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể nhân bản danh sách buổi học.",
+        ) from error
+
+    return _program_subject_row(db, target_association)
 
 
 @router.get(

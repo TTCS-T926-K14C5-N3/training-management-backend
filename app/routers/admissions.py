@@ -14,6 +14,7 @@ from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.schemas.admissions import (
+    BulkLeadAssignmentsWrite,
     LeadAssignmentsWrite,
     LeadWrite,
     PublicLeadCreate,
@@ -448,6 +449,56 @@ def create_lead(
     )
     _commit(db, "Không thể tạo khách hàng tiềm năng.")
     return _lead_payload(db, lead)
+
+
+@router.put(
+    "/leads/bulk-assignments",
+    dependencies=[Depends(require_permission("LEAD_ASSIGN"))],
+)
+def bulk_assign_leads(
+    request: BulkLeadAssignmentsWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    roles = user_role_ids(db, current_user.NguoiDungId)
+    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo hoặc quản trị viên được phân công tư vấn viên.",
+        )
+    leads = db.query(Lead).filter(Lead.LeadId.in_(request.lead_ids)).all()
+    if len(leads) != len(request.lead_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Một hoặc nhiều khách hàng tiềm năng không tồn tại.",
+        )
+    _validate_consultants(db, request.consultant_ids)
+    now = datetime.now()
+    desired_ids = set(request.consultant_ids)
+    for lead in leads:
+        current_rows = _current_assignments(db, lead.LeadId)
+        current_ids = {row.NguoiDungId for row in current_rows}
+        for assignment in current_rows:
+            if assignment.NguoiDungId not in desired_ids:
+                assignment.DangPhanCong = False
+                assignment.NgayBoPhanCong = now
+        for user_id in sorted(desired_ids - current_ids):
+            db.add(
+                LeadAssignmentHistory(
+                    LeadId=lead.LeadId,
+                    NguoiDungId=user_id,
+                    NguoiPhanCongId=current_user.NguoiDungId,
+                    NgayPhanCong=now,
+                    DangPhanCong=True,
+                )
+            )
+        lead.NgayCapNhat = now
+    _commit(db, "Không thể lưu phân công hàng loạt.")
+    return {
+        "message": f"Đã phân công {len(leads)} khách hàng tiềm năng.",
+        "leadIds": request.lead_ids,
+        "consultantIds": sorted(desired_ids),
+    }
 
 
 @router.get(

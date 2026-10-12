@@ -11,10 +11,13 @@ from app.models.admissions import Lead
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.mon_hoc import MonHoc
 from app.models.vai_tro import VaiTro
 from app.routers.academic import (
     archive_subject,
+    clone_program_subject_sessions,
     create_subject,
     get_program_subject_sessions,
     get_program_subjects,
@@ -23,6 +26,7 @@ from app.routers.academic import (
 )
 from app.routers.admissions import (
     _public_submissions,
+    bulk_assign_leads,
     create_lead,
     get_lead_assignments,
     list_admissions_consultants,
@@ -32,11 +36,16 @@ from app.routers.admissions import (
 )
 from app.schemas.academic import SubjectCreate
 from app.schemas.admissions import (
+    BulkLeadAssignmentsWrite,
     LeadAssignmentsWrite,
     LeadWrite,
     PublicLeadCreate,
 )
-from app.schemas.curriculum import ProgramSubjectsWrite, SessionsWrite
+from app.schemas.curriculum import (
+    ProgramSubjectsWrite,
+    SessionCloneWrite,
+    SessionsWrite,
+)
 from app.services.rbac_service import DEFAULT_ROLE_PERMISSIONS
 
 
@@ -146,9 +155,9 @@ def test_program_subjects_preserve_order_prerequisite_and_session_limit(db: Sess
     assert [row["monHocId"] for row in rows] == [first["monHocId"], second["monHocId"]]
     assert rows[1]["monTienQuyetId"] == first["monHocId"]
     assert rows[0]["soBuoi"] == 2
-    assert db.query(MonHoc).filter_by(
+    assert float(db.query(MonHoc).filter_by(
         MonHocId=first["monHocId"]
-    ).one().TrongSo == 0.4
+    ).one().TrongSo) == 0.4
     reordered = replace_program_subjects(
         1,
         ProgramSubjectsWrite(
@@ -194,6 +203,81 @@ def test_program_subjects_preserve_order_prerequisite_and_session_limit(db: Sess
             db,
         )
     assert error.value.status_code == 422
+
+
+def test_clone_program_subject_sessions(db: Session):
+    add_program(db)
+    first = create_subject(
+        SubjectCreate(maMonHoc="CLONE1", tenMonHoc="Môn nguồn", soBuoi=3),
+        db,
+    )
+    second = create_subject(
+        SubjectCreate(maMonHoc="CLONE2", tenMonHoc="Môn đích", soBuoi=2),
+        db,
+    )
+    third = create_subject(
+        SubjectCreate(maMonHoc="CLONE3", tenMonHoc="Môn chưa có buổi", soBuoi=2),
+        db,
+    )
+    replace_program_subjects(
+        1,
+        ProgramSubjectsWrite(
+            subjects=[
+                {"monHocId": first["monHocId"], "thuTu": 1},
+                {"monHocId": second["monHocId"], "thuTu": 2},
+                {"monHocId": third["monHocId"], "thuTu": 3},
+            ]
+        ),
+        db,
+    )
+
+    # Save 3 sessions for first subject
+    replace_program_subject_sessions(
+        1,
+        first["monHocId"],
+        SessionsWrite(
+            sessions=[
+                {"soThuTu": 1, "chuDe": "Buổi 1 lý thuyết", "mucTieu": "Nắm vững lý thuyết"},
+                {"soThuTu": 2, "chuDe": "Buổi 2 thực hành", "mucTieu": "Làm bài tập thực tế"},
+                {"soThuTu": 3, "chuDe": "Buổi 3 kiểm tra", "mucTieu": "Đánh giá kết quả"},
+            ]
+        ),
+        db,
+    )
+
+    # Clone sessions from first to second (second has SoBuoi=2, so it clamps to 2 sessions)
+    cloned = clone_program_subject_sessions(
+        1,
+        second["monHocId"],
+        SessionCloneWrite(sourceSubjectId=first["monHocId"]),
+        db,
+    )
+    assert len(cloned["sessions"]) == 2
+    assert cloned["sessions"][0]["chuDe"] == "Buổi 1 lý thuyết"
+    assert cloned["sessions"][0]["mucTieu"] == "Nắm vững lý thuyết"
+    assert cloned["sessions"][1]["chuDe"] == "Buổi 2 thực hành"
+    assert cloned["sessions"][1]["soThuTu"] == 2
+
+    # Clone from third (which has no sessions) -> should raise 400
+    with pytest.raises(HTTPException) as err:
+        clone_program_subject_sessions(
+            1,
+            second["monHocId"],
+            SessionCloneWrite(sourceSubjectId=third["monHocId"]),
+            db,
+        )
+    assert err.value.status_code == 400
+
+    # Clone from nonexistent subject -> should raise 404
+    with pytest.raises(HTTPException) as err:
+        clone_program_subject_sessions(
+            1,
+            second["monHocId"],
+            SessionCloneWrite(sourceSubjectId=9999),
+            db,
+        )
+    assert err.value.status_code == 404
+
 
 
 def test_program_subject_rejects_self_and_cyclic_prerequisites(db: Session):
@@ -372,3 +456,104 @@ def test_consultants_are_listed_and_only_assigned_leads_are_visible(db: Session)
         from app.routers.admissions import _get_visible_lead
         _get_visible_lead(db, lead["leadId"], unassigned_consultant)
     assert error.value.status_code == 404
+
+
+def test_subject_cannot_be_archived_when_attached_to_class(db: Session):
+    subject = create_subject(
+        SubjectCreate(
+            maMonHoc="SUB_ACTIVE",
+            tenMonHoc="Môn gắn lớp",
+            soBuoi=5,
+        ),
+        db,
+    )
+    program = add_program(db, 2)
+    instructor = add_user(db, 88, 3, "Instructor")
+    class_obj = LopHoc(
+        MaLop="CLASS01",
+        TenLop="Lớp Thử Nghiệm",
+        ChuongTrinhId=program.ChuongTrinhId,
+        GiangVienId=instructor.NguoiDungId,
+        NamHoc="2025-2026",
+        TrangThai="DangMo",
+        NgayTao=datetime.now(),
+    )
+    db.add(class_obj)
+    db.flush()
+    db.add(
+        LopHocMonHoc(
+            LopHocId=class_obj.LopHocId,
+            MonHocId=subject["monHocId"],
+        )
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as conflict_err:
+        archive_subject(subject["monHocId"], db)
+    assert conflict_err.value.status_code == 409
+    assert "Môn học đã có lớp học nên không thể xóa" in conflict_err.value.detail
+
+    # Remove from class and archive should succeed
+    db.query(LopHocMonHoc).filter(
+        LopHocMonHoc.MonHocId == subject["monHocId"]
+    ).delete()
+    db.commit()
+
+    archive_res = archive_subject(subject["monHocId"], db)
+    assert archive_res["message"] == "Đã lưu trữ môn học."
+    archived_sub = db.query(MonHoc).filter(MonHoc.MonHocId == subject["monHocId"]).first()
+    assert archived_sub.TrangThai == "Ngừng hoạt động"
+
+
+def test_bulk_assign_leads_updates_multiple_leads_and_records_history(db: Session):
+    add_program(db, 3)
+    manager = add_user(db, 71, 7, "Training Manager Bulk")
+    consultant_a = add_user(db, 53, 5, "Consultant A")
+    consultant_b = add_user(db, 54, 5, "Consultant B")
+
+    lead1 = create_lead(
+        LeadWrite(
+            hoTen="Lead 1",
+            soDienThoai="0911000001",
+            chuongTrinhId=3,
+            nguon="Website",
+        ),
+        manager,
+        db,
+    )
+    lead2 = create_lead(
+        LeadWrite(
+            hoTen="Lead 2",
+            soDienThoai="0911000002",
+            chuongTrinhId=3,
+            nguon="Facebook",
+        ),
+        manager,
+        db,
+    )
+
+    result = bulk_assign_leads(
+        BulkLeadAssignmentsWrite(
+            leadIds=[lead1["leadId"], lead2["leadId"]],
+            consultantIds=[consultant_a.NguoiDungId, consultant_b.NguoiDungId],
+        ),
+        manager,
+        db,
+    )
+    assert result["leadIds"] == [lead1["leadId"], lead2["leadId"]]
+    assert result["consultantIds"] == [consultant_a.NguoiDungId, consultant_b.NguoiDungId]
+
+    history1 = get_lead_assignments(lead1["leadId"], manager, db)
+    assert len(history1) == 2
+    assert {h["nguoiDungId"] for h in history1} == {
+        consultant_a.NguoiDungId,
+        consultant_b.NguoiDungId,
+    }
+
+    history2 = get_lead_assignments(lead2["leadId"], manager, db)
+    assert len(history2) == 2
+
+    # Consultants should now see both leads
+    assert len(list_leads(None, None, None, None, None, None, consultant_a, db)) == 2
+    assert len(list_leads(None, None, None, None, None, None, consultant_b, db)) == 2
+

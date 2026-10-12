@@ -80,3 +80,29 @@ class LeadAssignmentsWrite(BaseModel):
         if any(user_id <= 0 for user_id in value) or len(value) != len(set(value)):
             raise ValueError("Danh sách tư vấn viên không hợp lệ hoặc bị trùng.")
         return value
+
+
+class BulkLeadAssignmentsWrite(BaseModel):
+    lead_ids: list[int] = Field(
+        alias="leadIds",
+        validation_alias=AliasChoices("leadIds", "lead_ids"),
+    )
+    consultant_ids: list[int] = Field(
+        alias="consultantIds",
+        validation_alias=AliasChoices("consultantIds", "assignedUserIds", "consultant_ids"),
+    )
+
+    @field_validator("lead_ids")
+    @classmethod
+    def validate_unique_leads(cls, value: list[int]) -> list[int]:
+        if not value or any(lead_id <= 0 for lead_id in value) or len(value) != len(set(value)):
+            raise ValueError("Danh sách khách hàng tiềm năng không hợp lệ hoặc bị trùng.")
+        return value
+
+    @field_validator("consultant_ids")
+    @classmethod
+    def validate_unique_consultants(cls, value: list[int]) -> list[int]:
+        if any(user_id <= 0 for user_id in value) or len(value) != len(set(value)):
+            raise ValueError("Danh sách tư vấn viên không hợp lệ hoặc bị trùng.")
+        return value
+
