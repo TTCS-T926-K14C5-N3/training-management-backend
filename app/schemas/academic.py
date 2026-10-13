@@ -1,4 +1,6 @@
+from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -82,6 +84,12 @@ class SubjectUpdate(SubjectCreate):
     pass
 
 
+class ClassInstructorAssignment(BaseModel):
+    mon_hoc_id: int = Field(alias="monHocId", gt=0)
+    giang_vien_id: int = Field(alias="giangVienId", gt=0)
+    vai_tro: Literal["Chính", "Trợ giảng"] = Field(alias="vaiTro")
+
+
 class ClassWrite(BaseModel):
     ma_lop: str = Field(alias="maLop", min_length=1, max_length=30)
     ten_lop: str = Field(alias="tenLop", min_length=1, max_length=150)
@@ -94,6 +102,71 @@ class ClassWrite(BaseModel):
     giang_vien_id: int | None = Field(default=None, alias="giangVienId", gt=0)
     hoc_vien_ids: list[int] = Field(default_factory=list, alias="hocVienIds")
     mon_hoc_ids: list[int] = Field(default_factory=list, alias="monHocIds")
+    ngay_khai_giang: date = Field(default_factory=date.today, alias="ngayKhaiGiang")
+    si_so_toi_da: int = Field(default=30, alias="siSoToiDa", gt=0, le=500)
+    hinh_thuc: Literal["Trực tiếp", "Trực tuyến", "Kết hợp"] = Field(
+        default="Trực tiếp",
+        alias="hinhThuc",
+    )
+    phong_hoc_id: int | None = Field(default=None, alias="phongHocId", gt=0)
+    link_truc_tuyen: str | None = Field(
+        default=None,
+        alias="linkTrucTuyen",
+        max_length=500,
+    )
+    tien_do: Decimal = Field(
+        default=Decimal("0"),
+        alias="tienDo",
+        ge=0,
+        le=100,
+        max_digits=5,
+        decimal_places=2,
+    )
+    trang_thai: Literal[
+        "Chuẩn bị",
+        "Đang học",
+        "Kết thúc",
+        "Hủy",
+        "Đang hoạt động",
+    ] = Field(default="Chuẩn bị", alias="trangThai")
+    phan_cong_giang_vien: list[ClassInstructorAssignment] = Field(
+        default_factory=list,
+        alias="phanCongGiangVien",
+    )
+
+    @field_validator("hoc_vien_ids", "mon_hoc_ids")
+    @classmethod
+    def validate_unique_ids(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value) or len(value) != len(set(value)):
+            raise ValueError("Danh sách mã không hợp lệ hoặc bị trùng.")
+        return value
+
+    @field_validator("link_truc_tuyen", mode="before")
+    @classmethod
+    def normalize_online_link(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+
+class RoomWrite(BaseModel):
+    ma_phong: str = Field(alias="maPhong", min_length=1, max_length=30)
+    ten_phong: str = Field(alias="tenPhong", min_length=1, max_length=100)
+    suc_chua: int = Field(alias="sucChua", gt=0, le=1000)
+
+    @field_validator("ma_phong", "ten_phong", mode="before")
+    @classmethod
+    def strip_room_text(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ClassEnrollmentWrite(BaseModel):
+    hoc_vien_ids: list[int] = Field(alias="hocVienIds", min_length=1)
+
+    @field_validator("hoc_vien_ids")
+    @classmethod
+    def validate_student_ids(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value) or len(value) != len(set(value)):
+            raise ValueError("Danh sách học viên không hợp lệ hoặc bị trùng.")
+        return value
 
 
 class GradeWrite(BaseModel):

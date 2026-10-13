@@ -20,6 +20,7 @@ class Lead(Base):
     Email = Column(String(255), nullable=True)
     Nguon = Column(Unicode(100), nullable=False)
     GhiChu = Column(Unicode(1000), nullable=True)
+    LyDoTuChoi = Column(Unicode(500), nullable=True)
     ChuongTrinhId = Column(
         Integer,
         ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),

@@ -17,3 +17,8 @@ class LopHocHocVien(Base):
         primary_key=True,
     )
     NgayThamGia = Column(DateTime, nullable=False)
+    NguoiGhiDanhId = Column(
+        Integer,
+        ForeignKey("NguoiDung.NguoiDungId"),
+        nullable=True,
+    )

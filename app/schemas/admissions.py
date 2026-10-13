@@ -1,4 +1,21 @@
+from datetime import datetime
+
 from pydantic import AliasChoices, BaseModel, Field, field_validator
+
+
+LEAD_STATUSES = {
+    "Mới",
+    "Đã liên hệ",
+    "Đang tư vấn",
+    "Hẹn học thử",
+    "Chốt",
+    "Từ chối",
+    "Đang liên hệ",
+    "Tiềm năng",
+    "Đã chuyển đổi",
+    "Đã nhập học",
+    "Không tiềm năng",
+}
 
 
 class PublicLeadCreate(BaseModel):
@@ -40,6 +57,11 @@ class LeadWrite(BaseModel):
     )
     nguon: str = Field(alias="nguon", min_length=1, max_length=100)
     ghi_chu: str | None = Field(default=None, alias="ghiChu", max_length=1000)
+    ly_do_tu_choi: str | None = Field(
+        default=None,
+        alias="lyDoTuChoi",
+        max_length=500,
+    )
     trang_thai: str = Field(default="Mới", alias="trangThai")
 
     @field_validator("ho_ten", "so_dien_thoai", "nguon", mode="before")
@@ -62,14 +84,7 @@ class LeadWrite(BaseModel):
     @field_validator("trang_thai")
     @classmethod
     def validate_status(cls, value: str) -> str:
-        if value not in {
-            "Mới",
-            "Đang liên hệ",
-            "Tiềm năng",
-            "Đã chuyển đổi",
-            "Đã nhập học",
-            "Không tiềm năng",
-        }:
+        if value not in LEAD_STATUSES:
             raise ValueError("Trạng thái khách hàng tiềm năng không hợp lệ.")
         return value
 
@@ -77,6 +92,69 @@ class LeadWrite(BaseModel):
     @classmethod
     def normalize_note(cls, value: str | None) -> str | None:
         return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("ly_do_tu_choi", mode="before")
+    @classmethod
+    def normalize_decline_reason(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("ly_do_tu_choi")
+    @classmethod
+    def require_decline_reason(cls, value: str | None, info) -> str | None:
+        if info.data.get("trang_thai") == "Từ chối" and not value:
+            raise ValueError("Vui lòng chọn hoặc nhập lý do từ chối.")
+        return value
+
+
+class LeadInteractionWrite(BaseModel):
+    loai: str = Field(alias="loai")
+    noi_dung: str = Field(alias="noiDung", min_length=1, max_length=2000)
+    thoi_diem: datetime | None = Field(default=None, alias="thoiDiem")
+    hen_goi_lai_luc: datetime | None = Field(default=None, alias="henGoiLaiLuc")
+
+    @field_validator("loai")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        if value not in {"Gọi", "Nhắn tin", "Gặp"}:
+            raise ValueError("Loại tương tác không hợp lệ.")
+        return value
+
+    @field_validator("noi_dung", mode="before")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("hen_goi_lai_luc")
+    @classmethod
+    def validate_follow_up(cls, value: datetime | None, info) -> datetime | None:
+        happened_at = info.data.get("thoi_diem")
+        if value is not None and happened_at is not None and value < happened_at:
+            raise ValueError("Thời điểm gọi lại phải sau thời điểm tương tác.")
+        return value
+
+
+class LeadStatusWrite(BaseModel):
+    trang_thai: str = Field(alias="trangThai")
+    ly_do_tu_choi: str | None = Field(default=None, alias="lyDoTuChoi", max_length=500)
+
+    @field_validator("trang_thai")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in LEAD_STATUSES:
+            raise ValueError("Trạng thái khách hàng tiềm năng không hợp lệ.")
+        return value
+
+    @field_validator("ly_do_tu_choi", mode="before")
+    @classmethod
+    def normalize_reason(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("ly_do_tu_choi")
+    @classmethod
+    def require_reason(cls, value: str | None, info) -> str | None:
+        if info.data.get("trang_thai") == "Từ chối" and not value:
+            raise ValueError("Vui lòng chọn hoặc nhập lý do từ chối.")
+        return value
 
 
 class LeadAssignmentsWrite(BaseModel):

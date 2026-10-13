@@ -29,11 +29,13 @@ from app.routers.academic import (
     list_grades,
     update_class,
     update_grade,
+    update_room,
     update_training_program,
 )
 from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
+    RoomWrite,
     SubjectCreate,
     TrainingProgramWrite,
 )
@@ -554,3 +556,36 @@ def test_academic_routes_are_registered_in_the_fastapi_app():
     assert "/academic/programs/{program_id}" in paths
     assert "/academic/grades" in paths
     assert "/academic/subjects" in paths
+    assert "/academic/rooms/{room_id}" in paths
+
+
+def test_room_can_be_updated_and_missing_room_returns_404(db: Session):
+    from app.models.phong_hoc import PhongHoc
+
+    room = PhongHoc(
+        MaPhong="A101",
+        TenPhong="Phòng A101",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    db.add(room)
+    db.commit()
+
+    updated = update_room(
+        room.PhongHocId,
+        RoomWrite(maPhong="A102", tenPhong="Phòng A102", sucChua=42),
+        db,
+    )
+
+    assert updated["maPhong"] == "A102"
+    assert updated["tenPhong"] == "Phòng A102"
+    assert updated["sucChua"] == 42
+    assert db.query(PhongHoc).filter_by(PhongHocId=room.PhongHocId).one().SucChua == 42
+
+    with pytest.raises(HTTPException) as error:
+        update_room(
+            999,
+            RoomWrite(maPhong="A999", tenPhong="Phòng A999", sucChua=1),
+            db,
+        )
+    assert error.value.status_code == 404
