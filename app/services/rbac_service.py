@@ -63,6 +63,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "GRADE_UPDATE",
         "QUAN_LY_DIEM",
         "CLASS_VIEW",
+        "CURRICULUM_VIEW",
     ),
     4: (),
     5: (
