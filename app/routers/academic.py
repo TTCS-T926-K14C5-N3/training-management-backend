@@ -724,6 +724,16 @@ def list_subjects(
     if not include_inactive:
         query = query.filter(MonHoc.TrangThai == "Đang hoạt động")
     subjects = query.order_by(MonHoc.MaMonHoc).all()
+    applied_subject_ids = {
+        subject_id
+        for (subject_id,) in db.query(ChuongTrinhMonHoc.MonHocId)
+        .distinct()
+        .all()
+    }
+    applied_subject_ids.update(
+        subject_id
+        for (subject_id,) in db.query(LopHocMonHoc.MonHocId).distinct().all()
+    )
     return [
         {
             "monHocId": subject.MonHocId,
@@ -734,6 +744,7 @@ def list_subjects(
             "trongSo": float(subject.TrongSo),
             "moTaChuanDauRa": subject.MoTaChuanDauRa,
             "trangThai": subject.TrangThai,
+            "daApDung": subject.MonHocId in applied_subject_ids,
         }
         for subject in subjects
     ]

@@ -110,7 +110,7 @@ BEGIN
         Email VARCHAR(255) NULL,
         Nguon NVARCHAR(100) NOT NULL,
         GhiChu NVARCHAR(1000) NULL,
-        ChuongTrinhId INT NOT NULL,
+        ChuongTrinhId INT NULL,
         TrangThai NVARCHAR(30) NOT NULL
             CONSTRAINT DF_TuyenSinh_Lead_TrangThai DEFAULT N'Mới',
         NgayTao DATETIME2 NOT NULL
@@ -128,6 +128,16 @@ BEGIN
             FOREIGN KEY (NguoiTaoId) REFERENCES dbo.NguoiDung(NguoiDungId)
     );
 END;
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'dbo.TuyenSinh_Lead')
+      AND name = N'ChuongTrinhId'
+      AND is_nullable = 0
+)
+    ALTER TABLE dbo.TuyenSinh_Lead ALTER COLUMN ChuongTrinhId INT NULL;
 
 IF COL_LENGTH(N'dbo.TuyenSinh_Lead', N'GhiChu') IS NULL
     ALTER TABLE dbo.TuyenSinh_Lead ADD GhiChu NVARCHAR(1000) NULL;

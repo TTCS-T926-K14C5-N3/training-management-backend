@@ -1,15 +1,16 @@
 from datetime import date, datetime, time, timedelta
+import logging
 import re
 import time as monotonic_time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user, require_permission
 from app.database import get_db
-from app.models.admissions import Lead, LeadAssignmentHistory
+from app.models.admissions import Lead, LeadAssignmentHistory, LeadConversion
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
@@ -20,9 +21,12 @@ from app.schemas.admissions import (
     PublicLeadCreate,
 )
 from app.services.academic_service import user_role_ids
+from app.services.auth_service import prepare_student_account
+from app.services.email_service import send_activation_email
 
 
 router = APIRouter(prefix="/admissions", tags=["Admissions"])
+logger = logging.getLogger(__name__)
 
 TRAINING_MANAGER_ROLE_ID = 7
 ADMIN_ROLE_ID = 8
@@ -56,7 +60,7 @@ def _current_assignments(db: Session, lead_id: int) -> list[LeadAssignmentHistor
         db.query(LeadAssignmentHistory)
         .filter(
             LeadAssignmentHistory.LeadId == lead_id,
-            LeadAssignmentHistory.DangPhanCong.is_(True),
+            LeadAssignmentHistory.DangPhanCong.in_([True]),
         )
         .order_by(
             LeadAssignmentHistory.NgayPhanCong,
@@ -71,6 +75,9 @@ def _lead_payload(db: Session, lead: Lead) -> dict:
         ChuongTrinhDaoTao.ChuongTrinhId == lead.ChuongTrinhId
     ).first()
     active_assignments = _current_assignments(db, lead.LeadId)
+    conversion = db.query(LeadConversion).filter(
+        LeadConversion.LeadId == lead.LeadId
+    ).first()
     return {
         "leadId": lead.LeadId,
         "hoTen": lead.HoTen,
@@ -82,6 +89,8 @@ def _lead_payload(db: Session, lead: Lead) -> dict:
         "maChuongTrinh": program.MaChuongTrinh if program else None,
         "tenChuongTrinh": program.TenChuongTrinh if program else None,
         "trangThai": lead.TrangThai,
+        "hocVienId": conversion.NguoiDungId if conversion else None,
+        "maHocVien": conversion.MaHocVien if conversion else None,
         "ngayTao": lead.NgayTao,
         "ngayCapNhat": lead.NgayCapNhat,
         "assignedUserIds": [row.NguoiDungId for row in active_assignments],
@@ -133,7 +142,7 @@ def _get_visible_lead(
         .filter(
             LeadAssignmentHistory.LeadId == lead_id,
             LeadAssignmentHistory.NguoiDungId == user.NguoiDungId,
-            LeadAssignmentHistory.DangPhanCong.is_(True),
+            LeadAssignmentHistory.DangPhanCong.in_([True]),
         )
         .first()
     )
@@ -231,11 +240,12 @@ def _create_lead(
     email: str | None,
     source: str,
     note: str | None = None,
-    program_id: int,
+    program_id: int | None,
     status_value: str,
     creator: NguoiDung | None,
 ) -> Lead:
-    _get_active_program_or_422(db, program_id)
+    if program_id is not None:
+        _get_active_program_or_422(db, program_id)
     now = datetime.now()
     lead = Lead(
         HoTen=name.strip(),
@@ -388,7 +398,7 @@ def list_leads(
             db.query(LeadAssignmentHistory.LeadId)
             .filter(
                 LeadAssignmentHistory.NguoiDungId == current_user.NguoiDungId,
-                LeadAssignmentHistory.DangPhanCong.is_(True),
+                LeadAssignmentHistory.DangPhanCong.in_([True]),
             )
         )
         query = query.filter(Lead.LeadId.in_(assigned_lead_ids))
@@ -401,7 +411,7 @@ def list_leads(
             db.query(LeadAssignmentHistory.LeadId)
             .filter(
                 LeadAssignmentHistory.NguoiDungId == assigned_user_id,
-                LeadAssignmentHistory.DangPhanCong.is_(True),
+                LeadAssignmentHistory.DangPhanCong.in_([True]),
             )
         )
         query = query.filter(Lead.LeadId.in_(assigned_lead_ids))
@@ -436,6 +446,11 @@ def create_lead(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if request.trang_thai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Chỉ có thể chuyển lead sang trạng thái nhập học bằng thao tác chuyển đổi.",
+        )
     lead = _create_lead(
         db,
         name=request.ho_ten,
@@ -471,6 +486,11 @@ def bulk_assign_leads(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Một hoặc nhiều khách hàng tiềm năng không tồn tại.",
+        )
+    if any(lead.TrangThai == "Đã nhập học" for lead in leads):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể phân công lead đã kết thúc quy trình.",
         )
     _validate_consultants(db, request.consultant_ids)
     now = datetime.now()
@@ -524,7 +544,18 @@ def update_lead(
     db: Session = Depends(get_db),
 ):
     lead = _get_visible_lead(db, lead_id, current_user)
-    _get_active_program_or_422(db, request.chuong_trinh_id)
+    if lead.TrangThai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Lead đã kết thúc quy trình và không thể chỉnh sửa.",
+        )
+    if request.trang_thai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Chỉ có thể chuyển lead sang trạng thái nhập học bằng thao tác chuyển đổi.",
+        )
+    if request.chuong_trinh_id is not None:
+        _get_active_program_or_422(db, request.chuong_trinh_id)
     lead.HoTen = request.ho_ten.strip()
     lead.SoDienThoai = request.so_dien_thoai.strip()
     lead.Email = request.email
@@ -535,6 +566,136 @@ def update_lead(
     lead.NgayCapNhat = datetime.now()
     _commit(db, "Không thể cập nhật khách hàng tiềm năng.")
     return _lead_payload(db, lead)
+
+
+@router.post(
+    "/leads/{lead_id}/convert-to-student",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("LEAD_UPDATE"))],
+)
+def convert_lead_to_student(
+    lead_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lead = (
+        db.query(Lead)
+        .filter(Lead.LeadId == lead_id)
+        .with_for_update()
+        .first()
+    )
+    if lead is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    _get_visible_lead(db, lead_id, current_user)
+
+    conversion = db.query(LeadConversion).filter(
+        LeadConversion.LeadId == lead_id
+    ).first()
+    if conversion is not None:
+        return {
+            "alreadyConverted": True,
+            "emailSent": None,
+            "hocVienId": conversion.NguoiDungId,
+            "maHocVien": conversion.MaHocVien,
+            "email": db.query(NguoiDung.Email).filter(
+                NguoiDung.NguoiDungId == conversion.NguoiDungId
+            ).scalar(),
+            "lead": _lead_payload(db, lead),
+            "message": "Lead này đã được chuyển thành học viên trước đó.",
+        }
+
+    if lead.TrangThai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Lead đã ở trạng thái nhập học nhưng chưa có hồ sơ liên kết.",
+        )
+    if not lead.Email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Cần bổ sung email hợp lệ cho lead trước khi tạo tài khoản học viên.",
+        )
+    if len(lead.SoDienThoai) > 20:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Số điện thoại dài quá 20 ký tự và không thể lưu vào hồ sơ người dùng.",
+        )
+    if db.query(NguoiDung).filter(NguoiDung.Email == lead.Email).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email này đã được sử dụng cho một tài khoản khác. Hãy kiểm tra email của lead.",
+        )
+
+    now = datetime.now()
+    try:
+        user, temporary_password, activation_link = (
+            prepare_student_account(
+                db,
+                ho_ten=lead.HoTen,
+                email=lead.Email,
+                so_dien_thoai=lead.SoDienThoai,
+                now=now,
+            )
+        )
+        ma_hoc_vien = f"HV{user.NguoiDungId:06d}"
+        db.add(
+            LeadConversion(
+                LeadId=lead.LeadId,
+                NguoiDungId=user.NguoiDungId,
+                MaHocVien=ma_hoc_vien,
+                ChuongTrinhId=lead.ChuongTrinhId,
+                NgayNhapHoc=now,
+                NguoiChuyenDoiId=current_user.NguoiDungId,
+            )
+        )
+        lead.TrangThai = "Đã nhập học"
+        lead.NgayCapNhat = now
+
+        send_activation_email(
+            recipient_email=user.Email,
+            ho_ten=user.HoTen,
+            temporary_password=temporary_password,
+            activation_link=activation_link,
+            ma_hoc_vien=ma_hoc_vien,
+        )
+        db.commit()
+        db.refresh(lead)
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as error:
+        db.rollback()
+        logger.exception("Lead conversion conflicted for lead %s", lead_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể chuyển đổi do email hoặc hồ sơ học viên đã tồn tại.",
+        ) from error
+    except SQLAlchemyError as error:
+        db.rollback()
+        logger.exception("Database error converting lead %s", lead_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Không thể lưu hồ sơ học viên và trạng thái lead.",
+        ) from error
+    except RuntimeError as error:
+        db.rollback()
+        logger.exception("Could not send student activation for lead %s", lead_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Không thể gửi email kích hoạt; chưa tạo hồ sơ học viên. {error}",
+        ) from error
+
+    return {
+        "alreadyConverted": False,
+        "emailSent": True,
+        "hocVienId": user.NguoiDungId,
+        "maHocVien": ma_hoc_vien,
+        "email": user.Email,
+        "lead": _lead_payload(db, lead),
+        "message": f"Đã nhập học thành công. Mã học viên: {ma_hoc_vien}. Email kích hoạt đã được gửi.",
+    }
 
 
 @router.delete(
@@ -557,6 +718,11 @@ def delete_lead(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    if lead.TrangThai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể xóa lead đã kết thúc quy trình.",
         )
     db.query(LeadAssignmentHistory).filter(
         LeadAssignmentHistory.LeadId == lead_id
@@ -624,6 +790,11 @@ def replace_lead_assignments(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Không tìm thấy khách hàng tiềm năng.",
+        )
+    if lead.TrangThai == "Đã nhập học":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể phân công lead đã kết thúc quy trình.",
         )
     _validate_consultants(db, request.assigned_user_ids)
     now = datetime.now()

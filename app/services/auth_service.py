@@ -19,6 +19,7 @@ from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.token_mat_khau import TokenMatKhau
 from app.models.token_kich_hoat import TokenKichHoat
+from app.models.vai_tro import VaiTro
 from app.schemas.forgot_password import ForgotPasswordRequest
 from app.schemas.login import LoginRequest
 from app.schemas.admin_create_user import AdminCreateUserRequest
@@ -33,6 +34,7 @@ from app.services.email_service import (
 
 password_hash = PasswordHash.recommended()
 logger = logging.getLogger(__name__)
+STUDENT_ROLE_ID = 2
 
 
 # ============================================================
@@ -333,6 +335,58 @@ def _create_activation_token(
         f"{FRONTEND_URL}/login"
         f"?activate={raw_activation_token}"
     )
+
+
+def prepare_student_account(
+    db: Session,
+    *,
+    ho_ten: str,
+    email: str,
+    so_dien_thoai: str,
+    now: datetime,
+) -> tuple[NguoiDung, str, str]:
+    """Prepare a student account and activation email data in the current transaction."""
+    if db.query(VaiTro).filter(VaiTro.VaiTroId == STUDENT_ROLE_ID).first() is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Không tìm thấy vai trò học viên trong cơ sở dữ liệu.",
+        )
+
+    temporary_password = generate_temporary_password()
+    password_expiry = now + timedelta(hours=24)
+    user = NguoiDung(
+        HoTen=ho_ten,
+        Email=email,
+        SoDienThoai=so_dien_thoai,
+        MatKhauHash=password_hash.hash(temporary_password),
+        TrangThai="HoatDong",
+        DaKichHoat=False,
+        BatBuocDoiMatKhau=True,
+        CanDoiMatKhau=True,
+        MatKhauTamThoiHetHan=password_expiry,
+        SoLanDangNhapSai=0,
+        KhoaDen=None,
+        LyDoKhoa=None,
+        TokenValidAfter=None,
+        NgayTao=now,
+        NgayCapNhat=now,
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        NguoiDungVaiTro(
+            NguoiDungId=user.NguoiDungId,
+            VaiTroId=STUDENT_ROLE_ID,
+            NgayGan=now,
+        )
+    )
+    activation_link = _create_activation_token(
+        db=db,
+        user=user,
+        expiry=password_expiry,
+        now=now,
+    )
+    return user, temporary_password, activation_link
 
 
 def admin_create_user(

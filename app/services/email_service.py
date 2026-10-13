@@ -92,6 +92,7 @@ def send_activation_email(
     ho_ten: str,
     temporary_password: str,
     activation_link: str,
+    ma_hoc_vien: str | None = None,
 ):
     if not SMTP_USERNAME or not SMTP_PASSWORD:
         raise RuntimeError(
@@ -117,6 +118,7 @@ Thông tin đăng nhập:
 
 Email: {recipient_email}
 Mật khẩu tạm thời: {temporary_password}
+{f"Mã học viên: {ma_hoc_vien}" if ma_hoc_vien else ""}
 
 Vui lòng nhấn vào liên kết dưới đây để kích hoạt tài khoản:
 

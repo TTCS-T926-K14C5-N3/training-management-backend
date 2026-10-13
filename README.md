@@ -64,10 +64,21 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
   `POST /admissions/public/leads` là endpoint công khai. Honeypot nhận trường
   `website`; phản hồi xác nhận thời gian liên hệ trong một ngày làm việc.
 - `/admissions/leads` hỗ trợ CRUD và bộ lọc `status`, `source`,
-  `assigned_user_id`, `start_date`, `end_date`, `search`.
+  `assigned_user_id`, `start_date`, `end_date`, `search`. Khi tạo/cập nhật lead,
+  `chuongTrinhId` có thể để trống nếu chưa xác định chương trình; chạy lại
+  migration `005_curriculum_admissions.sql` để cập nhật cột trên cơ sở dữ liệu cũ.
   `PUT /admissions/leads/{lead_id}/assignments` nhận
-  `{ "consultantIds": [5, 6] }`; lịch sử bàn giao được trả trong `lichSuBanGiao`.
-  `GET /admissions/consultants` liệt kê tư vấn viên đang hoạt động.
+  `{ "consultantIds": [5] }` để giao một tư vấn viên hoặc `[]` để gỡ phân công.
+  `PUT /admissions/leads/bulk-assignments` nhận danh sách lead và một tư vấn viên
+  dùng chung cho các lead đã chọn; `consultantIds: []` gỡ phân công hàng loạt.
+  Lịch sử giao/gỡ được trả trong `lichSuBanGiao`. `GET /admissions/consultants`
+  liệt kê tư vấn viên đang hoạt động. `POST
+  /admissions/leads/{lead_id}/convert-to-student` tạo tài khoản học viên từ
+  thông tin lead, gán vai trò học viên, sinh mã `HV` theo ID người dùng và gửi
+  email kích hoạt; yêu cầu lead có email chưa được sử dụng. Lead đã nhập học
+  không thể sửa hoặc xóa. Áp dụng `migrations/007_lead_student_conversion.sql`
+  sau các migration tuyển sinh để đồng bộ độ dài email tài khoản, tạo bảng liên
+  kết chuyển đổi và cho phép trạng thái `Đã nhập học`.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

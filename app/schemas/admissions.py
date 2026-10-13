@@ -33,7 +33,11 @@ class LeadWrite(BaseModel):
     ho_ten: str = Field(alias="hoTen", min_length=1, max_length=100)
     so_dien_thoai: str = Field(alias="soDienThoai", min_length=7, max_length=30)
     email: str | None = Field(default=None, max_length=255)
-    chuong_trinh_id: int = Field(alias="chuongTrinhId", gt=0)
+    chuong_trinh_id: int | None = Field(
+        default=None,
+        alias="chuongTrinhId",
+        gt=0,
+    )
     nguon: str = Field(alias="nguon", min_length=1, max_length=100)
     ghi_chu: str | None = Field(default=None, alias="ghiChu", max_length=1000)
     trang_thai: str = Field(default="Mới", alias="trangThai")
@@ -58,7 +62,14 @@ class LeadWrite(BaseModel):
     @field_validator("trang_thai")
     @classmethod
     def validate_status(cls, value: str) -> str:
-        if value not in {"Mới", "Đang liên hệ", "Tiềm năng", "Đã chuyển đổi", "Không tiềm năng"}:
+        if value not in {
+            "Mới",
+            "Đang liên hệ",
+            "Tiềm năng",
+            "Đã chuyển đổi",
+            "Đã nhập học",
+            "Không tiềm năng",
+        }:
             raise ValueError("Trạng thái khách hàng tiềm năng không hợp lệ.")
         return value
 
@@ -79,6 +90,8 @@ class LeadAssignmentsWrite(BaseModel):
     def validate_unique_users(cls, value: list[int]) -> list[int]:
         if any(user_id <= 0 for user_id in value) or len(value) != len(set(value)):
             raise ValueError("Danh sách tư vấn viên không hợp lệ hoặc bị trùng.")
+        if len(value) > 1:
+            raise ValueError("Mỗi lead chỉ được phân công cho một tư vấn viên.")
         return value
 
 
@@ -104,5 +117,6 @@ class BulkLeadAssignmentsWrite(BaseModel):
     def validate_unique_consultants(cls, value: list[int]) -> list[int]:
         if any(user_id <= 0 for user_id in value) or len(value) != len(set(value)):
             raise ValueError("Danh sách tư vấn viên không hợp lệ hoặc bị trùng.")
+        if len(value) > 1:
+            raise ValueError("Mỗi lead chỉ được phân công cho một tư vấn viên.")
         return value
-

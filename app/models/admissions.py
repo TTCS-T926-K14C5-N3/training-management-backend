@@ -23,7 +23,7 @@ class Lead(Base):
     ChuongTrinhId = Column(
         Integer,
         ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),
-        nullable=False,
+        nullable=True,
     )
     TrangThai = Column(Unicode(30), nullable=False, default="Mới")
     NgayTao = Column(DateTime, nullable=False)
@@ -57,3 +57,31 @@ class LeadAssignmentHistory(Base):
     NgayPhanCong = Column(DateTime, nullable=False)
     NgayBoPhanCong = Column(DateTime, nullable=True)
     DangPhanCong = Column(Boolean, nullable=False, default=True)
+
+
+class LeadConversion(Base):
+    __tablename__ = "TuyenSinh_Lead_ChuyenDoi"
+
+    LeadId = Column(
+        Integer,
+        ForeignKey("TuyenSinh_Lead.LeadId"),
+        primary_key=True,
+    )
+    NguoiDungId = Column(
+        Integer,
+        ForeignKey("NguoiDung.NguoiDungId"),
+        nullable=False,
+        unique=True,
+    )
+    MaHocVien = Column(String(20), nullable=False, unique=True)
+    ChuongTrinhId = Column(
+        Integer,
+        ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),
+        nullable=True,
+    )
+    NgayNhapHoc = Column(DateTime, nullable=False)
+    NguoiChuyenDoiId = Column(
+        Integer,
+        ForeignKey("NguoiDung.NguoiDungId"),
+        nullable=False,
+    )
