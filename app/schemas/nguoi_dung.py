@@ -1,43 +1,36 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
-
+from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field, validator
+from typing import List, Optional
 
 # ============================================================
 # TẠO NGƯỜI DÙNG
 # ============================================================
 
 class NguoiDungCreate(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
     ho_ten: str = Field(
-        alias="hoTen",
         min_length=1,
         max_length=100
     )
 
     email: EmailStr
 
-    password: str = Field(
-        min_length=6,
-        max_length=128,
-        description="Mật khẩu người dùng (tối thiểu 6 ký tự)"
-    )
-
     so_dien_thoai: str | None = Field(
         default=None,
-        alias="soDienThoai",
         max_length=20
     )
+
+    password: str = Field(
+        min_length=8
+    )
+
 
 # ============================================================
 # CẬP NHẬT NGƯỜI DÙNG
 # ============================================================
 
 class NguoiDungUpdate(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
     ho_ten: str | None = Field(
         default=None,
-        alias="hoTen",
         min_length=1,
         max_length=100
     )
@@ -46,13 +39,11 @@ class NguoiDungUpdate(BaseModel):
 
     so_dien_thoai: str | None = Field(
         default=None,
-        alias="soDienThoai",
         max_length=20
     )
 
     trang_thai: str | None = Field(
         default=None,
-        alias="trangThai",
         max_length=50
     )
 
@@ -60,36 +51,37 @@ class NguoiDungUpdate(BaseModel):
 # ============================================================
 # KHÓA TÀI KHOẢN
 # ============================================================
-
 class NguoiDungLock(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    ly_do_khoa: str = Field(..., min_length=1, description="Lý do khóa tài khoản")
 
-    ly_do_khoa: str = Field(
-        alias="lyDoKhoa",
-        min_length=1,
-        max_length=255,
-    )
-
-    @field_validator("ly_do_khoa", mode="before")
-    @classmethod
-    def strip_lock_reason(cls, value: str) -> str:
-        return value.strip() if isinstance(value, str) else value
-
-
-# ============================================================
-# PHẢN HỒI THÔNG TIN NGƯỜI DÙNG (CHO API /me)
+    @validator('ly_do_khoa')
+    def validate_ly_do_khoa(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Lý do khóa tài khoản không được để trống')
+        return v.strip()
+    # ============================================================
+# GÁN VAI TRÒ CHO NGƯỜI DÙNG
 # ============================================================
 
-class NguoiDungResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class GanVaiTroRequest(BaseModel):
+    vai_tro_id: int = Field(..., description="ID của vai trò cần gán cho người dùng")
+    # ============================================================
+# BÁO CÁO KẾT QUẢ NHẬP DỮ LIỆU (SCRUM-138)
+# ============================================================
 
-    id: int
-    ho_ten: str
-    email: EmailStr
-    so_dien_thoai: str | None = None
-    trang_thai: str | None = None
-    avatar_url: str | None = None
-    
-    # 2 trường quan trọng cho task SCRUM-91
-    role: str | None = Field(default="STUDENT", description="Vai trò của người dùng (ADMIN, TRAINER, STUDENT,...)")
-    permissions: list[str] = Field(default=[], description="Danh sách quyền hạn của người dùng")
+class ChiTietLoiNhap(BaseModel):
+    dong: int
+    noi_dung_loi: str
+
+class BaoCaoKetQuaNhapResponse(BaseModel):
+    tong_so_luong: int
+    so_luong_thanh_cong: int
+    so_luong_that_bai: int
+    danh_sach_loi: Optional[List[ChiTietLoiNhap]] = []
+    # ============================================================
+# CẬP NHẬT HỒ SƠ CÁ NHÂN (SCRUM-148)
+# ============================================================
+
+class CapNhatHoSoCaNhanRequest(BaseModel):
+    ho_ten: Optional[str] = None
+    so_dien_thoai: Optional[str] = None
