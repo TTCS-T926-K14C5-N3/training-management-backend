@@ -41,12 +41,13 @@ trò hệ thống 1–8, áp dụng migration tính năng (có thể chạy lạ
 mục gốc trên Windows:
 
 ```powershell
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_admissions.sql
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\007_lead_student_conversion.sql
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_admissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\007_lead_student_conversion.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
 ```
 
+`-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
 `-E` dùng xác thực Windows. Nếu cấu hình SQL Server dùng tài khoản SQL, thay
 `-E` bằng `-U <DB_USER> -P <DB_PASSWORD>` (không ghi mật khẩu vào lịch sử lệnh
 hoặc kho mã nguồn).

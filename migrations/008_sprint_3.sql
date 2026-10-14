@@ -3,6 +3,13 @@
     enrollment audit, room capacity, and subject-level teaching assignments.
     Apply after migrations 002-007. Safe to rerun.
 */
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET QUOTED_IDENTIFIER ON;
+SET NUMERIC_ROUNDABORT OFF;
 SET XACT_ABORT ON;
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -102,9 +109,6 @@ BEGIN TRY
 
     IF COL_LENGTH(N'dbo.LopHoc', N'NgayKhaiGiang') IS NULL
         ALTER TABLE dbo.LopHoc ADD NgayKhaiGiang DATE NULL;
-    UPDATE dbo.LopHoc SET NgayKhaiGiang = CAST(NgayTao AS DATE)
-    WHERE NgayKhaiGiang IS NULL;
-    ALTER TABLE dbo.LopHoc ALTER COLUMN NgayKhaiGiang DATE NOT NULL;
 
     IF COL_LENGTH(N'dbo.LopHoc', N'SiSoToiDa') IS NULL
         ALTER TABLE dbo.LopHoc ADD SiSoToiDa INT NOT NULL
@@ -120,53 +124,63 @@ BEGIN TRY
         ALTER TABLE dbo.LopHoc ADD TienDo DECIMAL(5,2) NOT NULL
             CONSTRAINT DF_LopHoc_TienDo DEFAULT 0;
 
-    IF NOT EXISTS
-    (
-        SELECT 1 FROM sys.foreign_keys
-        WHERE parent_object_id = OBJECT_ID(N'dbo.LopHoc')
-          AND name = N'FK_LopHoc_PhongHoc'
-    )
-        ALTER TABLE dbo.LopHoc ADD CONSTRAINT FK_LopHoc_PhongHoc
-            FOREIGN KEY (PhongHocId) REFERENCES dbo.PhongHoc(PhongHocId);
+    EXEC sys.sp_executesql N'
+        UPDATE dbo.LopHoc SET NgayKhaiGiang = CAST(NgayTao AS DATE)
+        WHERE NgayKhaiGiang IS NULL;
+        ALTER TABLE dbo.LopHoc ALTER COLUMN NgayKhaiGiang DATE NOT NULL;
 
-    IF NOT EXISTS
-    (
-        SELECT 1 FROM sys.check_constraints
-        WHERE parent_object_id = OBJECT_ID(N'dbo.LopHoc')
-          AND name = N'CK_LopHoc_SiSoToiDa'
-    )
-        ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_SiSoToiDa
-            CHECK (SiSoToiDa > 0);
-    IF NOT EXISTS
-    (
-        SELECT 1 FROM sys.check_constraints
-        WHERE parent_object_id = OBJECT_ID(N'dbo.LopHoc')
-          AND name = N'CK_LopHoc_HinhThuc'
-    )
-        ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_HinhThuc
-            CHECK (HinhThuc IN (N'Trực tiếp', N'Trực tuyến', N'Kết hợp'));
-    IF NOT EXISTS
-    (
-        SELECT 1 FROM sys.check_constraints
-        WHERE parent_object_id = OBJECT_ID(N'dbo.LopHoc')
-          AND name = N'CK_LopHoc_TienDo'
-    )
-        ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_TienDo
-            CHECK (TienDo BETWEEN 0 AND 100);
+        IF NOT EXISTS
+        (
+            SELECT 1 FROM sys.foreign_keys
+            WHERE parent_object_id = OBJECT_ID(N''dbo.LopHoc'')
+              AND name = N''FK_LopHoc_PhongHoc''
+        )
+            ALTER TABLE dbo.LopHoc ADD CONSTRAINT FK_LopHoc_PhongHoc
+                FOREIGN KEY (PhongHocId) REFERENCES dbo.PhongHoc(PhongHocId);
+
+        IF NOT EXISTS
+        (
+            SELECT 1 FROM sys.check_constraints
+            WHERE parent_object_id = OBJECT_ID(N''dbo.LopHoc'')
+              AND name = N''CK_LopHoc_SiSoToiDa''
+        )
+            ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_SiSoToiDa
+                CHECK (SiSoToiDa > 0);
+        IF NOT EXISTS
+        (
+            SELECT 1 FROM sys.check_constraints
+            WHERE parent_object_id = OBJECT_ID(N''dbo.LopHoc'')
+              AND name = N''CK_LopHoc_HinhThuc''
+        )
+            ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_HinhThuc
+                CHECK (HinhThuc IN (N''Trực tiếp'', N''Trực tuyến'', N''Kết hợp''));
+        IF NOT EXISTS
+        (
+            SELECT 1 FROM sys.check_constraints
+            WHERE parent_object_id = OBJECT_ID(N''dbo.LopHoc'')
+              AND name = N''CK_LopHoc_TienDo''
+        )
+            ALTER TABLE dbo.LopHoc ADD CONSTRAINT CK_LopHoc_TienDo
+                CHECK (TienDo BETWEEN 0 AND 100);
+    ';
 
     UPDATE dbo.LopHoc SET TrangThai = N'Chuẩn bị'
     WHERE TrangThai = N'Đang hoạt động';
 
     IF COL_LENGTH(N'dbo.LopHoc_HocVien', N'NguoiGhiDanhId') IS NULL
         ALTER TABLE dbo.LopHoc_HocVien ADD NguoiGhiDanhId INT NULL;
-    IF NOT EXISTS
-    (
-        SELECT 1 FROM sys.foreign_keys
-        WHERE parent_object_id = OBJECT_ID(N'dbo.LopHoc_HocVien')
-          AND name = N'FK_LopHoc_HocVien_NguoiGhiDanh'
-    )
-        ALTER TABLE dbo.LopHoc_HocVien ADD CONSTRAINT FK_LopHoc_HocVien_NguoiGhiDanh
-            FOREIGN KEY (NguoiGhiDanhId) REFERENCES dbo.NguoiDung(NguoiDungId);
+    EXEC sys.sp_executesql N'
+        IF NOT EXISTS
+        (
+            SELECT 1 FROM sys.foreign_keys
+            WHERE parent_object_id = OBJECT_ID(N''dbo.LopHoc_HocVien'')
+              AND name = N''FK_LopHoc_HocVien_NguoiGhiDanh''
+        )
+            ALTER TABLE dbo.LopHoc_HocVien
+                ADD CONSTRAINT FK_LopHoc_HocVien_NguoiGhiDanh
+                FOREIGN KEY (NguoiGhiDanhId)
+                REFERENCES dbo.NguoiDung(NguoiDungId);
+    ';
 
     IF OBJECT_ID(N'dbo.LopHoc_MonHoc_GiangVien', N'U') IS NULL
     BEGIN

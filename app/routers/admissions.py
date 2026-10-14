@@ -37,6 +37,13 @@ ADMISSIONS_ROLE_ID = 5
 PUBLIC_LEAD_RATE_LIMIT = 5
 PUBLIC_LEAD_RATE_WINDOW_SECONDS = 60
 _public_submissions: dict[str, list[float]] = {}
+LEAD_STATUS_PROGRESS = (
+    "Mới",
+    "Đã liên hệ",
+    "Đang tư vấn",
+    "Hẹn học thử",
+    "Chốt",
+)
 LEAD_STATUS_TRANSITIONS = {
     "Mới": {"Đã liên hệ", "Từ chối"},
     "Đã liên hệ": {"Đang tư vấn", "Từ chối"},
@@ -224,6 +231,12 @@ def _has_overdue_follow_up(db: Session, lead_id: int) -> bool:
 
 def _validate_status_transition(current: str, target: str) -> None:
     if current == target:
+        return
+    if (
+        current in LEAD_STATUS_PROGRESS
+        and target in LEAD_STATUS_PROGRESS
+        and LEAD_STATUS_PROGRESS.index(target) > LEAD_STATUS_PROGRESS.index(current)
+    ):
         return
     if target not in LEAD_STATUS_TRANSITIONS.get(current, set()):
         raise HTTPException(

@@ -12,6 +12,7 @@ from app.models.admissions import Lead, LeadAssignmentHistory, LeadConversion
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.lead_activity import LeadStatusHistory
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.mon_hoc import MonHoc
@@ -38,11 +39,13 @@ from app.routers.admissions import (
     replace_lead_assignments,
     submit_public_lead,
     update_lead,
+    update_lead_status,
 )
 from app.schemas.academic import SubjectCreate
 from app.schemas.admissions import (
     BulkLeadAssignmentsWrite,
     LeadAssignmentsWrite,
+    LeadStatusWrite,
     LeadWrite,
     PublicLeadCreate,
 )
@@ -128,6 +131,57 @@ def test_default_permissions_match_curriculum_and_lead_role_boundaries():
         "LEAD_ASSIGN",
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert set(DEFAULT_ROLE_PERMISSIONS[8]) >= set(DEFAULT_ROLE_PERMISSIONS[7])
+
+
+def test_lead_status_drag_progression_records_history_and_rejects_backward_move(
+    db: Session,
+):
+    manager = add_user(db, 72, 7, "Training Manager Status")
+    lead = create_lead(
+        LeadWrite(
+            hoTen="Lead status",
+            soDienThoai="0912345678",
+            nguon="Website",
+        ),
+        manager,
+        db,
+    )
+
+    advanced = update_lead_status(
+        lead["leadId"],
+        LeadStatusWrite(trangThai="Hẹn học thử"),
+        manager,
+        db,
+    )
+    assert advanced["trangThai"] == "Hẹn học thử"
+    history = db.query(LeadStatusHistory).filter_by(LeadId=lead["leadId"]).all()
+    assert len(history) == 2
+    assert history[0].TrangThaiCu is None
+    assert history[0].TrangThaiMoi == "Mới"
+    assert history[1].TrangThaiCu == "Mới"
+    assert history[1].TrangThaiMoi == "Hẹn học thử"
+    assert history[1].NguoiThucHienId == manager.NguoiDungId
+
+    with pytest.raises(HTTPException) as backward_error:
+        update_lead_status(
+            lead["leadId"],
+            LeadStatusWrite(trangThai="Đang tư vấn"),
+            manager,
+            db,
+        )
+    assert backward_error.value.status_code == 409
+
+    refused = update_lead_status(
+        lead["leadId"],
+        LeadStatusWrite(trangThai="Từ chối", lyDoTuChoi="Không còn nhu cầu"),
+        manager,
+        db,
+    )
+    assert refused["trangThai"] == "Từ chối"
+    assert refused["lyDoTuChoi"] == "Không còn nhu cầu"
+    history = db.query(LeadStatusHistory).filter_by(LeadId=lead["leadId"]).all()
+    assert len(history) == 3
+    assert history[-1].LyDo == "Không còn nhu cầu"
 
 
 def test_program_subjects_preserve_order_prerequisite_and_session_limit(db: Session):
@@ -344,6 +398,23 @@ def test_used_subject_is_archived_and_keeps_associations(db: Session):
     rows = get_program_subjects(1, db)
     assert rows[0]["monHocId"] == subject["monHocId"]
     assert rows[0]["sessions"] == []
+    retained = replace_program_subjects(
+        1,
+        ProgramSubjectsWrite(
+            subjects=[{"monHocId": subject["monHocId"], "thuTu": 1}]
+        ),
+        db,
+    )
+    assert retained[0]["monHocId"] == subject["monHocId"]
+    replace_program_subjects(1, ProgramSubjectsWrite(subjects=[]), db)
+    with pytest.raises(HTTPException, match="đã ngừng hoạt động"):
+        replace_program_subjects(
+            1,
+            ProgramSubjectsWrite(
+                subjects=[{"monHocId": subject["monHocId"], "thuTu": 1}]
+            ),
+            db,
+        )
 
 
 def test_subject_list_marks_program_applied_subjects(db: Session):

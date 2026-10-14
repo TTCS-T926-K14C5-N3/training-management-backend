@@ -1339,8 +1339,8 @@ def update_subject(
     return _subject_payload(subject)
 
 
-@router.delete(
-    "/subjects/{subject_id}",
+@router.post(
+    "/subjects/{subject_id}/archive",
     dependencies=[Depends(require_permission("CURRICULUM_DELETE"))],
 )
 def archive_subject(
@@ -1366,6 +1366,53 @@ def archive_subject(
     subject.TrangThai = "Ngừng hoạt động"
     _commit(db, "Không thể lưu trữ môn học.")
     return {"message": "Đã lưu trữ môn học."}
+
+
+@router.post(
+    "/subjects/{subject_id}/activate",
+    dependencies=[Depends(require_permission("CURRICULUM_DELETE"))],
+)
+def activate_subject(
+    subject_id: int,
+    db: Session = Depends(get_db),
+):
+    subject = db.query(MonHoc).filter(MonHoc.MonHocId == subject_id).first()
+    if subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy môn học.",
+        )
+    subject.TrangThai = "Đang hoạt động"
+    _commit(db, "Không thể áp dụng lại môn học.")
+    return {"message": "Đã áp dụng lại môn học."}
+
+
+@router.delete(
+    "/subjects/{subject_id}",
+    dependencies=[Depends(require_permission("CURRICULUM_DELETE"))],
+)
+def delete_subject(
+    subject_id: int,
+    db: Session = Depends(get_db),
+):
+    subject = db.query(MonHoc).filter(MonHoc.MonHocId == subject_id).first()
+    if subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy môn học.",
+        )
+    is_in_use = any(
+        db.query(model).filter(model.MonHocId == subject_id).first() is not None
+        for model in (LopHocMonHoc, ChuongTrinhMonHoc, Diem)
+    )
+    if is_in_use:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Môn học đã được sử dụng trong lớp, chương trình hoặc bảng điểm nên không thể xóa.",
+        )
+    db.delete(subject)
+    _commit(db, "Không thể xóa môn học đang được sử dụng.")
+    return {"message": "Đã xóa môn học."}
 
 
 def _subject_payload(subject: MonHoc) -> dict:
@@ -1487,19 +1534,31 @@ def replace_program_subjects(
     _get_program_or_404(db, program_id)
     rows_by_subject = {row.mon_hoc_id: row for row in request.subjects}
     requested_subject_ids = set(rows_by_subject)
+    current_rows = (
+        db.query(ChuongTrinhMonHoc)
+        .filter(ChuongTrinhMonHoc.ChuongTrinhId == program_id)
+        .all()
+    )
+    existing_subject_ids = {association.MonHocId for association in current_rows}
     subject_by_id = {
         subject.MonHocId: subject
         for subject in db.query(MonHoc)
-        .filter(
-            MonHoc.MonHocId.in_(requested_subject_ids),
-            MonHoc.TrangThai == "Đang hoạt động",
-        )
+        .filter(MonHoc.MonHocId.in_(requested_subject_ids))
         .all()
     } if requested_subject_ids else {}
     if len(subject_by_id) != len(requested_subject_ids):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Môn học không tồn tại hoặc đã lưu trữ.",
+            detail="Có môn học không tồn tại.",
+        )
+    if any(
+        subject.TrangThai != "Đang hoạt động"
+        and subject_id not in existing_subject_ids
+        for subject_id, subject in subject_by_id.items()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Không thể thêm môn học đã ngừng hoạt động vào chương trình.",
         )
     for row in request.subjects:
         if row.mon_tien_quyet_id is not None:
@@ -1527,11 +1586,6 @@ def replace_program_subjects(
             detail=str(error),
         ) from error
 
-    current_rows = (
-        db.query(ChuongTrinhMonHoc)
-        .filter(ChuongTrinhMonHoc.ChuongTrinhId == program_id)
-        .all()
-    )
     association_by_subject = {row.MonHocId: row for row in current_rows}
     removed = set(association_by_subject) - requested_subject_ids
     removed_ids = [
