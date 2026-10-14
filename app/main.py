@@ -22,6 +22,11 @@ from app.routers.nguoi_dung import (
 from app.routers.academic import (
     router as academic_router
 )
+from app.routers import (
+    lead,
+    mon_hoc,
+    nhat_ky_lead,
+)
 
 
 app = FastAPI(
@@ -82,3 +87,6 @@ app.include_router(
 app.include_router(
     academic_router
 )
+app.include_router(lead.router)
+app.include_router(nhat_ky_lead.router)
+app.include_router(mon_hoc.router)
