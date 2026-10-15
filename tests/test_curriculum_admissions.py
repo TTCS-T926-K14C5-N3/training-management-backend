@@ -733,6 +733,25 @@ def test_consultants_are_listed_and_only_assigned_leads_are_visible(db: Session)
     )
     assert duplicate["duplicatePhone"] is True
     assert len(list_leads("Mới", "Referral", None, None, None, "Another", manager, db)) == 1
+    assert {
+        lead["leadId"]
+        for lead in list_leads(
+            None, None, None, None, None, None, manager, db, unassigned=True
+        )
+    } == {lead["leadId"], duplicate["leadId"]}
+    with pytest.raises(HTTPException) as unassigned_filter_error:
+        list_leads(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            other_consultant,
+            db,
+            unassigned=True,
+        )
+    assert unassigned_filter_error.value.status_code == 403
 
     with pytest.raises(HTTPException) as error:
         _get_visible_lead(db, lead["leadId"], unassigned_consultant)

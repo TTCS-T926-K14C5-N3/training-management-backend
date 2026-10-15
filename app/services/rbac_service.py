@@ -25,6 +25,11 @@ PERMISSION_CATALOG = (
     ("USER_LOCK", "Khóa người dùng", "Khóa tài khoản người dùng."),
     ("USER_UNLOCK", "Mở khóa người dùng", "Mở khóa tài khoản người dùng."),
     ("USER_DELETE", "Xóa người dùng", "Xóa tài khoản người dùng."),
+    (
+        "STUDENT_PROFILE_UPDATE",
+        "Sửa hồ sơ học viên",
+        "Cập nhật thông tin cá nhân và ghi chú hồ sơ học viên.",
+    ),
     ("ROLE_VIEW", "Xem vai trò và quyền", "Xem cấu hình vai trò và quyền."),
     ("ROLE_UPDATE", "Cấu hình vai trò và quyền", "Gán quyền cho vai trò và vai trò cho người dùng."),
     ("ROLE_DELETE", "Thu hồi vai trò", "Thu hồi vai trò khỏi người dùng."),
@@ -77,6 +82,7 @@ DEFAULT_ROLE_PERMISSIONS = {
     6: ("TUITION_VIEW", "TUITION_CREATE", "TUITION_UPDATE", "QUAN_LY_HOC_PHI"),
     7: (
         "USER_VIEW",
+        "STUDENT_PROFILE_UPDATE",
         "ROLE_VIEW",
         "GRADE_VIEW",
         "TUITION_VIEW",

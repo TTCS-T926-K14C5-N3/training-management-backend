@@ -1,4 +1,5 @@
 from datetime import datetime
+from datetime import date
 
 import pytest
 from fastapi import HTTPException
@@ -28,18 +29,23 @@ from app.routers.academic import (
     delete_subject,
     delete_training_program,
     delete_grade,
+    enroll_students,
     get_class_options,
+    get_student_academic_profile,
     list_grades,
     list_subjects,
     update_class,
     update_grade,
+    update_student_academic_profile,
     update_room,
     update_training_program,
 )
 from app.schemas.academic import (
+    ClassEnrollmentWrite,
     ClassWrite,
     GradeWrite,
     RoomWrite,
+    StudentProfileWrite,
     SubjectCreate,
     TrainingProgramWrite,
 )
@@ -212,6 +218,217 @@ def test_grade_rejects_students_or_subjects_not_assigned_to_class(db: Session):
 
     assert error.value.status_code == 422
     assert "chưa được ghi danh" in error.value.detail
+
+
+def test_manager_can_enroll_one_or_many_students_with_actor_and_timestamp(
+    db: Session,
+):
+    _teacher, _student, _second_student, _subject, class_payload = (
+        setup_academic_class(db)
+    )
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    third_student = add_user(db, 22, 2, "Học viên Ba")
+    fourth_student = add_user(db, 23, 2, "Học viên Bốn")
+    fifth_student = add_user(db, 24, 2, "Học viên Năm")
+
+    single_result = enroll_students(
+        class_payload["lopHocId"],
+        ClassEnrollmentWrite(hocVienIds=[third_student.NguoiDungId]),
+        manager,
+        db,
+    )
+    bulk_result = enroll_students(
+        class_payload["lopHocId"],
+        ClassEnrollmentWrite(
+            hocVienIds=[fourth_student.NguoiDungId, fifth_student.NguoiDungId]
+        ),
+        manager,
+        db,
+    )
+
+    assert single_result["daGhiDanh"] == [third_student.NguoiDungId]
+    assert bulk_result["daGhiDanh"] == [
+        fourth_student.NguoiDungId,
+        fifth_student.NguoiDungId,
+    ]
+    enrollments = (
+        db.query(LopHocHocVien)
+        .filter(LopHocHocVien.LopHocId == class_payload["lopHocId"])
+        .all()
+    )
+    added_enrollments = [
+        enrollment
+        for enrollment in enrollments
+        if enrollment.HocVienId
+        in {
+            third_student.NguoiDungId,
+            fourth_student.NguoiDungId,
+            fifth_student.NguoiDungId,
+        }
+    ]
+    assert len(added_enrollments) == 3
+    assert all(
+        enrollment.NguoiGhiDanhId == manager.NguoiDungId
+        for enrollment in added_enrollments
+    )
+    assert all(
+        enrollment.NgayThamGia is not None for enrollment in added_enrollments
+    )
+
+
+def test_enrollment_rejects_existing_student_and_class_capacity_overflow(
+    db: Session,
+):
+    _teacher, student, _second_student, _subject, class_payload = (
+        setup_academic_class(db)
+    )
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    third_student = add_user(db, 22, 2, "Học viên Ba")
+
+    with pytest.raises(HTTPException) as duplicate_error:
+        enroll_students(
+            class_payload["lopHocId"],
+            ClassEnrollmentWrite(hocVienIds=[student.NguoiDungId]),
+            manager,
+            db,
+        )
+    assert duplicate_error.value.status_code == 409
+
+    lop_hoc = db.get(LopHoc, class_payload["lopHocId"])
+    assert lop_hoc is not None
+    lop_hoc.SiSoToiDa = 2
+    db.commit()
+
+    with pytest.raises(HTTPException) as capacity_error:
+        enroll_students(
+            class_payload["lopHocId"],
+            ClassEnrollmentWrite(hocVienIds=[third_student.NguoiDungId]),
+            manager,
+            db,
+        )
+    assert capacity_error.value.status_code == 409
+    assert db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == class_payload["lopHocId"],
+        LopHocHocVien.HocVienId == third_student.NguoiDungId,
+    ).count() == 0
+
+
+def test_enrollment_rejects_inactive_student_without_partial_changes(db: Session):
+    _teacher, _student, _second_student, _subject, class_payload = (
+        setup_academic_class(db)
+    )
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    inactive_student = add_user(db, 22, 2, "Học viên ngừng hoạt động")
+    inactive_student.TrangThai = "NgungHoatDong"
+    db.commit()
+    third_student = add_user(db, 23, 2, "Học viên Ba")
+
+    with pytest.raises(HTTPException) as error:
+        enroll_students(
+            class_payload["lopHocId"],
+            ClassEnrollmentWrite(
+                hocVienIds=[
+                    inactive_student.NguoiDungId,
+                    third_student.NguoiDungId,
+                ]
+            ),
+            manager,
+            db,
+        )
+
+    assert error.value.status_code == 422
+    assert db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == class_payload["lopHocId"],
+        LopHocHocVien.HocVienId.in_(
+            [inactive_student.NguoiDungId, third_student.NguoiDungId]
+        ),
+    ).count() == 0
+
+
+def test_student_profile_manager_can_update_and_view_full_academic_history(
+    db: Session,
+):
+    _teacher, student, _second_student, subject, class_payload = (
+        setup_academic_class(db)
+    )
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    db.add(
+        Diem(
+            LopHocId=class_payload["lopHocId"],
+            HocVienId=student.NguoiDungId,
+            MonHocId=subject["monHocId"],
+            HocKy=1,
+            NamHoc="2025-2026",
+            DiemQuaTrinh=8,
+            DiemGiuaKy=7,
+            DiemCuoiKy=9,
+            NgayTao=datetime.now(),
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    db.commit()
+
+    update_student_academic_profile(
+        student.NguoiDungId,
+        StudentProfileWrite(
+            hoTen="Học viên đã cập nhật",
+            email="updated.student@example.com",
+            soDienThoai="0912345678",
+            ngaySinh=date(2000, 5, 20),
+            diaChi="Hà Nội",
+            trinhDoDauVao="Tốt nghiệp THPT",
+            ghiChu="Cần cấp lại bảng điểm.",
+        ),
+        db,
+    )
+    profile = get_student_academic_profile(
+        student.NguoiDungId,
+        current_user=manager,
+        db=db,
+    )
+
+    assert profile["hocVien"]["hoTen"] == "Học viên đã cập nhật"
+    assert profile["hocVien"]["email"] == "updated.student@example.com"
+    assert profile["hocVien"]["soDienThoai"] == "0912345678"
+    assert profile["hocVien"]["ngaySinh"] == date(2000, 5, 20)
+    assert profile["hocVien"]["diaChi"] == "Hà Nội"
+    assert profile["hocVien"]["trinhDoDauVao"] == "Tốt nghiệp THPT"
+    assert profile["hocVien"]["ghiChu"] == "Cần cấp lại bảng điểm."
+    assert any(
+        item["lopHocId"] == class_payload["lopHocId"]
+        for item in profile["lopHocs"]
+    )
+    assert len(profile["diems"]) == 1
+    assert profile["diems"][0]["diemCuoiKy"] == 9.0
+
+
+def test_student_profile_rejects_duplicate_email_and_non_student(db: Session):
+    _teacher, student, second_student, _subject, _class_payload = (
+        setup_academic_class(db)
+    )
+    add_user(db, 7, 7, "Quản lý đào tạo")
+
+    with pytest.raises(HTTPException) as duplicate_error:
+        update_student_academic_profile(
+            student.NguoiDungId,
+            StudentProfileWrite(
+                hoTen=student.HoTen,
+                email=second_student.Email,
+            ),
+            db,
+        )
+    assert duplicate_error.value.status_code == 409
+
+    with pytest.raises(HTTPException) as not_student_error:
+        update_student_academic_profile(
+            3,
+            StudentProfileWrite(
+                hoTen="Giảng viên",
+                email="teacher.updated@example.com",
+            ),
+            db,
+        )
+    assert not_student_error.value.status_code == 404
 
 
 def test_class_update_and_archive_keep_class_history(db: Session):

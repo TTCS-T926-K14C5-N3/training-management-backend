@@ -1,8 +1,9 @@
 from datetime import date
 from decimal import Decimal
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class TrainingProgramWrite(BaseModel):
@@ -41,6 +42,55 @@ class TrainingProgramWrite(BaseModel):
             raise ValueError("Trạng thái chương trình không hợp lệ.")
         return value
 
+
+class StudentProfileWrite(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ho_ten: str = Field(alias="hoTen", min_length=1, max_length=100)
+    email: EmailStr
+    so_dien_thoai: str | None = Field(
+        default=None,
+        alias="soDienThoai",
+        max_length=20,
+    )
+    ngay_sinh: date | None = Field(default=None, alias="ngaySinh")
+    dia_chi: str | None = Field(default=None, alias="diaChi", max_length=255)
+    trinh_do_dau_vao: str | None = Field(
+        default=None,
+        alias="trinhDoDauVao",
+        max_length=150,
+    )
+    ghi_chu: str | None = Field(default=None, alias="ghiChu", max_length=2000)
+
+    @field_validator(
+        "ho_ten",
+        "so_dien_thoai",
+        "dia_chi",
+        "trinh_do_dau_vao",
+        "ghi_chu",
+        mode="before",
+    )
+    @classmethod
+    def normalize_profile_text(cls, value: str | None) -> str | None:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("ho_ten")
+    @classmethod
+    def validate_student_name(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Họ tên không được để trống.")
+        return value
+
+    @field_validator("so_dien_thoai")
+    @classmethod
+    def validate_student_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"^(0|\+84)(3|5|7|8|9)[0-9]{8}$", value):
+            raise ValueError("Số điện thoại Việt Nam không hợp lệ.")
+        return value
 
 class SubjectCreate(BaseModel):
     ma_mon_hoc: str = Field(alias="maMonHoc", min_length=1, max_length=30)

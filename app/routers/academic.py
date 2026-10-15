@@ -28,6 +28,7 @@ from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
     RoomWrite,
+    StudentProfileWrite,
     SubjectCreate,
     SubjectUpdate,
     TrainingProgramWrite,
@@ -923,6 +924,15 @@ def enroll_students(
         .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
         .all()
     }
+    already_enrolled_ids = existing_ids.intersection(request.hoc_vien_ids)
+    if already_enrolled_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Một hoặc nhiều học viên đã được ghi danh trong lớp. "
+                "Tải lại danh sách và chọn học viên khác."
+            ),
+        )
     new_ids = set(request.hoc_vien_ids) - existing_ids
     if len(existing_ids) + len(new_ids) > lop_hoc.SiSoToiDa:
         raise HTTPException(
@@ -1061,12 +1071,68 @@ def get_student_academic_profile(
             "ngaySinh": student.NgaySinh,
             "diaChi": student.DiaChi,
             "trangThai": student.TrangThai,
+            "trinhDoDauVao": student.TrinhDoDauVao,
+            "ghiChu": student.GhiChuHoSo,
             "maHocVien": conversion.MaHocVien if conversion else None,
             "ngayNhapHoc": conversion.NgayNhapHoc if conversion else None,
         },
         "lopHocs": class_history,
         "diems": [_grade_payload(db, grade) for grade in grades],
     }
+
+
+@router.put(
+    "/students/{student_id}",
+    dependencies=[Depends(require_permission("STUDENT_PROFILE_UPDATE"))],
+)
+def update_student_academic_profile(
+    student_id: int,
+    request: StudentProfileWrite,
+    db: Session = Depends(get_db),
+):
+    student = (
+        db.query(NguoiDung)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
+        )
+        .filter(
+            NguoiDung.NguoiDungId == student_id,
+            NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID,
+        )
+        .first()
+    )
+    if student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy hồ sơ học viên.",
+        )
+
+    email = str(request.email).strip().lower()
+    email_exists = (
+        db.query(NguoiDung.NguoiDungId)
+        .filter(
+            NguoiDung.Email == email,
+            NguoiDung.NguoiDungId != student_id,
+        )
+        .first()
+    )
+    if email_exists:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email đã được sử dụng bởi tài khoản khác.",
+        )
+
+    student.HoTen = request.ho_ten
+    student.Email = email
+    student.SoDienThoai = request.so_dien_thoai
+    student.NgaySinh = request.ngay_sinh
+    student.DiaChi = request.dia_chi
+    student.TrinhDoDauVao = request.trinh_do_dau_vao
+    student.GhiChuHoSo = request.ghi_chu
+    student.NgayCapNhat = datetime.now()
+    _commit(db, "Không thể cập nhật hồ sơ học viên.")
+    return {"message": "Đã cập nhật hồ sơ học viên."}
 
 
 @router.delete(
