@@ -137,16 +137,24 @@ def register_user(
             detail="Email đã được sử dụng",
         )
 
+    phone = (
+        request.so_dien_thoai.strip()
+        if request.so_dien_thoai
+        else None
+    )
+
+    if phone and phone_exists(db, phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Số điện thoại đã được sử dụng",
+        )
+
     now = datetime.now()
 
     user = NguoiDung(
         HoTen=request.ho_ten.strip(),
         Email=email,
-        SoDienThoai=(
-            request.so_dien_thoai.strip()
-            if request.so_dien_thoai
-            else None
-        ),
+        SoDienThoai=phone,
         MatKhauHash=password_hash.hash(
             request.password
         ),
@@ -168,7 +176,6 @@ def register_user(
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Không thể tạo tài khoản",
@@ -202,12 +209,24 @@ def create_user(
             detail="Email đã được sử dụng",
         )
 
+    phone = (
+        request.so_dien_thoai.strip()
+        if request.so_dien_thoai
+        else None
+    )
+
+    if phone and phone_exists(db, phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Số điện thoại đã được sử dụng",
+        )
+
     now = datetime.now()
 
     user = NguoiDung(
         HoTen=request.ho_ten.strip(),
         Email=email,
-        SoDienThoai=request.so_dien_thoai,
+        SoDienThoai=phone,
         MatKhauHash=password_hash.hash(
             request.password
         ),
@@ -241,7 +260,43 @@ def create_user(
         "user": _user_data(user),
     }
 
+def _normalize_phone(phone: str | None) -> str:
+    """Chuẩn hóa số điện thoại để so sánh."""
+    digits = "".join(
+        char for char in (phone or "")
+        if char.isdigit()
+    )
 
+    # Chuyển 84xxxxxxxxx thành 0xxxxxxxxx
+    if digits.startswith("84") and len(digits) == 11:
+        digits = "0" + digits[2:]
+
+    return digits
+
+def phone_exists(
+    db: Session,
+    phone: str | None,
+    exclude_user_id: int | None = None,
+) -> bool:
+    """Kiểm tra số điện thoại đã thuộc tài khoản khác chưa."""
+    normalized = _normalize_phone(phone)
+
+    if not normalized:
+        return False
+
+    query = db.query(NguoiDung.SoDienThoai).filter(
+        NguoiDung.SoDienThoai.isnot(None)
+    )
+
+    if exclude_user_id is not None:
+        query = query.filter(
+            NguoiDung.NguoiDungId != exclude_user_id
+        )
+
+    return any(
+        _normalize_phone(row[0]) == normalized
+        for row in query.all()
+    )
 # ============================================================
 # ADMIN TẠO TÀI KHOẢN
 # ============================================================
@@ -1277,6 +1332,7 @@ def update_user(
 ):
     user = _find_user(db, user_id)
 
+    # Kiểm tra email trùng
     if request.email:
         email = str(request.email).strip().lower()
 
@@ -1296,7 +1352,9 @@ def update_user(
             )
 
         user.Email = email
-
+    # ============================================================
+    # CẬP NHẬT HỌ TÊN
+    # ============================================================
     if request.ho_ten is not None:
         user.HoTen = request.ho_ten.strip()
 
@@ -1306,6 +1364,28 @@ def update_user(
             user.SoDienThoai = request.so_dien_thoai.strip() or None
         else:
             user.SoDienThoai = None
+    # Cập nhật họ tên
+    if request.ho_ten:
+        user.HoTen = request.ho_ten.strip()
+
+    # Kiểm tra và cập nhật số điện thoại
+    if "so_dien_thoai" in request.model_fields_set:
+        phone = (
+            request.so_dien_thoai.strip()
+            if request.so_dien_thoai
+            else None
+        )
+        if phone and phone_exists(
+            db,
+            phone,
+            exclude_user_id=user_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+        user.SoDienThoai = phone
 
     user.NgayCapNhat = datetime.now()
 
@@ -1315,7 +1395,6 @@ def update_user(
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Không thể cập nhật",
