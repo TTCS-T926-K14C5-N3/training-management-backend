@@ -18,22 +18,28 @@ from app.models.mon_hoc import MonHoc
 from app.models.vai_tro import VaiTro
 from app.routers.academic import (
     _class_payload,
+    activate_subject,
+    archive_subject,
     archive_class,
     create_class,
     create_grade,
     create_subject,
     create_training_program,
+    delete_subject,
     delete_training_program,
     delete_grade,
     get_class_options,
     list_grades,
+    list_subjects,
     update_class,
     update_grade,
+    update_room,
     update_training_program,
 )
 from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
+    RoomWrite,
     SubjectCreate,
     TrainingProgramWrite,
 )
@@ -237,6 +243,62 @@ def test_class_update_and_archive_keep_class_history(db: Session):
         LopHoc.LopHocId == record["lopHocId"]
     ).one()
     assert archived.TrangThai == "Ngừng hoạt động"
+
+
+def test_archived_subject_remains_visible_when_inactive_subjects_are_requested(
+    db: Session,
+):
+    subject = create_subject(
+        SubjectCreate(maMonHoc="ARCHIVE-01", tenMonHoc="Môn lưu trữ"),
+        db,
+    )
+
+    archive_subject(subject["monHocId"], db)
+
+    assert list_subjects(include_inactive=False, db=db) == []
+    inactive_subjects = list_subjects(include_inactive=True, db=db)
+    assert len(inactive_subjects) == 1
+    assert inactive_subjects[0]["monHocId"] == subject["monHocId"]
+    assert inactive_subjects[0]["trangThai"] == "Ngừng hoạt động"
+
+
+def test_archived_subject_can_be_activated_again(db: Session):
+    subject = create_subject(
+        SubjectCreate(maMonHoc="ACTIVATE-01", tenMonHoc="Môn áp dụng lại"),
+        db,
+    )
+    archive_subject(subject["monHocId"], db)
+
+    result = activate_subject(subject["monHocId"], db)
+
+    assert result["message"] == "Đã áp dụng lại môn học."
+    assert list_subjects(include_inactive=False, db=db)[0]["monHocId"] == subject[
+        "monHocId"
+    ]
+
+
+def test_subject_delete_removes_unused_subject_and_protects_class_subjects(
+    db: Session,
+):
+    unused_subject = create_subject(
+        SubjectCreate(maMonHoc="DELETE-01", tenMonHoc="Môn chưa sử dụng"),
+        db,
+    )
+    result = delete_subject(unused_subject["monHocId"], db)
+    assert result["message"] == "Đã xóa môn học."
+    assert db.query(MonHoc).filter_by(
+        MonHocId=unused_subject["monHocId"]
+    ).first() is None
+
+    _teacher, _student, _second_student, assigned_subject, _class_record = (
+        setup_academic_class(db, teacher_id=33)
+    )
+    with pytest.raises(HTTPException) as error:
+        delete_subject(assigned_subject["monHocId"], db)
+    assert error.value.status_code == 409
+    assert db.query(MonHoc).filter_by(
+        MonHocId=assigned_subject["monHocId"]
+    ).first() is not None
 
 
 def test_classes_with_locked_instructors_are_flagged_for_handover(db: Session):
@@ -554,3 +616,36 @@ def test_academic_routes_are_registered_in_the_fastapi_app():
     assert "/academic/programs/{program_id}" in paths
     assert "/academic/grades" in paths
     assert "/academic/subjects" in paths
+    assert "/academic/rooms/{room_id}" in paths
+
+
+def test_room_can_be_updated_and_missing_room_returns_404(db: Session):
+    from app.models.phong_hoc import PhongHoc
+
+    room = PhongHoc(
+        MaPhong="A101",
+        TenPhong="Phòng A101",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    db.add(room)
+    db.commit()
+
+    updated = update_room(
+        room.PhongHocId,
+        RoomWrite(maPhong="A102", tenPhong="Phòng A102", sucChua=42),
+        db,
+    )
+
+    assert updated["maPhong"] == "A102"
+    assert updated["tenPhong"] == "Phòng A102"
+    assert updated["sucChua"] == 42
+    assert db.query(PhongHoc).filter_by(PhongHocId=room.PhongHocId).one().SucChua == 42
+
+    with pytest.raises(HTTPException) as error:
+        update_room(
+            999,
+            RoomWrite(maPhong="A999", tenPhong="Phòng A999", sucChua=1),
+            db,
+        )
+    assert error.value.status_code == 404

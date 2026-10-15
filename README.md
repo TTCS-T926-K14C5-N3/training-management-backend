@@ -41,10 +41,13 @@ trò hệ thống 1–8, áp dụng migration tính năng (có thể chạy lạ
 mục gốc trên Windows:
 
 ```powershell
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_admissions.sql
-sqlcmd -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_admissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\007_lead_student_conversion.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
 ```
 
+`-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
 `-E` dùng xác thực Windows. Nếu cấu hình SQL Server dùng tài khoản SQL, thay
 `-E` bằng `-U <DB_USER> -P <DB_PASSWORD>` (không ghi mật khẩu vào lịch sử lệnh
 hoặc kho mã nguồn).
@@ -64,10 +67,38 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
   `POST /admissions/public/leads` là endpoint công khai. Honeypot nhận trường
   `website`; phản hồi xác nhận thời gian liên hệ trong một ngày làm việc.
 - `/admissions/leads` hỗ trợ CRUD và bộ lọc `status`, `source`,
-  `assigned_user_id`, `start_date`, `end_date`, `search`.
+  `assigned_user_id`, `start_date`, `end_date`, `search`. Khi tạo/cập nhật lead,
+  `chuongTrinhId` có thể để trống nếu chưa xác định chương trình; chạy lại
+  migration `005_curriculum_admissions.sql` để cập nhật cột trên cơ sở dữ liệu cũ.
   `PUT /admissions/leads/{lead_id}/assignments` nhận
-  `{ "consultantIds": [5, 6] }`; lịch sử bàn giao được trả trong `lichSuBanGiao`.
-  `GET /admissions/consultants` liệt kê tư vấn viên đang hoạt động.
+  `{ "consultantIds": [5] }` để giao một tư vấn viên hoặc `[]` để gỡ phân công.
+  `PUT /admissions/leads/bulk-assignments` nhận danh sách lead và một tư vấn viên
+  dùng chung cho các lead đã chọn; `consultantIds: []` gỡ phân công hàng loạt.
+  Lịch sử giao/gỡ được trả trong `lichSuBanGiao`. `GET /admissions/consultants`
+  liệt kê tư vấn viên đang hoạt động. `POST
+  /admissions/leads/{lead_id}/convert-to-student` tạo tài khoản học viên từ
+  thông tin lead, gán vai trò học viên, sinh mã `HV` theo ID người dùng và gửi
+  email kích hoạt; yêu cầu lead có email chưa được sử dụng. Lead đã nhập học
+  không thể sửa hoặc xóa. Áp dụng `migrations/007_lead_student_conversion.sql`
+  sau các migration tuyển sinh để đồng bộ độ dài email tài khoản, tạo bảng liên
+  kết chuyển đổi và cho phép trạng thái `Đã nhập học`.
+- Sprint 3 bổ sung luồng trạng thái lead `Mới → Đã liên hệ → Đang tư vấn → Hẹn
+  học thử → Chốt`, kết thúc với `Từ chối` hoặc chuyển đổi thành `Đã nhập học`.
+  Mỗi lần đổi trạng thái được lưu lịch sử; từ chối bắt buộc có lý do.
+  `POST/GET /admissions/leads/{lead_id}/interactions` ghi nhật ký gọi, nhắn tin,
+  gặp và lịch gọi lại; phản hồi lead đánh dấu cuộc gọi quá hạn để giao diện làm
+  nổi bật.
+- Sau migration `008_sprint_3.sql`, lớp có ngày khai giảng, sĩ số tối đa,
+  hình thức học, phòng/link trực tuyến, trạng thái vòng đời và tiến độ. API
+  `/academic/rooms` quản lý phòng; `POST /academic/classes/{class_id}/enrollments`
+  ghi danh hàng loạt, từ chối ghi danh vượt sĩ số lớp và trả về học viên đã có
+  trong lớp thay vì tạo trùng. Sức chứa phòng vượt ngưỡng là cảnh báo, không
+  chặn ghi danh.
+- `GET /academic/classes` hỗ trợ lọc `status`, `programId`, `instructorId`,
+  `startDate`, `endDate`. `GET /academic/students/{student_id}` trả hồ sơ học
+  viên cùng lịch sử lớp và điểm, giới hạn theo quyền lớp/giảng viên/học viên.
+  Mỗi môn lớp có một giảng viên chính và có thể có nhiều trợ giảng; danh sách
+  phân công sử dụng cả vai trò giảng viên và trợ giảng.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.diem import Diem
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
@@ -12,12 +13,15 @@ from app.models.mon_hoc import MonHoc
 ADMIN_ROLE_ID = 8
 TRAINING_MANAGER_ROLE_ID = 7
 INSTRUCTOR_ROLE_ID = 3
+ASSISTANT_ROLE_ID = 4
+TEACHING_ROLE_IDS = {INSTRUCTOR_ROLE_ID, ASSISTANT_ROLE_ID}
 STUDENT_ROLE_ID = 2
 
 # Exact status strings persisted by the user writers (auth_service,
 # user_import_service) and guarded by the CK_NguoiDung_TrangThai constraint.
 ACTIVE_USER_STATUS = "HoatDong"
 LOCKED_USER_STATUS = "BiKhoa"
+ACTIVE_CLASS_STATUSES = {"Chuẩn bị", "Đang học", "Đang hoạt động"}
 
 
 def user_role_ids(db: Session, user_id: int) -> set[int]:
@@ -38,13 +42,20 @@ def accessible_classes(
     query = db.query(LopHoc)
 
     if not include_inactive:
-        query = query.filter(LopHoc.TrangThai == "Đang hoạt động")
+        query = query.filter(LopHoc.TrangThai.in_(ACTIVE_CLASS_STATUSES))
 
     if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
         return query.order_by(LopHoc.MaLop).all()
-    if INSTRUCTOR_ROLE_ID in roles:
+    if roles.intersection(TEACHING_ROLE_IDS):
+        assigned_subject_class_ids = (
+            db.query(LopHocMonHocGiangVien.LopHocId)
+            .filter(LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId)
+        )
         return (
-            query.filter(LopHoc.GiangVienId == user.NguoiDungId)
+            query.filter(
+                (LopHoc.GiangVienId == user.NguoiDungId)
+                | LopHoc.LopHocId.in_(assigned_subject_class_ids)
+            )
             .order_by(LopHoc.MaLop)
             .all()
         )
@@ -69,8 +80,16 @@ def can_access_class(
     roles = user_role_ids(db, user.NguoiDungId)
     if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
         return True
-    if INSTRUCTOR_ROLE_ID in roles:
-        return lop_hoc.GiangVienId == user.NguoiDungId
+    if roles.intersection(TEACHING_ROLE_IDS):
+        return lop_hoc.GiangVienId == user.NguoiDungId or (
+            db.query(LopHocMonHocGiangVien)
+            .filter(
+                LopHocMonHocGiangVien.LopHocId == lop_hoc.LopHocId,
+                LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId,
+            )
+            .first()
+            is not None
+        )
     if STUDENT_ROLE_ID in roles:
         return (
             db.query(LopHocHocVien)
@@ -90,10 +109,15 @@ def accessible_grades_query(db: Session, user: NguoiDung):
 
     if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
         return query
-    if INSTRUCTOR_ROLE_ID in roles:
-        return query.join(LopHoc, LopHoc.LopHocId == Diem.LopHocId).filter(
+    if roles.intersection(TEACHING_ROLE_IDS):
+        assigned_class_ids = db.query(LopHoc.LopHocId).filter(
             LopHoc.GiangVienId == user.NguoiDungId
+        ).union(
+            db.query(LopHocMonHocGiangVien.LopHocId).filter(
+                LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId
+            )
         )
+        return query.filter(Diem.LopHocId.in_(assigned_class_ids))
     if STUDENT_ROLE_ID in roles:
         return query.filter(Diem.HocVienId == user.NguoiDungId)
     return query.filter(false())
@@ -137,7 +161,7 @@ def ensure_active_instructor(db: Session, user_id: int) -> NguoiDung:
         )
         .filter(
             NguoiDung.NguoiDungId == user_id,
-            NguoiDungVaiTro.VaiTroId == INSTRUCTOR_ROLE_ID,
+            NguoiDungVaiTro.VaiTroId.in_(TEACHING_ROLE_IDS),
             NguoiDung.TrangThai == ACTIVE_USER_STATUS,
         )
         .first()
