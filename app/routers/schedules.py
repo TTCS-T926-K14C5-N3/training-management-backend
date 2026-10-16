@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
@@ -161,6 +162,21 @@ def _validate_room(db: Session, room_id: int) -> None:
         )
 
 
+def _instructor_roles(db: Session, class_id: int, subject_id: int) -> dict[int, str]:
+    return {
+        instructor_id: role
+        for instructor_id, role in db.query(
+            LopHocMonHocGiangVien.GiangVienId,
+            LopHocMonHocGiangVien.VaiTro,
+        )
+        .filter(
+            LopHocMonHocGiangVien.LopHocId == class_id,
+            LopHocMonHocGiangVien.MonHocId == subject_id,
+        )
+        .all()
+    }
+
+
 def _find_conflicts(
     db: Session,
     request: LichHocWrite,
@@ -177,25 +193,31 @@ def _find_conflicts(
 
     overlaps = query.order_by(LichHoc.GioBatDau).all()
     conflicts = []
+    request_roles = _instructor_roles(db, request.lop_hoc_id, request.mon_hoc_id)
+    request_instructors = set(request_roles) | {request.giang_vien_id}
     for existing in overlaps:
         labels = []
+        existing_roles = _instructor_roles(db, existing.LopHocId, existing.MonHocId)
+        existing_instructors = set(existing_roles) | {existing.GiangVienId}
         class_record = (
             db.query(LopHoc)
             .filter(LopHoc.LopHocId == existing.LopHocId)
             .first()
         )
-        if existing.GiangVienId == request.giang_vien_id:
+        for instructor_id in sorted(request_instructors & existing_instructors):
             teacher = (
                 db.query(NguoiDung)
-                .filter(NguoiDung.NguoiDungId == request.giang_vien_id)
+                .filter(NguoiDung.NguoiDungId == instructor_id)
                 .first()
             )
-            labels.append(
-                {
-                    "loai": "giangVien",
-                    "ten": teacher.HoTen if teacher else None,
-                }
-            )
+            teacher_conflict = {
+                "loai": "giangVien",
+                "ten": teacher.HoTen if teacher else None,
+            }
+            role = existing_roles.get(instructor_id) or request_roles.get(instructor_id)
+            if role:
+                teacher_conflict["vaiTro"] = role
+            labels.append(teacher_conflict)
         if existing.PhongHocId == request.phong_hoc_id:
             room = (
                 db.query(PhongHoc)

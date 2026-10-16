@@ -11,6 +11,7 @@ from app.database import Base
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
@@ -253,6 +254,70 @@ def test_schedule_conflict_reports_teacher_and_room_details(db: Session):
         "phongHoc",
     }
     assert all(item["maBuoiHoc"] == "BH-000001" for item in detail["conflicts"])
+
+
+def test_schedule_conflict_includes_primary_and_assistant_instructors(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    assistant = add_user(db, 4, 4, "Trợ giảng B")
+    other_teacher = add_user(db, 6, 3, "Giảng viên C")
+    db.add_all(
+        [
+            LopHocMonHocGiangVien(
+                LopHocId=class_record.LopHocId,
+                MonHocId=subject.MonHocId,
+                GiangVienId=teacher.NguoiDungId,
+                VaiTro="Chính",
+            ),
+            LopHocMonHocGiangVien(
+                LopHocId=class_record.LopHocId,
+                MonHocId=subject.MonHocId,
+                GiangVienId=assistant.NguoiDungId,
+                VaiTro="Phụ",
+            ),
+        ]
+    )
+    other_room = PhongHoc(
+        PhongHocId=2,
+        MaPhong="A102",
+        TenPhong="Phòng A102",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    db.add(other_room)
+    db.commit()
+
+    day = date.today() + timedelta(days=11)
+    create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        create_schedule(
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                other_room.PhongHocId,
+                other_teacher.NguoiDungId,
+                day=day,
+            ),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 409
+    conflicts = caught.value.detail["conflicts"]
+    assert {item["ten"]: item["vaiTro"] for item in conflicts} == {
+        teacher.HoTen: "Chính",
+        assistant.HoTen: "Phụ",
+    }
 
 
 def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Session):
