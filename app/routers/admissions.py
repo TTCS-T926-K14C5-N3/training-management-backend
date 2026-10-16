@@ -528,13 +528,20 @@ def list_leads(
     search: str | None = Query(default=None),
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
+    unassigned: bool = False,
 ):
     roles = user_role_ids(db, current_user.NguoiDungId)
+    is_manager = (
+        user_is_admin(db, current_user.NguoiDungId)
+        or TRAINING_MANAGER_ROLE_ID in roles
+    )
+    if unassigned and not is_manager:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo hoặc quản trị viên được xem lead chưa phân công.",
+        )
     query = db.query(Lead)
-    if (
-        not user_is_admin(db, current_user.NguoiDungId)
-        and TRAINING_MANAGER_ROLE_ID not in roles
-    ):
+    if not is_manager:
         if ADMISSIONS_ROLE_ID not in roles:
             raise HTTPException(status_code=403, detail="Không có quyền xem khách hàng tiềm năng.")
         assigned_lead_ids = (
@@ -558,6 +565,12 @@ def list_leads(
             )
         )
         query = query.filter(Lead.LeadId.in_(assigned_lead_ids))
+    elif unassigned:
+        assigned_lead_ids = (
+            db.query(LeadAssignmentHistory.LeadId)
+            .filter(LeadAssignmentHistory.DangPhanCong.in_([True]))
+        )
+        query = query.filter(~Lead.LeadId.in_(assigned_lead_ids))
     if start_date:
         query = query.filter(Lead.NgayTao >= datetime.combine(start_date, time.min))
     if end_date:

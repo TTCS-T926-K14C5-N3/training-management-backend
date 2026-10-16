@@ -43,6 +43,8 @@ class NguoiDung(Base):
     SoDienThoai = Column(String(20), nullable=True)
     NgaySinh = Column(Date, nullable=True)
     DiaChi = Column(Unicode(255), nullable=True)
+    TrinhDoDauVao = Column(Unicode(150), nullable=True)
+    GhiChuHoSo = Column(Unicode(2000), nullable=True)
 
     # =========================================================
     # MẬT KHẨU

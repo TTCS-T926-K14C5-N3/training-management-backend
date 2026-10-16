@@ -1149,7 +1149,6 @@ def activate_account(
             detail="Không tìm thấy người dùng",
         )
 
-    user.DaKichHoat = True
     user.NgayCapNhat = now
 
     activation_token.DaSuDung = True
@@ -1170,7 +1169,6 @@ def activate_account(
         "message": "Kích hoạt tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "email": user.Email,
-        "daKichHoat": user.DaKichHoat,
     }
 
 

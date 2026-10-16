@@ -49,6 +49,7 @@ class FakePermissionDatabase:
     [
         (3, "GRADE_UPDATE"),
         (6, "TUITION_UPDATE"),
+        (7, "STUDENT_PROFILE_UPDATE"),
         (8, "ROLE_UPDATE"),
     ],
 )
@@ -95,6 +96,7 @@ def test_admin_name_is_allowed_when_role_id_is_not_eight():
         (6, "GRADE_UPDATE"),
         (4, "GRADE_VIEW"),
         (2, "USER_DELETE"),
+        (5, "STUDENT_PROFILE_UPDATE"),
     ],
 )
 def test_missing_role_permissions_are_denied(role_id, permission_code):
@@ -133,6 +135,8 @@ def test_catalog_contains_all_eight_business_role_defaults():
         "CLASS_DELETE",
         "QUAN_LY_LOP",
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
+    assert "STUDENT_PROFILE_UPDATE" in codes
+    assert "STUDENT_PROFILE_UPDATE" in DEFAULT_ROLE_PERMISSIONS[7]
 
 
 def test_role_permission_model_uses_existing_composite_primary_key():
