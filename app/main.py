@@ -22,7 +22,7 @@ from app.routers.nguoi_dung import (
 from app.routers.academic import (
     router as academic_router
 )
-
+from app.routers import mau_lich_hoc
 
 app = FastAPI(
     title="Quan ly dao tao",
@@ -82,3 +82,4 @@ app.include_router(
 app.include_router(
     academic_router
 )
+app.include_router(mau_lich_hoc.router)
