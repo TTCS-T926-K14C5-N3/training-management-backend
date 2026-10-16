@@ -383,6 +383,97 @@ def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Sessio
     }
 
 
+def test_schedule_conflict_checks_shared_online_room_link(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    assistant = add_user(db, 4, 4, "Trợ giảng B")
+    class_record.HinhThuc = "Trực tuyến"
+    class_record.LinkTrucTuyen = "https://meet.example.com/room-a/"
+    other_room = PhongHoc(
+        PhongHocId=2,
+        MaPhong="ONLINE-2",
+        TenPhong="Phòng trực tuyến 2",
+        SucChua=100,
+        TrangThai="Đang hoạt động",
+    )
+    other_class = LopHoc(
+        MaLop="CS101-02",
+        TenLop="Lớp Lập trình trực tuyến 2",
+        NamHoc=class_record.NamHoc,
+        GiangVienId=teacher.NguoiDungId,
+        NgayKhaiGiang=date.today(),
+        SiSoToiDa=30,
+        HinhThuc="Trực tuyến",
+        PhongHocId=other_room.PhongHocId,
+        LinkTrucTuyen="https://meet.example.com/other-room",
+        TienDo=0,
+        TrangThai="Đang học",
+        NgayTao=datetime.now(),
+    )
+    db.add_all([other_room, other_class])
+    db.flush()
+    db.add(
+        LopHocMonHoc(
+            LopHocId=other_class.LopHocId,
+            MonHocId=subject.MonHocId,
+        )
+    )
+    db.commit()
+
+    day = date.today() + timedelta(days=13)
+    create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+    different_link_preview = check_schedule_conflicts(
+        schedule_request(
+            other_class.LopHocId,
+            subject.MonHocId,
+            other_room.PhongHocId,
+            assistant.NguoiDungId,
+            day=day,
+            start=time(9, 30),
+            end=time(10, 30),
+        ),
+        exclude_schedule_id=None,
+        current_user=teacher,
+        db=db,
+    )
+    assert different_link_preview["hasConflicts"] is False
+
+    other_class.LinkTrucTuyen = "https://meet.example.com/room-a"
+    db.commit()
+    with pytest.raises(HTTPException) as caught:
+        create_schedule(
+            schedule_request(
+                other_class.LopHocId,
+                subject.MonHocId,
+                other_room.PhongHocId,
+                assistant.NguoiDungId,
+                day=day,
+                start=time(9, 30),
+                end=time(10, 30),
+            ),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 409
+    room_conflict = next(
+        item
+        for item in caught.value.detail["conflicts"]
+        if item.get("linkTrucTuyen")
+    )
+    assert room_conflict["linkTrucTuyen"] == class_record.LinkTrucTuyen
+    assert room_conflict["maLop"] == class_record.MaLop
+
+
 def test_conflict_preview_returns_multiple_items_without_writing(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     substitute = add_user(db, 4, 4, "Trợ giảng B")

@@ -177,6 +177,16 @@ def _instructor_roles(db: Session, class_id: int, subject_id: int) -> dict[int, 
     }
 
 
+def _online_room_key(class_record: LopHoc | None) -> str | None:
+    if (
+        class_record is None
+        or class_record.HinhThuc not in {"Trực tuyến", "Kết hợp"}
+        or not class_record.LinkTrucTuyen
+    ):
+        return None
+    return class_record.LinkTrucTuyen.strip().rstrip("/") or None
+
+
 def _find_conflicts(
     db: Session,
     request: LichHocWrite,
@@ -193,6 +203,10 @@ def _find_conflicts(
 
     overlaps = query.order_by(LichHoc.GioBatDau).all()
     conflicts = []
+    request_class = (
+        db.query(LopHoc).filter(LopHoc.LopHocId == request.lop_hoc_id).first()
+    )
+    request_online_room = _online_room_key(request_class)
     request_roles = _instructor_roles(db, request.lop_hoc_id, request.mon_hoc_id)
     request_instructors = set(request_roles) | {request.giang_vien_id}
     for existing in overlaps:
@@ -203,6 +217,10 @@ def _find_conflicts(
             db.query(LopHoc)
             .filter(LopHoc.LopHocId == existing.LopHocId)
             .first()
+        )
+        same_online_room = (
+            request_online_room is not None
+            and request_online_room == _online_room_key(class_record)
         )
         for instructor_id in sorted(request_instructors & existing_instructors):
             teacher = (
@@ -229,6 +247,15 @@ def _find_conflicts(
                     "loai": "phongHoc",
                     "ten": room.TenPhong if room else None,
                     "maPhong": room.MaPhong if room else None,
+                }
+            )
+        if same_online_room:
+            labels.append(
+                {
+                    "loai": "phongHoc",
+                    "ten": "Phòng trực tuyến",
+                    "maPhong": "Trực tuyến",
+                    "linkTrucTuyen": class_record.LinkTrucTuyen,
                 }
             )
         for label in labels:
