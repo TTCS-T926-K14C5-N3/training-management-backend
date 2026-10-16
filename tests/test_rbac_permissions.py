@@ -48,6 +48,7 @@ class FakePermissionDatabase:
     ("role_id", "permission_code"),
     [
         (3, "GRADE_UPDATE"),
+        (7, "SCHEDULE_UPDATE"),
         (6, "TUITION_UPDATE"),
         (7, "STUDENT_PROFILE_UPDATE"),
         (8, "ROLE_UPDATE"),
@@ -93,6 +94,8 @@ def test_admin_name_is_allowed_when_role_id_is_not_eight():
     ("role_id", "permission_code"),
     [
         (3, "TUITION_UPDATE"),
+        (3, "SCHEDULE_UPDATE"),
+        (4, "SCHEDULE_UPDATE"),
         (6, "GRADE_UPDATE"),
         (4, "GRADE_VIEW"),
         (2, "USER_DELETE"),

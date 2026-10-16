@@ -19,6 +19,7 @@ from app.main import app
 from app.routers.schedules import (
     cancel_schedule,
     create_schedule,
+    get_schedule_options,
     list_schedule_history,
     list_schedules,
     update_schedule,
@@ -275,6 +276,61 @@ def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Sessio
     }
 
 
+def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    substitute = add_user(db, 4, 4, "Trợ giảng B")
+    day = date.today() + timedelta(days=12)
+    first = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+    second = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            None,
+            substitute.NguoiDungId,
+            day=day,
+            start=time(11),
+            end=time(12),
+        ),
+        teacher,
+        db,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        update_schedule(
+            second["lichHocId"],
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+                day=day,
+                start=time(9, 30),
+                end=time(10, 30),
+            ),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail["conflicts"][0]["lichHocId"] == first["lichHocId"]
+    unchanged = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == second["lichHocId"]
+    ).all()
+    assert [item.HanhDong for item in unchanged] == ["Tạo"]
+
+
 def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     schedule = create_schedule(
@@ -350,6 +406,10 @@ def test_started_schedule_cannot_be_edited_or_cancelled(db: Session):
         teacher,
         db,
     )
+    assert schedule["trangThai"] == "Đã diễn ra"
+    assert schedule["coTheChinhSua"] is False
+    assert schedule["coTheHuy"] is False
+    assert schedule["trangThaiDiemDanh"] is None
 
     with pytest.raises(HTTPException) as edit_error:
         update_schedule(
@@ -390,6 +450,8 @@ def test_list_schedules_only_returns_accessible_class_schedules(db: Session):
     )
 
     schedules = list_schedules(None, None, None, teacher, db)
+    options = get_schedule_options(teacher, db)
 
     assert [item["lichHocId"] for item in schedules] == [created["lichHocId"]]
     assert schedules[0]["trangThaiDiemDanh"] is None
+    assert options["diemDanhDuocHoTro"] is False
