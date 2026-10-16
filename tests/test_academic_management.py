@@ -402,6 +402,27 @@ def test_student_profile_manager_can_update_and_view_full_academic_history(
     assert profile["diems"][0]["diemCuoiKy"] == 9.0
 
 
+def test_admin_named_role_can_view_student_academic_profile(db: Session):
+    _teacher, student, _second_student, _subject, class_payload = (
+        setup_academic_class(db)
+    )
+    db.add(VaiTro(VaiTroId=1, TenVaiTro="admin"))
+    db.commit()
+    admin = add_user(db, 30, 1, "Quản trị")
+
+    profile = get_student_academic_profile(
+        student.NguoiDungId,
+        current_user=admin,
+        db=db,
+    )
+
+    assert profile["hocVien"]["nguoiDungId"] == student.NguoiDungId
+    assert any(
+        item["lopHocId"] == class_payload["lopHocId"]
+        for item in profile["lopHocs"]
+    )
+
+
 def test_student_profile_rejects_duplicate_email_and_non_student(db: Session):
     _teacher, student, second_student, _subject, _class_payload = (
         setup_academic_class(db)

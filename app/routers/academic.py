@@ -51,6 +51,7 @@ from app.services.academic_service import (
     ensure_active_student,
     ensure_active_subjects,
     ensure_valid_academic_year,
+    user_is_admin,
     user_role_ids,
 )
 
@@ -996,9 +997,11 @@ def get_student_academic_profile(
             detail="Không tìm thấy hồ sơ học viên.",
         )
     roles = user_role_ids(db, current_user.NguoiDungId)
+    is_admin = user_is_admin(db, current_user.NguoiDungId)
     if (
         current_user.NguoiDungId != student_id
-        and not roles.intersection({7, 8, *TEACHING_ROLE_IDS})
+        and not is_admin
+        and not roles.intersection({7, *TEACHING_ROLE_IDS})
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1009,7 +1012,11 @@ def get_student_academic_profile(
         current_user,
         include_inactive=True,
     )
-    if current_user.NguoiDungId != student_id and not roles.intersection({7, 8}):
+    if (
+        current_user.NguoiDungId != student_id
+        and not is_admin
+        and 7 not in roles
+    ):
         visible_classes = [
             item for item in visible_classes
             if can_access_class(db, current_user, item)
