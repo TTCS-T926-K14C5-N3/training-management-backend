@@ -602,6 +602,7 @@ def test_only_training_manager_can_override_schedule_conflicts(db: Session):
             db,
         )
     assert blocked.value.status_code == 403
+    assert db.query(LichHoc).count() == 1
 
     request = schedule_request(
         class_record.LopHocId,
@@ -642,10 +643,16 @@ def test_only_training_manager_can_override_schedule_conflicts(db: Session):
     ).one()
     audit_payload = json.loads(history.DuLieuMoi)
     assert history.HanhDong == "Tạo"
+    assert history.NguoiThucHienId == manager.NguoiDungId
+    assert history.ThoiDiem is not None
     assert history.LyDo == "Ưu tiên lịch học bù đã xác nhận."
     assert audit_payload["xacNhanTrungLich"] is True
     assert audit_payload["lyDoGhiDe"] == "Ưu tiên lịch học bù đã xác nhận."
-    assert audit_payload["xungDot"][0]["lichHocId"] == 1
+    assert {item["loai"] for item in audit_payload["xungDot"]} == {
+        "giangVien",
+        "phongHoc",
+    }
+    assert {item["lichHocId"] for item in audit_payload["xungDot"]} == {1}
 
 
 def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
