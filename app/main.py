@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from app.database import SessionLocal
 from app.services.rbac_service import initialize_role_permissions
-
+from app.routers import thoi_khoa_bieu
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers.health import (
@@ -82,3 +82,4 @@ app.include_router(
 app.include_router(
     academic_router
 )
+app.include_router(thoi_khoa_bieu.router)
