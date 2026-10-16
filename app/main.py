@@ -26,6 +26,9 @@ from app.routers.academic import (
 from app.routers.admissions import (
     router as admissions_router
 )
+from app.routers.schedules import (
+    router as schedules_router
+)
 
 
 app = FastAPI(
@@ -86,4 +89,8 @@ app.include_router(
 
 app.include_router(
     admissions_router
+)
+
+app.include_router(
+    schedules_router
 )

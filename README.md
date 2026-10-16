@@ -45,12 +45,19 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\005_curriculum_a
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\006_curriculum_admissions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\007_lead_student_conversion.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_seed_sprint3_permissions.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_student_profiles.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedules.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
 `-E` dùng xác thực Windows. Nếu cấu hình SQL Server dùng tài khoản SQL, thay
 `-E` bằng `-U <DB_USER> -P <DB_PASSWORD>` (không ghi mật khẩu vào lịch sử lệnh
 hoặc kho mã nguồn).
+
+Ứng dụng tự bổ sung các quyền `SCHEDULE_VIEW`, `SCHEDULE_CREATE` và
+`SCHEDULE_UPDATE` khi khởi động. Giảng viên/trợ giảng mặc định được xem lịch;
+quản lý đào tạo và quản trị viên có quyền tạo, cập nhật và hủy buổi học.
 
 Các hợp đồng API chính (các trường JSON dùng camelCase):
 
@@ -99,6 +106,23 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
   viên cùng lịch sử lớp và điểm, giới hạn theo quyền lớp/giảng viên/học viên.
   Mỗi môn lớp có một giảng viên chính và có thể có nhiều trợ giảng; danh sách
   phân công sử dụng cả vai trò giảng viên và trợ giảng.
+- Lịch buổi học:
+  - `GET /academic/schedule-options` lấy lớp/môn trong phạm vi truy cập cùng
+    danh sách giảng viên và phòng đang hoạt động.
+  - `GET /academic/schedules` liệt kê lịch; hỗ trợ `startDate`, `endDate`,
+    `status`.
+  - `POST /academic/schedules` nhận `lopHocId`, `monHocId`, `ngayHoc`,
+    `gioBatDau`, `gioKetThuc`, `phongHocId` (có thể `null`) và `giangVienId`.
+  - `PUT /academic/schedules/{schedule_id}` cập nhật ngày, giờ, phòng và
+    giảng viên; lớp/môn là thông tin cố định.
+  - `POST /academic/schedules/{schedule_id}/cancel` nhận `{ "lyDo": "..." }`;
+    lý do bắt buộc, lịch đã bắt đầu/đã qua giờ không thể sửa hoặc hủy.
+  - `GET /academic/schedule-history` trả các sự kiện tạo, cập nhật và hủy đã
+    được lưu cùng ảnh chụp dữ liệu trước/sau, người thực hiện và thời điểm.
+    Xung đột lịch trả HTTP 409 cùng `detail.conflicts` chứa loại tài nguyên,
+    tên, ngày/giờ và buổi học/lớp đang trùng.
+  - Cơ sở dữ liệu hiện chưa có tính năng điểm danh theo buổi; API trả
+    `diemDanhDuocHoTro: false` và không giả định trạng thái điểm danh.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và
