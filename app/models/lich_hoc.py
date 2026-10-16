@@ -21,7 +21,7 @@ class LichHoc(Base):
     NgayHoc = Column(Date, nullable=False)
     GioBatDau = Column(Time, nullable=False)
     GioKetThuc = Column(Time, nullable=False)
-    PhongHocId = Column(Integer, ForeignKey("PhongHoc.PhongHocId"), nullable=True)
+    PhongHocId = Column(Integer, ForeignKey("PhongHoc.PhongHocId"), nullable=False)
     GiangVienId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),

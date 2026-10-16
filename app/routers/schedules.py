@@ -17,10 +17,12 @@ from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.phong_hoc import PhongHoc
 from app.schemas.lich_hoc import LichHocCancel, LichHocWrite
 from app.services.academic_service import (
+    TRAINING_MANAGER_ROLE_ID,
     TEACHING_ROLE_IDS,
     accessible_classes,
     can_access_class,
     ensure_active_instructor,
+    user_role_ids,
 )
 
 
@@ -150,9 +152,7 @@ def _validate_class_subject(
         )
 
 
-def _validate_room(db: Session, room_id: int | None) -> None:
-    if room_id is None:
-        return
+def _validate_room(db: Session, room_id: int) -> None:
     room = db.query(PhongHoc).filter(PhongHoc.PhongHocId == room_id).first()
     if room is None or room.TrangThai != "Đang hoạt động":
         raise HTTPException(
@@ -196,10 +196,7 @@ def _find_conflicts(
                     "ten": teacher.HoTen if teacher else None,
                 }
             )
-        if (
-            request.phong_hoc_id is not None
-            and existing.PhongHocId == request.phong_hoc_id
-        ):
+        if existing.PhongHocId == request.phong_hoc_id:
             room = (
                 db.query(PhongHoc)
                 .filter(PhongHoc.PhongHocId == request.phong_hoc_id)
@@ -228,15 +225,30 @@ def _find_conflicts(
     return conflicts
 
 
-def _ensure_not_conflicting(conflicts: list[dict]) -> None:
-    if conflicts:
+def _ensure_not_conflicting(
+    conflicts: list[dict],
+    request: LichHocWrite,
+    current_user: NguoiDung,
+    db: Session,
+) -> bool:
+    is_training_manager = (
+        TRAINING_MANAGER_ROLE_ID in user_role_ids(db, current_user.NguoiDungId)
+    )
+    if request.xac_nhan_trung_lich and not is_training_manager:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo được xác nhận ghi đè lịch bị trùng.",
+        )
+    if conflicts and not request.xac_nhan_trung_lich:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "message": "Lịch học bị trùng với buổi học đã được xếp.",
                 "conflicts": conflicts,
+                "canOverride": is_training_manager,
             },
         )
+    return bool(conflicts and request.xac_nhan_trung_lich)
 
 
 def _ensure_schedule_writable(schedule: LichHoc) -> None:
@@ -402,6 +414,67 @@ def list_schedules(
 
 
 @router.post(
+    "/schedules/check-conflicts",
+    dependencies=[Depends(require_permission("SCHEDULE_VIEW"))],
+)
+def check_schedule_conflicts(
+    request: LichHocWrite,
+    exclude_schedule_id: int | None = Query(
+        default=None,
+        alias="excludeScheduleId",
+        gt=0,
+    ),
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    class_record = _get_class_or_404(db, request.lop_hoc_id)
+    if not can_access_class(db, current_user, class_record):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
+        )
+    if exclude_schedule_id is not None:
+        schedule = _get_schedule_or_404(db, exclude_schedule_id)
+        existing_class = _get_class_or_404(db, schedule.LopHocId)
+        if not can_access_class(db, current_user, existing_class):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
+            )
+        _ensure_schedule_writable(schedule)
+        if (
+            request.lop_hoc_id != schedule.LopHocId
+            or request.mon_hoc_id != schedule.MonHocId
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Không được thay đổi lớp hoặc môn học của buổi học.",
+            )
+    _validate_class_subject(db, class_record, request.mon_hoc_id)
+    try:
+        ensure_active_instructor(db, request.giang_vien_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    _validate_room(db, request.phong_hoc_id)
+    conflicts = _find_conflicts(
+        db,
+        request,
+        exclude_schedule_id=exclude_schedule_id,
+    )
+    is_training_manager = (
+        TRAINING_MANAGER_ROLE_ID in user_role_ids(db, current_user.NguoiDungId)
+    )
+    return {
+        "hasConflicts": bool(conflicts),
+        "conflicts": conflicts,
+        "canOverride": is_training_manager,
+    }
+
+
+@router.post(
     "/schedules",
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_permission("SCHEDULE_CREATE"))],
@@ -426,7 +499,10 @@ def create_schedule(
             detail=str(error),
         ) from error
     _validate_room(db, request.phong_hoc_id)
-    _ensure_not_conflicting(_find_conflicts(db, request))
+    conflicts = _find_conflicts(db, request)
+    conflict_override = _ensure_not_conflicting(
+        conflicts, request, current_user, db
+    )
 
     now = datetime.now()
     schedule = LichHoc(
@@ -446,16 +522,34 @@ def create_schedule(
     db.add(schedule)
     db.flush()
     payload = _schedule_payload(db, schedule)
+    history_payload = payload
+    if conflict_override:
+        history_payload = {
+            **payload,
+            "xacNhanTrungLich": True,
+            "lyDoGhiDe": request.ly_do_ghi_de,
+            "xungDot": conflicts,
+        }
     db.add(
         LichHocLichSu(
             LichHocId=schedule.LichHocId,
             HanhDong="Tạo",
-            DuLieuMoi=json.dumps(payload, ensure_ascii=False),
+            DuLieuMoi=json.dumps(history_payload, ensure_ascii=False),
+            LyDo=request.ly_do_ghi_de if conflict_override else None,
             ThoiDiem=now,
             NguoiThucHienId=current_user.NguoiDungId,
         )
     )
     _commit(db, "Không thể tạo buổi học do dữ liệu bị trùng hoặc không hợp lệ.")
+    if conflict_override:
+        return {
+            **payload,
+            "ghiDe": {
+                "xacNhan": True,
+                "lyDo": request.ly_do_ghi_de,
+                "soXungDot": len(conflicts),
+            },
+        }
     return payload
 
 
@@ -491,8 +585,14 @@ def update_schedule(
             detail=str(error),
         ) from error
     _validate_room(db, request.phong_hoc_id)
-    _ensure_not_conflicting(
-        _find_conflicts(db, request, exclude_schedule_id=schedule_id)
+    conflicts = _find_conflicts(
+        db, request, exclude_schedule_id=schedule_id
+    )
+    conflict_override = _ensure_not_conflicting(
+        conflicts,
+        request,
+        current_user,
+        db,
     )
 
     before = _snapshot(db, schedule)
@@ -504,17 +604,34 @@ def update_schedule(
     schedule.NgayCapNhat = datetime.now()
     schedule.NguoiCapNhatId = current_user.NguoiDungId
     after = _schedule_payload(db, schedule)
+    history_payload = dict(after)
+    if conflict_override:
+        history_payload.update(
+            xacNhanTrungLich=True,
+            lyDoGhiDe=request.ly_do_ghi_de,
+            xungDot=conflicts,
+        )
     db.add(
         LichHocLichSu(
             LichHocId=schedule.LichHocId,
             HanhDong="Cập nhật",
             DuLieuCu=before,
-            DuLieuMoi=json.dumps(after, ensure_ascii=False),
+            DuLieuMoi=json.dumps(history_payload, ensure_ascii=False),
+            LyDo=request.ly_do_ghi_de if conflict_override else None,
             ThoiDiem=schedule.NgayCapNhat,
             NguoiThucHienId=current_user.NguoiDungId,
         )
     )
     _commit(db, "Không thể cập nhật lịch do dữ liệu bị trùng hoặc không hợp lệ.")
+    if conflict_override:
+        return {
+            **after,
+            "ghiDe": {
+                "xacNhan": True,
+                "lyDo": request.ly_do_ghi_de,
+                "soXungDot": len(conflicts),
+            },
+        }
     return after
 
 

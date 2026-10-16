@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -7,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
-from app.models.lich_hoc import LichHocLichSu
+from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.mon_hoc import MonHoc
@@ -18,6 +19,7 @@ from app.models.vai_tro import VaiTro
 from app.main import app
 from app.routers.schedules import (
     cancel_schedule,
+    check_schedule_conflicts,
     create_schedule,
     get_schedule_options,
     list_schedule_history,
@@ -32,6 +34,7 @@ def test_schedule_endpoints_are_registered():
     assert "get" in paths["/academic/schedule-options"]
     assert "get" in paths["/academic/schedules"]
     assert "post" in paths["/academic/schedules"]
+    assert "post" in paths["/academic/schedules/check-conflicts"]
     assert "put" in paths["/academic/schedules/{schedule_id}"]
     assert "post" in paths["/academic/schedules/{schedule_id}/cancel"]
     assert "get" in paths["/academic/schedule-history"]
@@ -122,12 +125,14 @@ def setup_schedule_context(db: Session):
 def schedule_request(
     class_id: int,
     subject_id: int,
-    room_id: int | None,
+    room_id: int,
     teacher_id: int,
     *,
     day: date | None = None,
     start: time = time(9),
     end: time = time(10),
+    acknowledge_conflicts: bool = False,
+    override_reason: str | None = None,
 ) -> LichHocWrite:
     return LichHocWrite(
         lopHocId=class_id,
@@ -137,6 +142,8 @@ def schedule_request(
         gioKetThuc=end,
         phongHocId=room_id,
         giangVienId=teacher_id,
+        xacNhanTrungLich=acknowledge_conflicts,
+        lyDoGhiDe=override_reason,
     )
 
 
@@ -148,7 +155,21 @@ def test_schedule_write_rejects_invalid_time_range():
             ngayHoc=date.today(),
             gioBatDau="10:00",
             gioKetThuc="10:00",
+            phongHocId=1,
             giangVienId=1,
+        )
+
+    with pytest.raises(ValidationError, match="ít nhất 5 ký tự"):
+        LichHocWrite(
+            lopHocId=1,
+            monHocId=1,
+            ngayHoc=date.today(),
+            gioBatDau="09:00",
+            gioKetThuc="10:00",
+            phongHocId=1,
+            giangVienId=1,
+            xacNhanTrungLich=True,
+            lyDoGhiDe="   ",
         )
 
 
@@ -169,7 +190,7 @@ def test_create_update_and_persist_schedule_history(db: Session):
         schedule_request(
             class_record.LopHocId,
             subject.MonHocId,
-            None,
+            room.PhongHocId,
             teacher.NguoiDungId,
             start=time(11),
             end=time(12),
@@ -179,13 +200,22 @@ def test_create_update_and_persist_schedule_history(db: Session):
     )
 
     assert changed["gioBatDau"] == "11:00"
-    assert changed["phongHocId"] is None
+    assert changed["phongHocId"] == room.PhongHocId
     history = list_schedule_history(teacher, db)
     assert [item["hanhDong"] for item in history] == ["Cập nhật", "Tạo"]
     assert history[0]["duLieuCu"]["gioBatDau"] == "09:00"
     assert history[0]["duLieuMoi"]["gioBatDau"] == "11:00"
 
 
+    with pytest.raises(ValidationError, match="phongHocId"):
+        LichHocWrite(
+            lopHocId=1,
+            monHocId=1,
+            ngayHoc=date.today(),
+            gioBatDau="09:00",
+            gioKetThuc="10:00",
+            giangVienId=1,
+        )
 def test_schedule_conflict_reports_teacher_and_room_details(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     day = date.today() + timedelta(days=10)
@@ -271,9 +301,171 @@ def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Sessio
         )
 
     assert caught.value.status_code == 409
-    assert {item["loai"] for item in caught.value.detail["conflicts"]} == {
-        "phongHoc"
+    conflicts = caught.value.detail["conflicts"]
+    assert {item["loai"] for item in conflicts} == {"phongHoc"}
+    assert {item["maBuoiHoc"] for item in conflicts} == {
+        "BH-000001",
+        "BH-000002",
     }
+    assert all(item["ten"] == room.TenPhong for item in conflicts)
+    assert all(item["maPhong"] == room.MaPhong for item in conflicts)
+    assert all(item["maLop"] == class_record.MaLop for item in conflicts)
+    assert all(item["tenLop"] == class_record.TenLop for item in conflicts)
+    assert all(item["ngay"] == day.isoformat() for item in conflicts)
+    assert {(item["gioBatDau"], item["gioKetThuc"]) for item in conflicts} == {
+        ("09:00", "10:00"),
+        ("10:00", "11:00"),
+    }
+
+
+def test_conflict_preview_returns_multiple_items_without_writing(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    substitute = add_user(db, 4, 4, "Trợ giảng B")
+    day = date.today() + timedelta(days=15)
+    first = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+    second = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(10),
+            end=time(11),
+        ),
+        teacher,
+        db,
+    )
+    history_count = db.query(LichHocLichSu).count()
+    schedule_count = db.query(LichHoc).count()
+
+    preview = check_schedule_conflicts(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            substitute.NguoiDungId,
+            day=day,
+            start=time(9, 30),
+            end=time(10, 30),
+        ),
+        exclude_schedule_id=None,
+        current_user=teacher,
+        db=db,
+    )
+
+    assert preview["hasConflicts"] is True
+    assert preview["canOverride"] is False
+    assert {item["lichHocId"] for item in preview["conflicts"]} == {
+        first["lichHocId"],
+        second["lichHocId"],
+    }
+    assert {item["loai"] for item in preview["conflicts"]} == {"phongHoc"}
+    assert db.query(LichHoc).count() == schedule_count
+    assert db.query(LichHocLichSu).count() == history_count
+
+    edit_preview = check_schedule_conflicts(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        exclude_schedule_id=first["lichHocId"],
+        current_user=teacher,
+        db=db,
+    )
+    assert edit_preview["hasConflicts"] is False
+
+
+def test_only_training_manager_can_override_schedule_conflicts(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    manager = add_user(db, 5, 7, "Training manager")
+    day = date.today() + timedelta(days=14)
+    create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+
+    with pytest.raises(HTTPException) as blocked:
+        create_schedule(
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+                day=day,
+                start=time(9, 30),
+                end=time(10, 30),
+                acknowledge_conflicts=True,
+                override_reason="Ưu tiên lịch học bù đã xác nhận.",
+            ),
+            teacher,
+            db,
+        )
+    assert blocked.value.status_code == 403
+
+    request = schedule_request(
+        class_record.LopHocId,
+        subject.MonHocId,
+        room.PhongHocId,
+        teacher.NguoiDungId,
+        day=day,
+        start=time(9, 30),
+        end=time(10, 30),
+    )
+    with pytest.raises(HTTPException) as warning:
+        create_schedule(request, manager, db)
+    assert warning.value.status_code == 409
+    assert warning.value.detail["canOverride"] is True
+    assert warning.value.detail["conflicts"][0]["tenLop"] == class_record.TenLop
+    assert warning.value.detail["conflicts"][0]["ngay"] == day.isoformat()
+    assert warning.value.detail["conflicts"][0]["gioBatDau"] == "09:00"
+
+    acknowledged_request = schedule_request(
+        class_record.LopHocId,
+        subject.MonHocId,
+        room.PhongHocId,
+        teacher.NguoiDungId,
+        day=day,
+        start=time(9, 30),
+        end=time(10, 30),
+        acknowledge_conflicts=True,
+        override_reason="Ưu tiên lịch học bù đã xác nhận.",
+    )
+    created = create_schedule(acknowledged_request, manager, db)
+    assert created["ghiDe"] == {
+        "xacNhan": True,
+        "lyDo": "Ưu tiên lịch học bù đã xác nhận.",
+        "soXungDot": 2,
+    }
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == created["lichHocId"]
+    ).one()
+    audit_payload = json.loads(history.DuLieuMoi)
+    assert history.HanhDong == "Tạo"
+    assert history.LyDo == "Ưu tiên lịch học bù đã xác nhận."
+    assert audit_payload["xacNhanTrungLich"] is True
+    assert audit_payload["lyDoGhiDe"] == "Ưu tiên lịch học bù đã xác nhận."
+    assert audit_payload["xungDot"][0]["lichHocId"] == 1
 
 
 def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
@@ -293,11 +485,20 @@ def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
         teacher,
         db,
     )
+    second_room = PhongHoc(
+        PhongHocId=2,
+        MaPhong="A102",
+        TenPhong="Phòng A102",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    db.add(second_room)
+    db.commit()
     second = create_schedule(
         schedule_request(
             class_record.LopHocId,
             subject.MonHocId,
-            None,
+            second_room.PhongHocId,
             substitute.NguoiDungId,
             day=day,
             start=time(11),
@@ -329,6 +530,32 @@ def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
         LichHocLichSu.LichHocId == second["lichHocId"]
     ).all()
     assert [item.HanhDong for item in unchanged] == ["Tạo"]
+
+    manager = add_user(db, 5, 7, "Training manager")
+    overridden = update_schedule(
+        second["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(9, 30),
+            end=time(10, 30),
+            acknowledge_conflicts=True,
+            override_reason="Quản lý chấp thuận xếp lịch đặc biệt.",
+        ),
+        manager,
+        db,
+    )
+    assert overridden["gioBatDau"] == "09:30"
+    assert overridden["ghiDe"]["lyDo"] == "Quản lý chấp thuận xếp lịch đặc biệt."
+    override_history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == second["lichHocId"],
+        LichHocLichSu.HanhDong == "Cập nhật",
+    ).one()
+    assert json.loads(override_history.DuLieuMoi)["xacNhanTrungLich"] is True
+    assert override_history.LyDo == "Quản lý chấp thuận xếp lịch đặc biệt."
 
 
 def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
