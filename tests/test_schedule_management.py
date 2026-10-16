@@ -1,5 +1,6 @@
 from datetime import date, datetime, time, timedelta
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -19,6 +20,7 @@ from app.models.phong_hoc import PhongHoc
 from app.models.vai_tro import VaiTro
 from app.main import app
 from app.routers.schedules import (
+    _acquire_schedule_write_lock,
     cancel_schedule,
     check_schedule_conflicts,
     create_schedule,
@@ -39,6 +41,28 @@ def test_schedule_endpoints_are_registered():
     assert "put" in paths["/academic/schedules/{schedule_id}"]
     assert "post" in paths["/academic/schedules/{schedule_id}/cancel"]
     assert "get" in paths["/academic/schedule-history"]
+
+
+def test_schedule_writes_acquire_transaction_owned_sql_server_lock():
+    class FakeSession:
+        def __init__(self):
+            self.statement = None
+            self.parameters = None
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
+
+        def execute(self, statement, parameters):
+            self.statement = str(statement)
+            self.parameters = parameters
+            return SimpleNamespace(scalar_one=lambda: 0)
+
+    db = FakeSession()
+    _acquire_schedule_write_lock(db)
+
+    assert "sys.sp_getapplock" in db.statement
+    assert "@LockOwner = 'Transaction'" in db.statement
+    assert db.parameters == {"resource": "academic-schedule-writes"}
 
 
 @pytest.fixture

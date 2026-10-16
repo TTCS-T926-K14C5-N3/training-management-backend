@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -41,6 +41,30 @@ def _commit(db: Session, detail: str) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=detail,
         ) from error
+
+
+def _acquire_schedule_write_lock(db: Session) -> None:
+    if db.get_bind().dialect.name != "mssql":
+        return
+    result = db.execute(
+        text(
+            """
+            DECLARE @lock_result int;
+            EXEC @lock_result = sys.sp_getapplock
+                @Resource = :resource,
+                @LockMode = 'Exclusive',
+                @LockOwner = 'Transaction',
+                @LockTimeout = 15000;
+            SELECT @lock_result;
+            """
+        ),
+        {"resource": "academic-schedule-writes"},
+    ).scalar_one()
+    if result < 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Hệ thống đang xử lý lịch học khác. Vui lòng thử lại.",
+        )
 
 
 def _get_schedule_or_404(db: Session, schedule_id: int) -> LichHoc:
@@ -533,6 +557,7 @@ def create_schedule(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _acquire_schedule_write_lock(db)
     class_record = _get_class_or_404(db, request.lop_hoc_id)
     if not can_access_class(db, current_user, class_record):
         raise HTTPException(
@@ -612,6 +637,7 @@ def update_schedule(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _acquire_schedule_write_lock(db)
     schedule = _get_schedule_or_404(db, schedule_id)
     class_record = _get_class_or_404(db, schedule.LopHocId)
     if not can_access_class(db, current_user, class_record):
@@ -694,6 +720,7 @@ def cancel_schedule(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _acquire_schedule_write_lock(db)
     schedule = _get_schedule_or_404(db, schedule_id)
     class_record = _get_class_or_404(db, schedule.LopHocId)
     if not can_access_class(db, current_user, class_record):
