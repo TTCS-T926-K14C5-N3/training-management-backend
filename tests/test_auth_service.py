@@ -217,3 +217,72 @@ def test_user_update_accepts_well_formed_email(email):
 def test_user_update_rejects_malformed_email(email):
     with pytest.raises(ValidationError):
         NguoiDungUpdate(email=email)
+
+
+def test_admin_create_user_sets_ngay_gan(monkeypatch):
+    from app.schemas.admin_create_user import AdminCreateUserRequest
+    from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+
+    class MockDB:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+            self.rolled_back = False
+
+        def query(self, model):
+            class Q:
+                def filter(self, *args, **kwargs):
+                    return self
+                def first(self):
+                    return None
+                def all(self):
+                    return []
+            return Q()
+
+        def add(self, obj):
+            if isinstance(obj, NguoiDung) and not getattr(obj, "NguoiDungId", None):
+                obj.NguoiDungId = 999
+            self.added.append(obj)
+
+        def flush(self):
+            pass
+
+        def commit(self):
+            self.committed = True
+
+        def refresh(self, obj):
+            pass
+
+        def rollback(self):
+            self.rolled_back = True
+
+    mock_db = MockDB()
+    monkeypatch.setattr(
+        auth_service,
+        "_resolve_selected_role",
+        lambda db, role_id: {"vaiTroId": 2, "tenVaiTro": "Student"},
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "_create_activation_token",
+        lambda **kwargs: "http://example.com/activate",
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "send_activation_email",
+        lambda **kwargs: True,
+    )
+
+    request = AdminCreateUserRequest(
+        ho_ten="Test User",
+        email="test.user@example.com",
+        vai_tro_id=2,
+    )
+
+    result = auth_service.admin_create_user(mock_db, request)
+    assert result["email"] == "test.user@example.com"
+
+    roles_added = [item for item in mock_db.added if isinstance(item, NguoiDungVaiTro)]
+    assert len(roles_added) == 1
+    assert roles_added[0].NgayGan is not None
+    assert isinstance(roles_added[0].NgayGan, datetime)

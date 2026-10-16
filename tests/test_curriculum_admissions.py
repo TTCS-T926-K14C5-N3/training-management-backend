@@ -54,6 +54,7 @@ from app.schemas.curriculum import (
     SessionCloneWrite,
     SessionsWrite,
 )
+from app.services.academic_service import user_is_admin
 from app.services.rbac_service import DEFAULT_ROLE_PERMISSIONS
 
 
@@ -131,6 +132,15 @@ def test_default_permissions_match_curriculum_and_lead_role_boundaries():
         "LEAD_ASSIGN",
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert set(DEFAULT_ROLE_PERMISSIONS[8]) >= set(DEFAULT_ROLE_PERMISSIONS[7])
+
+
+def test_admin_role_name_is_recognized_without_fixed_role_id(db: Session):
+    administrator = add_user(db, 99, 99, "Administrator")
+    role = db.query(VaiTro).filter(VaiTro.VaiTroId == 99).one()
+    role.TenVaiTro = " Quản trị hệ thống "
+    db.commit()
+
+    assert user_is_admin(db, administrator.NguoiDungId)
 
 
 def test_lead_status_drag_progression_records_history_and_rejects_backward_move(

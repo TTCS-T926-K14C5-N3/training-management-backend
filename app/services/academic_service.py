@@ -8,6 +8,7 @@ from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
+from app.models.vai_tro import VaiTro
 
 
 ADMIN_ROLE_ID = 8
@@ -16,6 +17,11 @@ INSTRUCTOR_ROLE_ID = 3
 ASSISTANT_ROLE_ID = 4
 TEACHING_ROLE_IDS = {INSTRUCTOR_ROLE_ID, ASSISTANT_ROLE_ID}
 STUDENT_ROLE_ID = 2
+ADMIN_ROLE_NAMES = {
+    "admin",
+    "quản trị hệ thống",
+    "quản trị viên hệ thống",
+}
 
 # Exact status strings persisted by the user writers (auth_service,
 # user_import_service) and guarded by the CK_NguoiDung_TrangThai constraint.
@@ -33,6 +39,20 @@ def user_role_ids(db: Session, user_id: int) -> set[int]:
     }
 
 
+def user_is_admin(db: Session, user_id: int) -> bool:
+    roles = (
+        db.query(VaiTro.VaiTroId, VaiTro.TenVaiTro)
+        .join(NguoiDungVaiTro, NguoiDungVaiTro.VaiTroId == VaiTro.VaiTroId)
+        .filter(NguoiDungVaiTro.NguoiDungId == user_id)
+        .all()
+    )
+    return any(
+        role_id == ADMIN_ROLE_ID
+        or role_name.strip().casefold() in ADMIN_ROLE_NAMES
+        for role_id, role_name in roles
+    )
+
+
 def accessible_classes(
     db: Session,
     user: NguoiDung,
@@ -44,7 +64,7 @@ def accessible_classes(
     if not include_inactive:
         query = query.filter(LopHoc.TrangThai.in_(ACTIVE_CLASS_STATUSES))
 
-    if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
+    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
         return query.order_by(LopHoc.MaLop).all()
     if roles.intersection(TEACHING_ROLE_IDS):
         assigned_subject_class_ids = (
@@ -78,7 +98,7 @@ def can_access_class(
     lop_hoc: LopHoc,
 ) -> bool:
     roles = user_role_ids(db, user.NguoiDungId)
-    if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
+    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
         return True
     if roles.intersection(TEACHING_ROLE_IDS):
         return lop_hoc.GiangVienId == user.NguoiDungId or (
@@ -107,7 +127,7 @@ def accessible_grades_query(db: Session, user: NguoiDung):
     roles = user_role_ids(db, user.NguoiDungId)
     query = db.query(Diem)
 
-    if roles.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
+    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
         return query
     if roles.intersection(TEACHING_ROLE_IDS):
         assigned_class_ids = db.query(LopHoc.LopHocId).filter(

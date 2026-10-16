@@ -20,13 +20,27 @@ class FakePermissionResult:
 
 
 class FakePermissionDatabase:
-    def __init__(self, role_id: int):
+    def __init__(self, role_id: int, role_name: str = ""):
         self.role_id = role_id
+        self.role_name = role_name
 
-    def execute(self, _query, parameters):
-        granted_codes = set(DEFAULT_ROLE_PERMISSIONS[self.role_id])
+    def execute(self, query, parameters):
+        granted_codes = set(DEFAULT_ROLE_PERMISSIONS.get(self.role_id, ()))
+        sql = str(query).lower()
+        is_admin_clause = (
+            (self.role_id == 8 and "vaitroid = 8" in sql)
+            or (
+                self.role_name.strip().casefold()
+                in {
+                    "admin",
+                    "quản trị hệ thống",
+                    "quản trị viên hệ thống",
+                }
+                and "quản trị viên hệ thống" in sql
+            )
+        )
         return FakePermissionResult(
-            parameters["ma_quyen"] in granted_codes
+            is_admin_clause or parameters["ma_quyen"] in granted_codes
         )
 
 
@@ -45,6 +59,30 @@ def test_expected_role_permissions_are_allowed(role_id, permission_code):
     result = check_permission(
         current_user=user,
         db=FakePermissionDatabase(role_id),
+    )
+
+    assert result is user
+
+
+def test_admin_role_is_allowed_even_when_permission_is_not_seeded():
+    check_permission = require_permission("PERMISSION_MISSING_FROM_DATABASE")
+    user = SimpleNamespace(NguoiDungId=8)
+
+    result = check_permission(
+        current_user=user,
+        db=FakePermissionDatabase(8),
+    )
+
+    assert result is user
+
+
+def test_admin_name_is_allowed_when_role_id_is_not_eight():
+    check_permission = require_permission("PERMISSION_MISSING_FROM_DATABASE")
+    user = SimpleNamespace(NguoiDungId=99)
+
+    result = check_permission(
+        current_user=user,
+        db=FakePermissionDatabase(99, "Quản trị hệ thống"),
     )
 
     assert result is user

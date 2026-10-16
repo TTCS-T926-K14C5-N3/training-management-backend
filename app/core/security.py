@@ -356,17 +356,27 @@ def require_permission(
         permission_query = text(
             """
             SELECT TOP 1
-                q.QuyenId
-            FROM Quyen q
-
-            INNER JOIN VaiTro_Quyen vtq
-                ON q.QuyenId = vtq.QuyenId
-
-            INNER JOIN NguoiDung_VaiTro ndvt
-                ON vtq.VaiTroId = ndvt.VaiTroId
-
+                1
+            FROM NguoiDung_VaiTro ndvt
+            INNER JOIN VaiTro vt
+                ON vt.VaiTroId = ndvt.VaiTroId
             WHERE ndvt.NguoiDungId = :nguoi_dung_id
-              AND q.MaQuyen = :ma_quyen
+              AND (
+                    ndvt.VaiTroId = 8
+                    OR LOWER(LTRIM(RTRIM(vt.TenVaiTro))) IN (
+                        N'admin',
+                        N'quản trị hệ thống',
+                        N'quản trị viên hệ thống'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM VaiTro_Quyen vtq
+                        INNER JOIN Quyen q
+                            ON q.QuyenId = vtq.QuyenId
+                        WHERE vtq.VaiTroId = ndvt.VaiTroId
+                          AND q.MaQuyen = :ma_quyen
+                    )
+              )
             """
         )
 

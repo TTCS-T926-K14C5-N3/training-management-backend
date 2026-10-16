@@ -572,6 +572,7 @@ def admin_create_user(
             NguoiDungVaiTro(
                 NguoiDungId=user.NguoiDungId,
                 VaiTroId=selected_role_id,
+                NgayGan=now,
             )
         )
         db.flush()

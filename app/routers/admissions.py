@@ -23,7 +23,7 @@ from app.schemas.admissions import (
     LeadWrite,
     PublicLeadCreate,
 )
-from app.services.academic_service import user_role_ids
+from app.services.academic_service import user_is_admin, user_role_ids
 from app.services.auth_service import prepare_student_account
 from app.services.email_service import send_activation_email
 
@@ -32,7 +32,6 @@ router = APIRouter(prefix="/admissions", tags=["Admissions"])
 logger = logging.getLogger(__name__)
 
 TRAINING_MANAGER_ROLE_ID = 7
-ADMIN_ROLE_ID = 8
 ADMISSIONS_ROLE_ID = 5
 PUBLIC_LEAD_RATE_LIMIT = 5
 PUBLIC_LEAD_RATE_WINDOW_SECONDS = 60
@@ -276,7 +275,7 @@ def _get_visible_lead(
             detail="Không tìm thấy khách hàng tiềm năng.",
         )
     roles = user_role_ids(db, user.NguoiDungId)
-    if roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
         return lead
     assigned = (
         db.query(LeadAssignmentHistory.PhanCongId)
@@ -532,7 +531,10 @@ def list_leads(
 ):
     roles = user_role_ids(db, current_user.NguoiDungId)
     query = db.query(Lead)
-    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+    if (
+        not user_is_admin(db, current_user.NguoiDungId)
+        and TRAINING_MANAGER_ROLE_ID not in roles
+    ):
         if ADMISSIONS_ROLE_ID not in roles:
             raise HTTPException(status_code=403, detail="Không có quyền xem khách hàng tiềm năng.")
         assigned_lead_ids = (
@@ -628,7 +630,10 @@ def bulk_assign_leads(
     db: Session = Depends(get_db),
 ):
     roles = user_role_ids(db, current_user.NguoiDungId)
-    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+    if (
+        not user_is_admin(db, current_user.NguoiDungId)
+        and TRAINING_MANAGER_ROLE_ID not in roles
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chỉ quản lý đào tạo hoặc quản trị viên được phân công tư vấn viên.",
@@ -974,7 +979,10 @@ def delete_lead(
     db: Session = Depends(get_db),
 ):
     roles = user_role_ids(db, current_user.NguoiDungId)
-    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+    if (
+        not user_is_admin(db, current_user.NguoiDungId)
+        and TRAINING_MANAGER_ROLE_ID not in roles
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chỉ quản lý đào tạo hoặc quản trị viên được xóa khách hàng tiềm năng.",
@@ -1052,7 +1060,10 @@ def replace_lead_assignments(
     db: Session = Depends(get_db),
 ):
     roles = user_role_ids(db, current_user.NguoiDungId)
-    if not roles.intersection({TRAINING_MANAGER_ROLE_ID, ADMIN_ROLE_ID}):
+    if (
+        not user_is_admin(db, current_user.NguoiDungId)
+        and TRAINING_MANAGER_ROLE_ID not in roles
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chỉ quản lý đào tạo hoặc quản trị viên được phân công tư vấn viên.",
