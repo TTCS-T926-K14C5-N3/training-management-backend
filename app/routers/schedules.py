@@ -395,6 +395,19 @@ def _ensure_schedule_writable(schedule: LichHoc) -> None:
         )
 
 
+def _ensure_no_attendance(db: Session, schedule: LichHoc) -> None:
+    has_attendance = (
+        db.query(DiemDanh.DiemDanhId)
+        .filter(DiemDanh.LichHocId == schedule.LichHocId)
+        .first()
+    )
+    if has_attendance is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể thay đổi buổi học đã có dữ liệu điểm danh.",
+        )
+
+
 @router.get(
     "/schedule-options",
     dependencies=[Depends(require_permission("SCHEDULE_VIEW"))],
@@ -704,6 +717,7 @@ def update_schedule(
             detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
         )
     _ensure_schedule_writable(schedule)
+    _ensure_no_attendance(db, schedule)
     if request.lop_hoc_id != schedule.LopHocId or request.mon_hoc_id != schedule.MonHocId:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

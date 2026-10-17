@@ -248,6 +248,62 @@ def test_create_update_and_persist_schedule_history(db: Session):
             gioKetThuc="10:00",
             giangVienId=1,
         )
+def test_update_schedule_rejects_any_recorded_attendance_without_changes(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    student = add_user(db, 20, 2, "Học viên đã điểm danh")
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+    db.add(
+        DiemDanh(
+            LichHocId=schedule["lichHocId"],
+            HocVienId=student.NguoiDungId,
+            TrangThai="Có mặt",
+            NguoiDiemDanhId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as caught:
+        update_schedule(
+            schedule["lichHocId"],
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+                start=time(11),
+                end=time(12),
+            ),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 409
+    saved_schedule = db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one()
+    assert saved_schedule.GioBatDau == time(9)
+    assert saved_schedule.GioKetThuc == time(10)
+    assert db.query(DiemDanh).filter(
+        DiemDanh.LichHocId == schedule["lichHocId"]
+    ).count() == 1
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == schedule["lichHocId"]
+    ).all()
+    assert [item.HanhDong for item in history] == ["Tạo"]
+
+
 def test_schedule_conflict_reports_teacher_and_room_details(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     day = date.today() + timedelta(days=10)
