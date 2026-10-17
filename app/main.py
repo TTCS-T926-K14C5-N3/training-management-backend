@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from app.database import SessionLocal
 from app.services.rbac_service import initialize_role_permissions
-from app.services.schedule_notifications import process_schedule_notifications
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,9 +25,6 @@ from app.routers.academic import (
 from app.routers.thoi_khoa_bieu import (
     router as thoi_khoa_bieu_router
 )
-from app.routers.schedules import (
-    router as schedules_router
-)
 
 
 app = FastAPI(
@@ -42,10 +38,6 @@ def initialize_rbac():
     db = SessionLocal()
     try:
         initialize_role_permissions(db)
-        while True:
-            result = process_schedule_notifications(db, limit=100)
-            if result["processed"] < 100:
-                break
     finally:
         db.close()
 
@@ -96,8 +88,4 @@ app.include_router(
 
 app.include_router(
     thoi_khoa_bieu_router
-)
-
-app.include_router(
-    schedules_router
 )
