@@ -51,6 +51,7 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedu
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_require_schedule_room.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_student_enrollment_actions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_session_attendance.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\014_schedule_notifications.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -115,7 +116,7 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
   - `GET /academic/schedules` liệt kê lịch; hỗ trợ `startDate`, `endDate`,
     `status`.
   - `POST /academic/schedules` nhận `lopHocId`, `monHocId`, `ngayHoc`,
-    `gioBatDau`, `gioKetThuc`, `phongHocId` (có thể `null`) và `giangVienId`.
+    `gioBatDau`, `gioKetThuc`, `phongHocId` và `giangVienId`.
   - `PUT /academic/schedules/{schedule_id}` cập nhật ngày, giờ, phòng và
     giảng viên; lớp/môn là thông tin cố định.
   - `POST /academic/schedules/{schedule_id}/cancel` nhận `{ "lyDo": "..." }`;
@@ -124,8 +125,17 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     được lưu cùng ảnh chụp dữ liệu trước/sau, người thực hiện và thời điểm.
     Xung đột lịch trả HTTP 409 cùng `detail.conflicts` chứa loại tài nguyên,
     tên, ngày/giờ và buổi học/lớp đang trùng.
-  - Cơ sở dữ liệu hiện chưa có tính năng điểm danh theo buổi; API trả
-    `diemDanhDuocHoTro: false` và không giả định trạng thái điểm danh.
+  - Khi lịch đổi hoặc bị hủy, hệ thống lưu thông báo email theo từng học viên
+    đang ghi danh và giảng viên liên quan, kèm dữ liệu trước/sau. Trạng thái
+    gửi, số lần thử và lỗi được lưu bền vững; SMTP dùng cấu hình trong `.env`.
+    `POST /academic/schedule-notifications/retry` (quyền `SCHEDULE_UPDATE`)
+    thử lại thông báo đang chờ/thất bại tối đa ba lần gửi tổng cộng mỗi bản ghi,
+    tối đa 100 bản ghi mỗi lần gọi. Bản ghi chờ gửi được xử lý lại khi ứng dụng
+    khởi động. Migration `014_schedule_notifications.sql` chỉ thêm bảng; nếu
+    cần rollback, sao lưu lịch sử trước rồi chỉ xóa bảng sau khi đã dừng ứng
+    dụng và được phê duyệt vì thao tác đó sẽ xóa dữ liệu thông báo.
+  - Điểm danh theo buổi được lưu sau migration `013_session_attendance.sql`;
+    lịch đã có bản ghi điểm danh không thể sửa hoặc hủy.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

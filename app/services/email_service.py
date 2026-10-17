@@ -164,3 +164,40 @@ Email: {ADMIN_CONTACT_EMAIL}
         raise RuntimeError(
             f"Không thể gửi email kích hoạt tài khoản: {exc}"
         ) from exc
+
+
+def send_schedule_change_email(
+    recipient_email: str,
+    recipient_name: str,
+    content: str,
+) -> None:
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        raise RuntimeError(
+            "Chưa cấu hình SMTP_USERNAME hoặc SMTP_PASSWORD"
+        )
+
+    message = EmailMessage()
+    message["Subject"] = "Thông báo thay đổi lịch học"
+    message["From"] = SMTP_FROM
+    message["To"] = recipient_email
+    message.set_content(
+        f"Xin chào {recipient_name},\n\n"
+        f"{content}\n\n"
+        "Vui lòng đăng nhập hệ thống để xem thông tin lịch học."
+    )
+
+    try:
+        with smtplib.SMTP(
+            SMTP_HOST,
+            SMTP_PORT,
+            timeout=30,
+        ) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+    except (smtplib.SMTPException, OSError) as exc:
+        raise RuntimeError(
+            f"Không thể gửi email thay đổi lịch học: {exc}"
+        ) from exc

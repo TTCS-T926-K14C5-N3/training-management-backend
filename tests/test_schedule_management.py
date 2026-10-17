@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.database import Base
 from app.models.diem_danh import DiemDanh
 from app.models.lich_hoc import LichHoc, LichHocLichSu
+from app.models.lich_hoc_thong_bao import LichHocThongBao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
@@ -36,6 +37,7 @@ from app.routers.schedules import (
     update_schedule_attendance,
 )
 from app.schemas.lich_hoc import DiemDanhWrite, LichHocCancel, LichHocWrite
+from app.services import schedule_notifications
 
 
 def test_schedule_endpoints_are_registered():
@@ -47,6 +49,7 @@ def test_schedule_endpoints_are_registered():
     assert "put" in paths["/academic/schedules/{schedule_id}"]
     assert "post" in paths["/academic/schedules/{schedule_id}/cancel"]
     assert "get" in paths["/academic/schedule-history"]
+    assert "post" in paths["/academic/schedule-notifications/retry"]
     assert "get" in paths["/academic/schedules/{schedule_id}/attendance"]
     assert "put" in paths["/academic/schedules/{schedule_id}/attendance"]
 
@@ -84,6 +87,15 @@ def db():
         session.close()
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def disable_schedule_email_delivery(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        schedule_notifications,
+        "send_schedule_change_email",
+        lambda _email, _name, _content: None,
+    )
 
 
 def add_user(db: Session, user_id: int, role_id: int, name: str) -> NguoiDung:
@@ -1021,6 +1033,244 @@ def test_cancel_schedule_rejects_recorded_attendance_without_changes(
         LichHocLichSu.LichHocId == schedule["lichHocId"]
     ).all()
     assert [item.HanhDong for item in history] == ["Tạo"]
+
+
+def test_schedule_change_notifies_affected_students_and_both_instructors(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    new_teacher = add_user(db, 4, 4, "Giảng viên thay thế")
+    student = add_user(db, 20, 2, "Học viên trong lớp")
+    old_day = date.today() + timedelta(days=18)
+    db.add(
+        LopHocHocVien(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayThamGia=datetime.combine(old_day - timedelta(days=5), time.min),
+            NguoiGhiDanhId=teacher.NguoiDungId,
+        )
+    )
+    new_room = PhongHoc(
+        PhongHocId=2,
+        MaPhong="A102",
+        TenPhong="Phòng A102",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    db.add(new_room)
+    db.commit()
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=old_day,
+        ),
+        teacher,
+        db,
+    )
+    delivered = []
+    monkeypatch.setattr(
+        schedule_notifications,
+        "send_schedule_change_email",
+        lambda email, name, content: delivered.append((email, name, content)),
+    )
+
+    changed = update_schedule(
+        schedule["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            new_room.PhongHocId,
+            new_teacher.NguoiDungId,
+            day=old_day + timedelta(days=1),
+            start=time(11),
+            end=time(12),
+        ),
+        teacher,
+        db,
+    )
+
+    notifications = db.query(LichHocThongBao).all()
+    assert changed["ngayHoc"] == (old_day + timedelta(days=1)).isoformat()
+    assert {item.NguoiNhanId for item in notifications} == {
+        teacher.NguoiDungId,
+        new_teacher.NguoiDungId,
+        student.NguoiDungId,
+    }
+    assert len({item.SuKienId for item in notifications}) == 1
+    assert all(item.LoaiSuKien == "Thay đổi lịch" for item in notifications)
+    assert all(item.TrangThai == "Đã gửi" for item in notifications)
+    assert all(item.SoLanGui == 1 for item in notifications)
+    assert all(
+        item.NguoiThucHienId == teacher.NguoiDungId
+        for item in notifications
+    )
+    assert all(item.ThoiDiemGui is not None for item in notifications)
+    assert all(
+        json.loads(item.DuLieuCu)["ngayHoc"] == old_day.isoformat()
+        for item in notifications
+    )
+    assert all(
+        json.loads(item.DuLieuMoi)["ngayHoc"]
+        == (old_day + timedelta(days=1)).isoformat()
+        for item in notifications
+    )
+    assert len(delivered) == 3
+
+
+def test_cancel_schedule_notifies_enrolled_students_with_cancellation_reason(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    student = add_user(db, 20, 2, "Học viên trong lớp")
+    day = date.today() + timedelta(days=18)
+    db.add(
+        LopHocHocVien(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayThamGia=datetime.combine(day - timedelta(days=5), time.min),
+            NguoiGhiDanhId=teacher.NguoiDungId,
+        )
+    )
+    db.commit()
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+
+    cancel_schedule(
+        schedule["lichHocId"],
+        LichHocCancel(lyDo="Giảng viên đột xuất nghỉ."),
+        teacher,
+        db,
+    )
+
+    notifications = db.query(LichHocThongBao).all()
+    assert {item.NguoiNhanId for item in notifications} == {
+        teacher.NguoiDungId,
+        student.NguoiDungId,
+    }
+    assert all(item.LoaiSuKien == "Hủy buổi học" for item in notifications)
+    assert all(item.LyDo == "Giảng viên đột xuất nghỉ." for item in notifications)
+    assert all(
+        json.loads(item.DuLieuCu)["trangThai"] == "Đã lên lịch"
+        for item in notifications
+    )
+    assert all(
+        json.loads(item.DuLieuMoi)["trangThai"] == "Đã hủy"
+        for item in notifications
+    )
+    assert all(
+        "Giảng viên đột xuất nghỉ." in item.NoiDung
+        for item in notifications
+    )
+
+
+def test_failed_schedule_notification_can_be_retried_without_duplicate_rows(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+    calls = []
+
+    def fail_once(_email, _name, _content):
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("SMTP temporarily unavailable")
+
+    monkeypatch.setattr(
+        schedule_notifications,
+        "send_schedule_change_email",
+        fail_once,
+    )
+    changed = update_schedule(
+        schedule["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            start=time(11),
+            end=time(12),
+        ),
+        teacher,
+        db,
+    )
+
+    notification = db.query(LichHocThongBao).one()
+    notification_id = notification.LichHocThongBaoId
+    assert changed["gioBatDau"] == "11:00"
+    assert notification.TrangThai == "Thất bại"
+    assert notification.SoLanGui == 1
+    assert notification.LoiGui == "SMTP temporarily unavailable"
+    assert db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one().GioBatDau == time(11)
+
+    result = schedule_notifications.process_schedule_notifications(
+        db,
+        retry_failed=True,
+    )
+
+    retried = db.query(LichHocThongBao).one()
+    assert result == {"processed": 1, "sent": 1, "failed": 0}
+    assert retried.LichHocThongBaoId == notification_id
+    assert retried.TrangThai == "Đã gửi"
+    assert retried.SoLanGui == 2
+    assert retried.LoiGui is None
+    assert db.query(LichHocThongBao).count() == 1
+    assert schedule_notifications.process_schedule_notifications(
+        db,
+        retry_failed=True,
+    ) == {"processed": 0, "sent": 0, "failed": 0}
+
+
+def test_schedule_notification_is_not_created_for_no_op_update(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+
+    update_schedule(
+        schedule["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+
+    assert db.query(LichHocThongBao).count() == 0
 
 
 def test_update_does_not_allow_changing_class_or_subject(db: Session):

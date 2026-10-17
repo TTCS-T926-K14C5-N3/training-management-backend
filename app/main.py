@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.database import SessionLocal
 from app.services.rbac_service import initialize_role_permissions
+from app.services.schedule_notifications import process_schedule_notifications
 
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import CORS_ORIGINS
@@ -42,6 +43,10 @@ def initialize_rbac():
     db = SessionLocal()
     try:
         initialize_role_permissions(db)
+        while True:
+            result = process_schedule_notifications(db, limit=100)
+            if result["processed"] < 100:
+                break
     finally:
         db.close()
 

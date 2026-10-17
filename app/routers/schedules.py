@@ -32,6 +32,10 @@ from app.services.academic_service import (
     ensure_active_instructor,
     user_role_ids,
 )
+from app.services.schedule_notifications import (
+    process_schedule_notifications,
+    queue_schedule_notifications,
+)
 
 
 router = APIRouter(prefix="/academic", tags=["Schedule management"])
@@ -742,7 +746,32 @@ def update_schedule(
         db,
     )
 
+    previous_teacher_id = schedule.GiangVienId
+    previous_values = (
+        schedule.NgayHoc,
+        schedule.GioBatDau,
+        schedule.GioKetThuc,
+        schedule.PhongHocId,
+        schedule.GiangVienId,
+    )
+    updated_values = (
+        request.ngay_hoc,
+        request.gio_bat_dau,
+        request.gio_ket_thuc,
+        request.phong_hoc_id,
+        request.giang_vien_id,
+    )
+    schedule_changed = previous_values != updated_values
+    previous_recipients = (
+        {
+            student.NguoiDungId
+            for student in _attendance_roster(db, schedule)
+        }
+        if schedule_changed
+        else set()
+    )
     before = _snapshot(db, schedule)
+    before_payload = json.loads(before)
     schedule.NgayHoc = request.ngay_hoc
     schedule.GioBatDau = request.gio_bat_dau
     schedule.GioKetThuc = request.gio_ket_thuc
@@ -751,6 +780,26 @@ def update_schedule(
     schedule.NgayCapNhat = datetime.now()
     schedule.NguoiCapNhatId = current_user.NguoiDungId
     after = _schedule_payload(db, schedule)
+    notification_event_id = None
+    if schedule_changed:
+        recipient_ids = previous_recipients | {
+            student.NguoiDungId
+            for student in _attendance_roster(db, schedule)
+        }
+        recipient_ids.update(
+            {previous_teacher_id, schedule.GiangVienId}
+        )
+        notification_event_id = queue_schedule_notifications(
+            db,
+            schedule_id=schedule.LichHocId,
+            event_type="Thay đổi lịch",
+            before=before_payload,
+            after=after,
+            reason=None,
+            actor_id=current_user.NguoiDungId,
+            occurred_at=schedule.NgayCapNhat,
+            recipient_ids=recipient_ids,
+        )
     history_payload = dict(after)
     if conflict_override:
         history_payload.update(
@@ -770,6 +819,8 @@ def update_schedule(
         )
     )
     _commit(db, "Không thể cập nhật lịch do dữ liệu bị trùng hoặc không hợp lệ.")
+    if notification_event_id is not None:
+        process_schedule_notifications(db, event_id=notification_event_id)
     if conflict_override:
         return {
             **after,
@@ -813,6 +864,12 @@ def cancel_schedule(
     _ensure_no_attendance(db, schedule)
 
     before = _snapshot(db, schedule)
+    before_payload = json.loads(before)
+    recipient_ids = {
+        student.NguoiDungId
+        for student in _attendance_roster(db, schedule)
+    }
+    recipient_ids.add(schedule.GiangVienId)
     now = datetime.now()
     schedule.TrangThai = CANCELLED
     schedule.LyDoHuy = request.ly_do
@@ -821,6 +878,17 @@ def cancel_schedule(
     schedule.NgayCapNhat = now
     schedule.NguoiCapNhatId = current_user.NguoiDungId
     after = _schedule_payload(db, schedule)
+    notification_event_id = queue_schedule_notifications(
+        db,
+        schedule_id=schedule.LichHocId,
+        event_type="Hủy buổi học",
+        before=before_payload,
+        after=after,
+        reason=request.ly_do,
+        actor_id=current_user.NguoiDungId,
+        occurred_at=now,
+        recipient_ids=recipient_ids,
+    )
     db.add(
         LichHocLichSu(
             LichHocId=schedule.LichHocId,
@@ -833,7 +901,19 @@ def cancel_schedule(
         )
     )
     _commit(db, "Không thể hủy buổi học.")
+    if notification_event_id is not None:
+        process_schedule_notifications(db, event_id=notification_event_id)
     return after
+
+
+@router.post(
+    "/schedule-notifications/retry",
+    dependencies=[Depends(require_permission("SCHEDULE_UPDATE"))],
+)
+def retry_schedule_notifications(
+    db: Session = Depends(get_db),
+):
+    return process_schedule_notifications(db, retry_failed=True)
 
 
 def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
