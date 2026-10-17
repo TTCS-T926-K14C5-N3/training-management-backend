@@ -52,6 +52,7 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_require_sche
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_student_enrollment_actions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_session_attendance.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\014_schedule_notifications.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -136,6 +137,24 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     dụng và được phê duyệt vì thao tác đó sẽ xóa dữ liệu thông báo.
   - Điểm danh theo buổi được lưu sau migration `013_session_attendance.sql`;
     lịch đã có bản ghi điểm danh không thể sửa hoặc hủy.
+- Bài tập:
+  - `GET /assignments/options` lấy lớp, môn và buổi học mà người dùng được phép
+    sử dụng; `GET /assignments/mine` và `/assignments/teacher` liệt kê bài tập
+    theo vai trò học viên hoặc giảng viên.
+  - `POST /assignments` tạo bài tập; `POST /assignments/{assignment_id}/publish`
+    phát hành bài tập. Học viên nộp bài tại
+    `POST /assignments/{assignment_id}/submissions`; giảng viên xem danh sách
+    nộp tại `GET /assignments/{assignment_id}/roster`, chấm bài tại
+    `POST /assignments/submissions/{submission_id}/grade` và có thể mở lại bài
+    đã chấm tại `POST /assignments/{assignment_id}/students/{student_id}/reopen`.
+  - Tệp đính kèm được tải qua
+    `GET /assignments/attachments/{kind}/{attachment_id}`. Quyền `ASSIGNMENT_*`
+    được khởi tạo cùng catalog RBAC; học viên được xem/nộp, giảng viên/trợ giảng
+    được quản lý/chấm bài.
+  - Migration `016_assignments.sql` tạo các bảng bài tập, tệp đính kèm, bài nộp,
+    điểm và lịch sử mở lại. Không áp dụng `017_attendance.sql` từ nhánh `main`:
+    migration `013_session_attendance.sql` của nhánh này đã tạo bảng `DiemDanh`
+    với cấu trúc khác, và attendance app của nhánh này vẫn dùng cấu trúc đó.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

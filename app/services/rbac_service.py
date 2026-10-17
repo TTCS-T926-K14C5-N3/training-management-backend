@@ -53,6 +53,10 @@ PERMISSION_CATALOG = (
     ("SCHEDULE_UPDATE", "Cập nhật lịch học", "Chỉnh sửa hoặc hủy buổi học."),
     ("ATTENDANCE_VIEW", "Xem điểm danh", "Xem danh sách và kết quả điểm danh theo buổi."),
     ("ATTENDANCE_UPDATE", "Ghi nhận điểm danh", "Ghi nhận hoặc cập nhật điểm danh theo buổi."),
+    ("ASSIGNMENT_VIEW", "Xem bài tập", "Xem bài tập và trạng thái nộp bài."),
+    ("ASSIGNMENT_CREATE", "Quản lý bài tập", "Tạo và giao bài tập cho lớp."),
+    ("ASSIGNMENT_SUBMIT", "Nộp bài tập", "Nộp và cập nhật bài làm."),
+    ("ASSIGNMENT_GRADE", "Chấm bài tập", "Xem danh sách bài nộp và chấm bài."),
     ("CURRICULUM_VIEW", "Xem danh mục đào tạo", "Xem môn học và cấu trúc chương trình."),
     ("CURRICULUM_CREATE", "Tạo danh mục đào tạo", "Tạo môn học trong danh mục đào tạo."),
     ("CURRICULUM_UPDATE", "Sửa danh mục đào tạo", "Sửa môn học và cấu trúc chương trình."),
@@ -66,7 +70,7 @@ PERMISSION_CATALOG = (
 
 DEFAULT_ROLE_PERMISSIONS = {
     1: (),
-    2: ("GRADE_VIEW", "TUITION_VIEW"),
+    2: ("GRADE_VIEW", "TUITION_VIEW", "ASSIGNMENT_VIEW", "ASSIGNMENT_SUBMIT"),
     3: (
         "GRADE_VIEW",
         "GRADE_CREATE",
@@ -77,8 +81,18 @@ DEFAULT_ROLE_PERMISSIONS = {
         "ATTENDANCE_VIEW",
         "ATTENDANCE_UPDATE",
         "CURRICULUM_VIEW",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
     ),
-    4: ("SCHEDULE_VIEW", "ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"),
+    4: (
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
+    ),
     5: (
         "USER_VIEW",
         "USER_CREATE",
@@ -113,6 +127,9 @@ DEFAULT_ROLE_PERMISSIONS = {
         "LEAD_UPDATE",
         "LEAD_DELETE",
         "LEAD_ASSIGN",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
     ),
     8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
 }
