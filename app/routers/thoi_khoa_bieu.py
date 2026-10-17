@@ -1,7 +1,9 @@
 import json
 from datetime import datetime, timedelta, timezone
 from typing import List
-
+from typing import Optional
+from datetime import date
+from app.core.security import get_current_user
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,7 @@ from app.schemas.thoi_khoa_bieu import (
     LuuThoiKhoaBieuRequest,
     SinhThoiKhoaBieuRequest,
     ThoiKhoaBieuUpdate,
+    LichHocHocVienResponse
 )
 from app.services.academic_service import ensure_active_instructor
 
@@ -309,3 +312,43 @@ def update_thoi_khoa_bieu(
         "phongHocId": buoi_hoc.PhongHocId,
         "giangVienId": buoi_hoc.GiangVienId,
     }
+@router.get(
+    "/ca-nhan",
+    response_model=List[LichHocHocVienResponse],
+    summary="Lấy lịch học cá nhân của học viên đăng nhập (SCRUM-406)"
+)
+def get_lich_hoc_ca_nhan(
+    tu_ngay: Optional[date] = None,
+    den_ngay: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    user_id = current_user.get("id") or current_user.get("NguoiDungId")
+    
+    query = db.query(ThoiKhoaBieu)
+    
+    if tu_ngay:
+        query = query.filter(ThoiKhoaBieu.NgayHoc >= tu_ngay)
+    if den_ngay:
+        query = query.filter(ThoiKhoaBieu.NgayHoc <= den_ngay)
+        
+    danh_sach_buoi_hoc = query.order_by(ThoiKhoaBieu.NgayHoc.asc(), ThoiKhoaBieu.GioBatDau.asc()).all()
+
+    result = []
+    for buoi in danh_sach_buoi_hoc:
+        result.append(
+            LichHocHocVienResponse(
+                thoi_khoa_bieu_id=buoi.ThoiKhoaBieuId,
+                lop_hoc_id=buoi.LopHocId,
+                mon_hoc_id=buoi.MonHocId,
+                ten_mon_hoc=buoi.mon_hoc.TenMonHoc if hasattr(buoi, "mon_hoc") and buoi.mon_hoc else None,
+                giang_vien_id=buoi.GiangVienId,
+                phong_hoc_id=buoi.PhongHocId,
+                ngay_hoc=buoi.NgayHoc,
+                gio_bat_dau=buoi.GioBatDau,
+                gio_ket_thuc=buoi.GioKetThuc,
+                trang_thai=buoi.TrangThai,
+                noi_dung_bai_hoc=getattr(buoi, "NoiDungBaiHoc", None)
+            )
+        )
+    return result
