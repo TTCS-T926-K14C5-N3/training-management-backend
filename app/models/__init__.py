@@ -7,6 +7,7 @@ from app.models.token_mat_khau import TokenMatKhau
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.phong_hoc import PhongHoc
 from app.models.thoi_khoa_bieu import (
@@ -14,3 +15,6 @@ from app.models.thoi_khoa_bieu import (
     ThoiKhoaBieuDiemDanh,
     ThoiKhoaBieuLichSu,
 )
+from app.models.lich_hoc import LichHoc, LichHocLichSu
+from app.models.diem_danh import DiemDanh
+from app.models.lich_hoc_thong_bao import LichHocThongBao
