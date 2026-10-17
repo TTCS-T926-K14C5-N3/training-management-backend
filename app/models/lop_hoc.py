@@ -20,6 +20,17 @@ class LopHoc(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=True,
     )
+    HinhThuc = Column(
+        Unicode(20),
+        nullable=False,
+        default="Trực tiếp",
+    )
+    PhongHocId = Column(
+        Integer,
+        ForeignKey("PhongHoc.PhongHocId"),
+        nullable=True,
+    )
+    LinkTrucTuyen = Column(Unicode(500), nullable=True)
     TrangThai = Column(
         Unicode(30),
         nullable=False,
