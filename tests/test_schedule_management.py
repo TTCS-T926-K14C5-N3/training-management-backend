@@ -9,14 +9,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
+from app.models.diem_danh import DiemDanh
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.phong_hoc import PhongHoc
+from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.vai_tro import VaiTro
 from app.main import app
 from app.routers.schedules import (
@@ -24,12 +27,14 @@ from app.routers.schedules import (
     cancel_schedule,
     check_schedule_conflicts,
     create_schedule,
+    get_schedule_attendance,
     get_schedule_options,
     list_schedule_history,
     list_schedules,
     update_schedule,
+    update_schedule_attendance,
 )
-from app.schemas.lich_hoc import LichHocCancel, LichHocWrite
+from app.schemas.lich_hoc import DiemDanhWrite, LichHocCancel, LichHocWrite
 
 
 def test_schedule_endpoints_are_registered():
@@ -41,6 +46,8 @@ def test_schedule_endpoints_are_registered():
     assert "put" in paths["/academic/schedules/{schedule_id}"]
     assert "post" in paths["/academic/schedules/{schedule_id}/cancel"]
     assert "get" in paths["/academic/schedule-history"]
+    assert "get" in paths["/academic/schedules/{schedule_id}/attendance"]
+    assert "put" in paths["/academic/schedules/{schedule_id}/attendance"]
 
 
 def test_schedule_writes_acquire_transaction_owned_sql_server_lock():
@@ -823,7 +830,7 @@ def test_started_schedule_cannot_be_edited_or_cancelled(db: Session):
     assert schedule["trangThai"] == "Đã diễn ra"
     assert schedule["coTheChinhSua"] is False
     assert schedule["coTheHuy"] is False
-    assert schedule["trangThaiDiemDanh"] is None
+    assert schedule["trangThaiDiemDanh"] == "Không có học viên"
 
     with pytest.raises(HTTPException) as edit_error:
         update_schedule(
@@ -867,5 +874,91 @@ def test_list_schedules_only_returns_accessible_class_schedules(db: Session):
     options = get_schedule_options(teacher, db)
 
     assert [item["lichHocId"] for item in schedules] == [created["lichHocId"]]
-    assert schedules[0]["trangThaiDiemDanh"] is None
-    assert options["diemDanhDuocHoTro"] is False
+    assert schedules[0]["trangThaiDiemDanh"] == "Không có học viên"
+    assert options["diemDanhDuocHoTro"] is True
+
+
+def test_attendance_persists_status_and_uses_session_date_roster(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    first_student = add_user(db, 20, 2, "Học viên được điểm danh")
+    withdrawn_student = add_user(db, 21, 2, "Học viên đã thôi học")
+    session_day = date.today() - timedelta(days=2)
+    db.add_all(
+        [
+            LopHocHocVien(
+                LopHocId=class_record.LopHocId,
+                HocVienId=student.NguoiDungId,
+                NgayThamGia=datetime.combine(
+                    session_day - timedelta(days=1), time.min
+                ),
+                NguoiGhiDanhId=teacher.NguoiDungId,
+            )
+            for student in (first_student, withdrawn_student)
+        ]
+    )
+    db.add(
+        StudentEnrollmentAction(
+            HocVienId=withdrawn_student.NguoiDungId,
+            LopHocId=class_record.LopHocId,
+            LopHocDichId=None,
+            LoaiThaoTac="ThoiHoc",
+            NgayHieuLuc=session_day,
+            LyDo="Đã thôi học trước buổi này",
+            NguoiThucHienId=teacher.NguoiDungId,
+            NgayTao=datetime.now(),
+        )
+    )
+    db.commit()
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=session_day,
+        ),
+        teacher,
+        db,
+    )
+
+    roster = get_schedule_attendance(schedule["lichHocId"], teacher, db)
+    saved = update_schedule_attendance(
+        schedule["lichHocId"],
+        DiemDanhWrite(
+            hocViens=[
+                {
+                    "hocVienId": first_student.NguoiDungId,
+                    "trangThai": "Muộn",
+                    "ghiChu": "Đến sau giờ bắt đầu",
+                }
+            ]
+        ),
+        teacher,
+        db,
+    )
+    queried = get_schedule_attendance(schedule["lichHocId"], teacher, db)
+
+    assert [item["hocVienId"] for item in roster["hocViens"]] == [
+        first_student.NguoiDungId
+    ]
+    assert saved["trangThaiDiemDanh"] == "1/1 đã điểm danh"
+    assert queried["hocViens"][0]["trangThai"] == "Muộn"
+    assert queried["hocViens"][0]["ghiChu"] == "Đến sau giờ bắt đầu"
+    assert queried["hocViens"][0]["nguoiDiemDanh"] == teacher.HoTen
+    assert db.query(DiemDanh).count() == 1
+
+    with pytest.raises(HTTPException) as error:
+        update_schedule_attendance(
+            schedule["lichHocId"],
+            DiemDanhWrite(
+                hocViens=[
+                    {
+                        "hocVienId": withdrawn_student.NguoiDungId,
+                        "trangThai": "Vắng",
+                    }
+                ]
+            ),
+            teacher,
+            db,
+        )
+    assert error.value.status_code == 422

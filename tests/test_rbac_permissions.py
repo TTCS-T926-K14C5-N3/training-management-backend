@@ -140,6 +140,16 @@ def test_catalog_contains_all_eight_business_role_defaults():
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert "STUDENT_PROFILE_UPDATE" in codes
     assert "STUDENT_PROFILE_UPDATE" in DEFAULT_ROLE_PERMISSIONS[7]
+    assert {"ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"} <= codes
+    assert {"ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"} <= set(
+        DEFAULT_ROLE_PERMISSIONS[3]
+    )
+    assert {"ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"} <= set(
+        DEFAULT_ROLE_PERMISSIONS[4]
+    )
+    assert {"ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"} <= set(
+        DEFAULT_ROLE_PERMISSIONS[7]
+    )
 
 
 def test_role_permission_model_uses_existing_composite_primary_key():

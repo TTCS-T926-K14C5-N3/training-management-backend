@@ -12,6 +12,7 @@ from app.models.admissions import LeadConversion
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.nguoi_dung import NguoiDung
@@ -28,6 +29,7 @@ from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
     RoomWrite,
+    StudentEnrollmentActionWrite,
     StudentProfileWrite,
     SubjectCreate,
     SubjectUpdate,
@@ -41,6 +43,7 @@ from app.schemas.curriculum import (
 from app.services.academic_service import (
     INSTRUCTOR_ROLE_ID,
     ASSISTANT_ROLE_ID,
+    TRAINING_MANAGER_ROLE_ID,
     TEACHING_ROLE_IDS,
     STUDENT_ROLE_ID,
     accessible_classes,
@@ -114,13 +117,32 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
         if lop_hoc.GiangVienId is not None
         else None
     )
+    today = date.today()
+    ended_enrollment_ids = {
+        row.HocVienId
+        for row in db.query(StudentEnrollmentAction.HocVienId)
+        .filter(
+            StudentEnrollmentAction.LopHocId == lop_hoc.LopHocId,
+            StudentEnrollmentAction.NgayHieuLuc <= today,
+        )
+        .distinct()
+        .all()
+    }
     students = (
         db.query(NguoiDung)
         .join(
             LopHocHocVien,
             LopHocHocVien.HocVienId == NguoiDung.NguoiDungId,
         )
-        .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
+        .filter(
+            LopHocHocVien.LopHocId == lop_hoc.LopHocId,
+            LopHocHocVien.NgayThamGia < datetime.combine(
+                today, datetime.max.time()
+            ),
+            ~LopHocHocVien.HocVienId.in_(ended_enrollment_ids)
+            if ended_enrollment_ids
+            else True,
+        )
         .order_by(NguoiDung.HoTen)
         .all()
     )
@@ -148,6 +170,18 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
     )
     enrollment_by_student = {
         row.HocVienId: row for row in enrollment_rows
+    }
+    pending_actions = (
+        db.query(StudentEnrollmentAction)
+        .filter(
+            StudentEnrollmentAction.LopHocId == lop_hoc.LopHocId,
+            StudentEnrollmentAction.NgayHieuLuc > today,
+        )
+        .order_by(StudentEnrollmentAction.NgayHieuLuc)
+        .all()
+    )
+    pending_action_by_student = {
+        action.HocVienId: action for action in pending_actions
     }
     enrollment_user_ids = {
         row.NguoiGhiDanhId for row in enrollment_rows
@@ -218,6 +252,20 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
                 "ngayGhiDanh": enrollment_by_student[student.NguoiDungId].NgayThamGia,
                 "nguoiGhiDanh": enrollment_users.get(
                     enrollment_by_student[student.NguoiDungId].NguoiGhiDanhId
+                ),
+                "trangThaiGhiDanh": (
+                    {
+                        "BaoLuu": "Sắp bảo lưu",
+                        "ChuyenLop": "Sắp chuyển lớp",
+                        "ThoiHoc": "Sắp thôi học",
+                    }[pending_action_by_student[student.NguoiDungId].LoaiThaoTac]
+                    if student.NguoiDungId in pending_action_by_student
+                    else "Đang học"
+                ),
+                "ngayHieuLuc": (
+                    pending_action_by_student[student.NguoiDungId].NgayHieuLuc
+                    if student.NguoiDungId in pending_action_by_student
+                    else None
                 ),
             }
             for student in students
@@ -375,22 +423,18 @@ def _apply_class_write(
         .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
         .all()
     }
-    removed_students = current_students - student_ids
+    currently_enrolled_students = {
+        item["nguoiDungId"] for item in _class_payload(db, lop_hoc)["hocViens"]
+    }
+    removed_students = currently_enrolled_students - student_ids
     if removed_students:
-        has_grades = (
-            db.query(Diem.DiemId)
-            .filter(
-                Diem.LopHocId == lop_hoc.LopHocId,
-                Diem.HocVienId.in_(removed_students),
-            )
-            .first()
-            is not None
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Không thể xóa học viên khỏi lịch sử lớp. "
+                "Hãy dùng thao tác bảo lưu, chuyển lớp hoặc thôi học."
+            ),
         )
-        if has_grades:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Không thể gỡ học viên đã có điểm khỏi lớp.",
-            )
 
     current_subjects = {
         link.MonHocId
@@ -476,11 +520,6 @@ def _apply_class_write(
     lop_hoc.TienDo = request.tien_do
     lop_hoc.TrangThai = request.trang_thai
 
-    for student_id in current_students - student_ids:
-        db.query(LopHocHocVien).filter(
-            LopHocHocVien.LopHocId == lop_hoc.LopHocId,
-            LopHocHocVien.HocVienId == student_id,
-        ).delete(synchronize_session=False)
     for student_id in student_ids - current_students:
         db.add(
             LopHocHocVien(
@@ -661,6 +700,125 @@ def create_room(request: RoomWrite, db: Session = Depends(get_db)):
         "tenPhong": room.TenPhong,
         "sucChua": room.SucChua,
         "trangThai": room.TrangThai,
+    }
+
+
+@router.post(
+    "/classes/{class_id}/students/{student_id}/actions",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("CLASS_UPDATE"))],
+)
+def create_student_enrollment_action(
+    class_id: int,
+    student_id: int,
+    request: StudentEnrollmentActionWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    class_record = _get_class_or_404(db, class_id)
+    _ensure_class_scope(db, current_user, class_record)
+    enrollment = (
+        db.query(LopHocHocVien)
+        .filter(
+            LopHocHocVien.LopHocId == class_id,
+            LopHocHocVien.HocVienId == student_id,
+        )
+        .first()
+    )
+    if enrollment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy học viên trong lịch sử lớp này.",
+        )
+    if request.ngay_hieu_luc < enrollment.NgayThamGia.date():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Ngày hiệu lực không được trước ngày ghi danh.",
+        )
+    target_class = None
+    if request.loai_thao_tac == "ChuyenLop":
+        if request.lop_hoc_dich_id is None or request.lop_hoc_dich_id == class_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Vui lòng chọn lớp chuyển đến khác lớp hiện tại.",
+            )
+        target_class = _get_class_or_404(db, request.lop_hoc_dich_id)
+        _ensure_class_scope(db, current_user, target_class)
+        if target_class.TrangThai not in {"Chuẩn bị", "Đang học", "Đang hoạt động"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Không thể chuyển học viên vào lớp đã kết thúc hoặc hủy.",
+            )
+        existing_target = (
+            db.query(LopHocHocVien)
+            .filter(
+                LopHocHocVien.LopHocId == target_class.LopHocId,
+                LopHocHocVien.HocVienId == student_id,
+            )
+            .first()
+        )
+        if existing_target is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Học viên đã có lịch sử ghi danh trong lớp đích.",
+            )
+        if len(_class_payload(db, target_class)["hocVienIds"]) >= target_class.SiSoToiDa:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Lớp chuyển đến đã đủ sĩ số.",
+            )
+    elif request.lop_hoc_dich_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Chỉ thao tác chuyển lớp được chọn lớp đích.",
+        )
+
+    duplicate_action = (
+        db.query(StudentEnrollmentAction.ActionId)
+        .filter(
+            StudentEnrollmentAction.LopHocId == class_id,
+            StudentEnrollmentAction.HocVienId == student_id,
+        )
+        .first()
+    )
+    if duplicate_action is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Đã có thao tác hiệu lực từ ngày này trở đi cho học viên.",
+        )
+
+    action = StudentEnrollmentAction(
+        HocVienId=student_id,
+        LopHocId=class_id,
+        LopHocDichId=request.lop_hoc_dich_id,
+        LoaiThaoTac=request.loai_thao_tac,
+        NgayHieuLuc=request.ngay_hieu_luc,
+        LyDo=request.ly_do,
+        NguoiThucHienId=current_user.NguoiDungId,
+        NgayTao=datetime.now(),
+    )
+    db.add(action)
+    if target_class is not None:
+        db.add(
+            LopHocHocVien(
+                LopHocId=target_class.LopHocId,
+                HocVienId=student_id,
+                NgayThamGia=datetime.combine(
+                    request.ngay_hieu_luc, datetime.min.time()
+                ),
+                NguoiGhiDanhId=current_user.NguoiDungId,
+            )
+        )
+    _commit(db, "Không thể lưu thao tác học viên.")
+    return {
+        "actionId": action.ActionId,
+        "hocVienId": action.HocVienId,
+        "lopHocId": action.LopHocId,
+        "lopHocDichId": action.LopHocDichId,
+        "loaiThaoTac": action.LoaiThaoTac,
+        "ngayHieuLuc": action.NgayHieuLuc,
+        "lyDo": action.LyDo,
+        "nguoiThucHienId": action.NguoiThucHienId,
     }
 
 
@@ -919,13 +1077,13 @@ def enroll_students(
             status_code=status.HTTP_409_CONFLICT,
             detail="Chỉ được ghi danh vào lớp đang chuẩn bị hoặc đang học.",
         )
-    existing_ids = {
+    historical_ids = {
         row.HocVienId
         for row in db.query(LopHocHocVien.HocVienId)
         .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
         .all()
     }
-    already_enrolled_ids = existing_ids.intersection(request.hoc_vien_ids)
+    already_enrolled_ids = historical_ids.intersection(request.hoc_vien_ids)
     if already_enrolled_ids:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -934,8 +1092,9 @@ def enroll_students(
                 "Tải lại danh sách và chọn học viên khác."
             ),
         )
-    new_ids = set(request.hoc_vien_ids) - existing_ids
-    if len(existing_ids) + len(new_ids) > lop_hoc.SiSoToiDa:
+    new_ids = set(request.hoc_vien_ids) - historical_ids
+    active_ids = set(_class_payload(db, lop_hoc)["hocVienIds"])
+    if len(active_ids) + len(new_ids) > lop_hoc.SiSoToiDa:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Số học viên vượt quá sĩ số tối đa của lớp.",
@@ -964,9 +1123,272 @@ def enroll_students(
     return {
         "lopHocId": class_id,
         "daGhiDanh": sorted(new_ids),
-        "daCoTrongLop": sorted(existing_ids & set(request.hoc_vien_ids)),
-        "siSoHienTai": len(existing_ids) + len(new_ids),
+        "daCoTrongLop": sorted(historical_ids & set(request.hoc_vien_ids)),
+        "siSoHienTai": len(active_ids) + len(new_ids),
         "siSoToiDa": lop_hoc.SiSoToiDa,
+    }
+
+
+@router.get(
+    "/students/statuses",
+    dependencies=[Depends(require_permission("GRADE_VIEW"))],
+)
+def list_student_enrollment_statuses(
+    search: str | None = Query(default=None, max_length=150),
+    class_id: int | None = Query(default=None, alias="classId", gt=0),
+    enrollment_status: str | None = Query(
+        default=None,
+        alias="enrollmentStatus",
+        max_length=30,
+    ),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    allowed_statuses = {
+        "Đang học",
+        "Sắp bảo lưu",
+        "Sắp chuyển lớp",
+        "Sắp thôi học",
+        "Bảo lưu",
+        "Thôi học",
+        "Đã chuyển lớp",
+        "Đã kết thúc",
+        "Chưa ghi danh",
+    }
+    if enrollment_status and enrollment_status not in allowed_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Trạng thái ghi danh không hợp lệ.",
+        )
+
+    roles = user_role_ids(db, current_user.NguoiDungId)
+    is_admin = user_is_admin(db, current_user.NguoiDungId)
+    visible_classes = accessible_classes(db, current_user, include_inactive=True)
+    visible_class_ids = {item.LopHocId for item in visible_classes}
+    student_query = (
+        db.query(NguoiDung)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
+        )
+        .filter(NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID)
+    )
+    if is_admin or TRAINING_MANAGER_ROLE_ID in roles:
+        pass
+    elif roles.intersection(TEACHING_ROLE_IDS):
+        student_query = student_query.filter(
+            NguoiDung.NguoiDungId.in_(
+                db.query(LopHocHocVien.HocVienId).filter(
+                    LopHocHocVien.LopHocId.in_(visible_class_ids)
+                    if visible_class_ids
+                    else False
+                )
+            )
+        )
+    elif STUDENT_ROLE_ID in roles:
+        student_query = student_query.filter(
+            NguoiDung.NguoiDungId == current_user.NguoiDungId
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền xem tình trạng học viên.",
+        )
+
+    if class_id is not None:
+        if class_id not in visible_class_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không được truy cập lớp học này.",
+            )
+        student_query = student_query.filter(
+            NguoiDung.NguoiDungId.in_(
+                db.query(LopHocHocVien.HocVienId).filter(
+                    LopHocHocVien.LopHocId == class_id
+                )
+            )
+        )
+
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        search_pattern = f"%{normalized_search}%"
+        class_student_ids = (
+            db.query(LopHocHocVien.HocVienId)
+            .join(LopHoc, LopHoc.LopHocId == LopHocHocVien.LopHocId)
+            .filter(
+                LopHoc.LopHocId.in_(visible_class_ids)
+                if visible_class_ids
+                else False,
+                (LopHoc.MaLop.ilike(search_pattern))
+                | (LopHoc.TenLop.ilike(search_pattern)),
+            )
+        )
+        student_query = student_query.filter(
+            NguoiDung.NguoiDungId.in_(
+                db.query(LeadConversion.NguoiDungId).filter(
+                    LeadConversion.MaHocVien.ilike(search_pattern)
+                )
+            )
+            | NguoiDung.HoTen.ilike(search_pattern)
+            | NguoiDung.NguoiDungId.in_(class_student_ids)
+        )
+
+    students = student_query.distinct().order_by(NguoiDung.HoTen).all()
+    student_ids = [item.NguoiDungId for item in students]
+    class_ids = visible_class_ids
+    enrollment_rows = (
+        db.query(LopHocHocVien, LopHoc)
+        .join(LopHoc, LopHoc.LopHocId == LopHocHocVien.LopHocId)
+        .filter(
+            LopHocHocVien.HocVienId.in_(student_ids) if student_ids else False,
+            LopHoc.LopHocId.in_(class_ids) if class_ids else False,
+        )
+        .all()
+    )
+    enrollments_by_student: dict[int, list[tuple[LopHocHocVien, LopHoc]]] = {}
+    for enrollment, class_record in enrollment_rows:
+        enrollments_by_student.setdefault(enrollment.HocVienId, []).append(
+            (enrollment, class_record)
+        )
+    action_rows = (
+        db.query(StudentEnrollmentAction)
+        .filter(
+            StudentEnrollmentAction.HocVienId.in_(student_ids)
+            if student_ids
+            else False,
+            StudentEnrollmentAction.LopHocId.in_(class_ids)
+            if class_ids
+            else False,
+        )
+        .order_by(
+            StudentEnrollmentAction.NgayHieuLuc.desc(),
+            StudentEnrollmentAction.ActionId.desc(),
+        )
+        .all()
+    )
+    actions_by_student: dict[int, list[StudentEnrollmentAction]] = {}
+    for action in action_rows:
+        actions_by_student.setdefault(action.HocVienId, []).append(action)
+    conversions = {
+        conversion.NguoiDungId: conversion.MaHocVien
+        for conversion in db.query(LeadConversion)
+        .filter(LeadConversion.NguoiDungId.in_(student_ids))
+        .all()
+    } if student_ids else {}
+
+    today = date.today()
+    status_labels = {
+        "BaoLuu": ("Sắp bảo lưu", "Bảo lưu"),
+        "ChuyenLop": ("Sắp chuyển lớp", "Đã chuyển lớp"),
+        "ThoiHoc": ("Sắp thôi học", "Thôi học"),
+    }
+    records = []
+    for student in students:
+        enrollments = enrollments_by_student.get(student.NguoiDungId, [])
+        actions = actions_by_student.get(student.NguoiDungId, [])
+        ended_class_ids = {
+            action.LopHocId
+            for action in actions
+            if action.NgayHieuLuc <= today
+        }
+        current_classes = [
+            class_record
+            for enrollment, class_record in enrollments
+            if enrollment.NgayThamGia.date() <= today
+            and class_record.TrangThai
+            in {"Chuẩn bị", "Đang học", "Đang hoạt động"}
+            and class_record.LopHocId not in ended_class_ids
+        ]
+        pending_actions = [
+            action for action in actions if action.NgayHieuLuc > today
+        ]
+        effective_actions = [
+            action for action in actions if action.NgayHieuLuc <= today
+        ]
+        if current_classes and pending_actions:
+            latest_action = min(
+                pending_actions,
+                key=lambda item: (item.NgayHieuLuc, item.ActionId),
+            )
+            status_label = status_labels[latest_action.LoaiThaoTac][0]
+            effective_date = latest_action.NgayHieuLuc
+        elif current_classes:
+            status_label = "Đang học"
+            effective_date = None
+        elif effective_actions:
+            latest_action = max(
+                effective_actions,
+                key=lambda item: (item.NgayHieuLuc, item.ActionId),
+            )
+            status_label = status_labels[latest_action.LoaiThaoTac][1]
+            effective_date = latest_action.NgayHieuLuc
+        elif enrollments:
+            status_label = "Đã kết thúc"
+            effective_date = None
+        else:
+            status_label = "Chưa ghi danh"
+            effective_date = None
+
+        all_classes = [class_record for _, class_record in enrollments]
+        if class_id is not None and not any(
+            item.LopHocId == class_id for item in all_classes
+        ):
+            continue
+        if enrollment_status and status_label != enrollment_status:
+            continue
+        records.append(
+            {
+                "nguoiDungId": student.NguoiDungId,
+                "maHocVien": conversions.get(student.NguoiDungId),
+                "hoTen": student.HoTen,
+                "email": student.Email,
+                "soDienThoai": student.SoDienThoai,
+                "vaiTroId": STUDENT_ROLE_ID,
+                "vaiTroIds": [STUDENT_ROLE_ID],
+                "trangThaiTaiKhoan": student.TrangThai,
+                "trangThaiGhiDanh": status_label,
+                "ngayHieuLuc": effective_date,
+                "lopHienTai": [
+                    {
+                        "lopHocId": item.LopHocId,
+                        "maLop": item.MaLop,
+                        "tenLop": item.TenLop,
+                    }
+                    for item in current_classes
+                ],
+                "lopHocs": [
+                    {
+                        "lopHocId": item.LopHocId,
+                        "maLop": item.MaLop,
+                        "tenLop": item.TenLop,
+                        "trangThai": item.TrangThai,
+                    }
+                    for item in all_classes
+                ],
+            }
+        )
+
+    total = len(records)
+    offset = (page - 1) * limit
+    return {
+        "items": records[offset : offset + limit],
+        "classes": [
+            {
+                "lopHocId": item.LopHocId,
+                "maLop": item.MaLop,
+                "tenLop": item.TenLop,
+                "trangThai": item.TrangThai,
+            }
+            for item in visible_classes
+        ],
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "totalPages": (total + limit - 1) // limit,
+        },
     }
 
 
@@ -1069,6 +1491,47 @@ def get_student_academic_profile(
             .scalar()
         )
         class_history.append(payload)
+    action_rows = (
+        db.query(StudentEnrollmentAction)
+        .filter(
+            StudentEnrollmentAction.HocVienId == student_id,
+            StudentEnrollmentAction.LopHocId.in_(class_ids)
+            if class_ids
+            else False,
+        )
+        .order_by(
+            StudentEnrollmentAction.NgayHieuLuc.desc(),
+            StudentEnrollmentAction.ActionId.desc(),
+        )
+        .all()
+    )
+    referenced_class_ids = {
+        referenced_id
+        for action in action_rows
+        for referenced_id in (action.LopHocId, action.LopHocDichId)
+        if referenced_id is not None
+    }
+    action_classes = (
+        {
+            item.LopHocId: item
+            for item in db.query(LopHoc)
+            .filter(LopHoc.LopHocId.in_(referenced_class_ids))
+            .all()
+        }
+        if referenced_class_ids
+        else {}
+    )
+    actor_ids = {item.NguoiThucHienId for item in action_rows}
+    action_actors = (
+        {
+            item.NguoiDungId: item.HoTen
+            for item in db.query(NguoiDung)
+            .filter(NguoiDung.NguoiDungId.in_(actor_ids))
+            .all()
+        }
+        if actor_ids
+        else {}
+    )
     return {
         "hocVien": {
             "nguoiDungId": student.NguoiDungId,
@@ -1084,6 +1547,25 @@ def get_student_academic_profile(
             "ngayNhapHoc": conversion.NgayNhapHoc if conversion else None,
         },
         "lopHocs": class_history,
+        "thaoTacs": [
+            {
+                "actionId": item.ActionId,
+                "loaiThaoTac": item.LoaiThaoTac,
+                "ngayHieuLuc": item.NgayHieuLuc,
+                "lyDo": item.LyDo,
+                "lopHocId": item.LopHocId,
+                "maLop": action_classes[item.LopHocId].MaLop,
+                "lopHocDichId": item.LopHocDichId,
+                "maLopDich": (
+                    action_classes[item.LopHocDichId].MaLop
+                    if item.LopHocDichId in action_classes
+                    else None
+                ),
+                "nguoiThucHien": action_actors.get(item.NguoiThucHienId),
+                "ngayTao": item.NgayTao,
+            }
+            for item in action_rows
+        ],
         "diems": [_grade_payload(db, grade) for grade in grades],
     }
 
@@ -1920,6 +2402,10 @@ def get_grade_options(
                 LopHocHocVien.HocVienId == NguoiDung.NguoiDungId,
             )
             .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
+        )
+        active_student_ids = set(_class_payload(db, lop_hoc)["hocVienIds"])
+        student_query = student_query.filter(
+            NguoiDung.NguoiDungId.in_(active_student_ids)
         )
         if (
             2 in roles

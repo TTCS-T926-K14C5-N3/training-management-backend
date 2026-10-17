@@ -1,4 +1,5 @@
 from datetime import date, time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -54,4 +55,38 @@ class LichHocCancel(BaseModel):
     def validate_reason(cls, value: str) -> str:
         if not value:
             raise ValueError("Vui lòng nhập lý do hủy buổi học.")
+        return value
+
+
+class DiemDanhEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    hoc_vien_id: int = Field(alias="hocVienId", gt=0)
+    trang_thai: Literal["Có mặt", "Vắng", "Muộn", "Có phép"] = Field(
+        alias="trangThai"
+    )
+    ghi_chu: str | None = Field(default=None, alias="ghiChu", max_length=1000)
+
+    @field_validator("ghi_chu", mode="before")
+    @classmethod
+    def normalize_attendance_note(cls, value: str | None) -> str | None:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+
+class DiemDanhWrite(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    hoc_viens: list[DiemDanhEntry] = Field(alias="hocViens", min_length=1)
+
+    @field_validator("hoc_viens")
+    @classmethod
+    def validate_unique_students(
+        cls,
+        value: list[DiemDanhEntry],
+    ) -> list[DiemDanhEntry]:
+        student_ids = [item.hoc_vien_id for item in value]
+        if len(student_ids) != len(set(student_ids)):
+            raise ValueError("Danh sách điểm danh không được trùng học viên.")
         return value

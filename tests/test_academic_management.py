@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import date
 
 import pytest
@@ -12,6 +12,7 @@ from app.models.diem import Diem
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
@@ -25,6 +26,7 @@ from app.routers.academic import (
     create_class,
     create_grade,
     create_subject,
+    create_student_enrollment_action,
     create_training_program,
     delete_subject,
     delete_training_program,
@@ -33,6 +35,7 @@ from app.routers.academic import (
     get_class_options,
     get_student_academic_profile,
     list_grades,
+    list_student_enrollment_statuses,
     list_subjects,
     update_class,
     update_grade,
@@ -45,6 +48,7 @@ from app.schemas.academic import (
     ClassWrite,
     GradeWrite,
     RoomWrite,
+    StudentEnrollmentActionWrite,
     StudentProfileWrite,
     SubjectCreate,
     TrainingProgramWrite,
@@ -481,6 +485,113 @@ def test_class_update_and_archive_keep_class_history(db: Session):
         LopHoc.LopHocId == record["lopHocId"]
     ).one()
     assert archived.TrangThai == "Ngừng hoạt động"
+
+
+def test_transfer_keeps_old_enrollment_and_updates_active_roster(db: Session):
+    _teacher, student, _second_student, _subject, source = setup_academic_class(db)
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    target_subject = create_subject(
+        SubjectCreate(maMonHoc="CS202", tenMonHoc="Môn đích"),
+        db,
+    )
+    target = create_class(
+        ClassWrite(
+            maLop="CLASS-TARGET",
+            tenLop="Lớp đích",
+            namHoc="2025-2026",
+            hocVienIds=[],
+            monHocIds=[target_subject["monHocId"]],
+        ),
+        db,
+    )
+
+    action_result = create_student_enrollment_action(
+        source["lopHocId"],
+        student.NguoiDungId,
+        StudentEnrollmentActionWrite(
+            loaiThaoTac="ChuyenLop",
+            lopHocDichId=target["lopHocId"],
+            ngayHieuLuc=date.today() + timedelta(days=1),
+            lyDo="Phù hợp lịch học mới",
+        ),
+        current_user=manager,
+        db=db,
+    )
+
+    source_record = db.query(LopHoc).filter_by(
+        LopHocId=source["lopHocId"]
+    ).one()
+    target_record = db.query(LopHoc).filter_by(
+        LopHocId=target["lopHocId"]
+    ).one()
+    profile = get_student_academic_profile(
+        student.NguoiDungId,
+        current_user=manager,
+        db=db,
+    )
+
+    assert action_result["loaiThaoTac"] == "ChuyenLop"
+    assert db.query(LopHocHocVien).filter_by(
+        LopHocId=source["lopHocId"],
+        HocVienId=student.NguoiDungId,
+    ).count() == 1
+    assert student.NguoiDungId in _class_payload(db, source_record)["hocVienIds"]
+    assert student.NguoiDungId not in _class_payload(db, target_record)["hocVienIds"]
+    saved_action = db.query(StudentEnrollmentAction).one()
+    saved_action.NgayHieuLuc = date.today()
+    target_enrollment = db.query(LopHocHocVien).filter_by(
+        LopHocId=target["lopHocId"],
+        HocVienId=student.NguoiDungId,
+    ).one()
+    target_enrollment.NgayThamGia = datetime.combine(
+        date.today(), datetime.min.time()
+    )
+    db.commit()
+    assert student.NguoiDungId not in _class_payload(db, source_record)["hocVienIds"]
+    assert student.NguoiDungId in _class_payload(db, target_record)["hocVienIds"]
+    assert profile["thaoTacs"][0]["lyDo"] == "Phù hợp lịch học mới"
+    assert profile["thaoTacs"][0]["nguoiThucHien"] == "Quản lý đào tạo"
+    assert db.query(StudentEnrollmentAction).count() == 1
+
+
+def test_student_status_list_searches_by_class_and_filters_enrollment_state(
+    db: Session,
+):
+    _teacher, student, _second_student, _subject, class_record = (
+        setup_academic_class(db)
+    )
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+
+    by_class = list_student_enrollment_statuses(
+        search=class_record["maLop"],
+        class_id=None,
+        enrollment_status=None,
+        page=1,
+        limit=20,
+        current_user=manager,
+        db=db,
+    )
+    active_only = list_student_enrollment_statuses(
+        search=None,
+        class_id=class_record["lopHocId"],
+        enrollment_status="Đang học",
+        page=1,
+        limit=20,
+        current_user=manager,
+        db=db,
+    )
+
+    assert {item["nguoiDungId"] for item in by_class["items"]} == {20, 21}
+    assert len(by_class["classes"]) == 1
+    assert all(item["vaiTroIds"] == [2] for item in by_class["items"])
+    assert {item["nguoiDungId"] for item in active_only["items"]} == {
+        student.NguoiDungId,
+        21,
+    }
+    assert all(
+        item["trangThaiGhiDanh"] == "Đang học"
+        for item in active_only["items"]
+    )
 
 
 def test_archived_subject_remains_visible_when_inactive_subjects_are_requested(

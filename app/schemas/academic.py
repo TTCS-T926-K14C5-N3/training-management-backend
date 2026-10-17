@@ -219,6 +219,27 @@ class ClassEnrollmentWrite(BaseModel):
         return value
 
 
+class StudentEnrollmentActionWrite(BaseModel):
+    lop_hoc_dich_id: int | None = Field(default=None, alias="lopHocDichId", gt=0)
+    loai_thao_tac: Literal["BaoLuu", "ChuyenLop", "ThoiHoc"] = Field(
+        alias="loaiThaoTac"
+    )
+    ngay_hieu_luc: date = Field(alias="ngayHieuLuc")
+    ly_do: str = Field(alias="lyDo", min_length=1, max_length=1000)
+
+    @field_validator("ly_do", mode="before")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ly_do")
+    @classmethod
+    def require_reason(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Vui lòng nhập lý do thao tác.")
+        return value
+
+
 class GradeWrite(BaseModel):
     lop_hoc_id: int = Field(alias="lopHocId", gt=0)
     hoc_vien_id: int = Field(alias="hocVienId", gt=0)

@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, or_, select, text
@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user, require_permission
 from app.database import get_db
 from app.models.lich_hoc import LichHoc, LichHocLichSu
+from app.models.diem_danh import DiemDanh
+from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
@@ -16,7 +19,11 @@ from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.phong_hoc import PhongHoc
-from app.schemas.lich_hoc import LichHocCancel, LichHocWrite
+from app.schemas.lich_hoc import (
+    DiemDanhWrite,
+    LichHocCancel,
+    LichHocWrite,
+)
 from app.services.academic_service import (
     TRAINING_MANAGER_ROLE_ID,
     TEACHING_ROLE_IDS,
@@ -96,6 +103,57 @@ def _get_class_or_404(db: Session, class_id: int) -> LopHoc:
     return class_record
 
 
+def _attendance_roster(db: Session, schedule: LichHoc) -> list[NguoiDung]:
+    next_day = schedule.NgayHoc + timedelta(days=1)
+    enrollments = (
+        db.query(LopHocHocVien)
+        .filter(
+            LopHocHocVien.LopHocId == schedule.LopHocId,
+            LopHocHocVien.NgayThamGia < datetime.combine(next_day, time.min),
+        )
+        .all()
+    )
+    enrolled_ids = {item.HocVienId for item in enrollments}
+    ended_ids = {
+        student_id
+        for (student_id,) in db.query(StudentEnrollmentAction.HocVienId)
+        .filter(
+            StudentEnrollmentAction.LopHocId == schedule.LopHocId,
+            StudentEnrollmentAction.NgayHieuLuc <= schedule.NgayHoc,
+        )
+        .distinct()
+        .all()
+    }
+    active_ids = enrolled_ids - ended_ids
+    if not active_ids:
+        return []
+    return (
+        db.query(NguoiDung)
+        .filter(NguoiDung.NguoiDungId.in_(active_ids))
+        .order_by(NguoiDung.HoTen)
+        .all()
+    )
+
+
+def _attendance_summary(db: Session, schedule: LichHoc) -> str | None:
+    if schedule.TrangThai == CANCELLED:
+        return None
+    roster = _attendance_roster(db, schedule)
+    if not roster:
+        return "Không có học viên"
+    recorded_count = (
+        db.query(DiemDanh.DiemDanhId)
+        .filter(
+            DiemDanh.LichHocId == schedule.LichHocId,
+            DiemDanh.HocVienId.in_([student.NguoiDungId for student in roster]),
+        )
+        .count()
+    )
+    if recorded_count == 0:
+        return "Chưa điểm danh"
+    return f"{recorded_count}/{len(roster)} đã điểm danh"
+
+
 def _schedule_payload(db: Session, schedule: LichHoc) -> dict:
     class_record = (
         db.query(LopHoc).filter(LopHoc.LopHocId == schedule.LopHocId).first()
@@ -141,7 +199,7 @@ def _schedule_payload(db: Session, schedule: LichHoc) -> dict:
         "trangThai": state,
         "coTheChinhSua": state == SCHEDULED,
         "coTheHuy": state == SCHEDULED,
-        "trangThaiDiemDanh": None,
+        "trangThaiDiemDanh": _attendance_summary(db, schedule),
         "lyDoHuy": schedule.LyDoHuy,
         "ngayTao": schedule.NgayTao.isoformat(),
         "ngayCapNhat": schedule.NgayCapNhat.isoformat(),
@@ -412,7 +470,7 @@ def get_schedule_options(
             }
             for room in rooms
         ],
-        "diemDanhDuocHoTro": False,
+        "diemDanhDuocHoTro": True,
     }
 
 
@@ -761,6 +819,161 @@ def cancel_schedule(
     )
     _commit(db, "Không thể hủy buổi học.")
     return after
+
+
+def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
+    roster = _attendance_roster(db, schedule)
+    student_ids = [student.NguoiDungId for student in roster]
+    attendance_rows = (
+        db.query(DiemDanh)
+        .filter(
+            DiemDanh.LichHocId == schedule.LichHocId,
+            DiemDanh.HocVienId.in_(student_ids),
+        )
+        .all()
+        if student_ids
+        else []
+    )
+    attendance_by_student = {item.HocVienId: item for item in attendance_rows}
+    actor_ids = {item.NguoiDiemDanhId for item in attendance_rows}
+    actors = (
+        {
+            user.NguoiDungId: user.HoTen
+            for user in db.query(NguoiDung)
+            .filter(NguoiDung.NguoiDungId.in_(actor_ids))
+            .all()
+        }
+        if actor_ids
+        else {}
+    )
+    return {
+        "lichHocId": schedule.LichHocId,
+        "maBuoiHoc": f"BH-{schedule.LichHocId:06d}",
+        "ngayHoc": schedule.NgayHoc.isoformat(),
+        "hocViens": [
+            {
+                "hocVienId": student.NguoiDungId,
+                "hoTen": student.HoTen,
+                "email": student.Email,
+                "trangThai": (
+                    attendance_by_student[student.NguoiDungId].TrangThai
+                    if student.NguoiDungId in attendance_by_student
+                    else None
+                ),
+                "ghiChu": (
+                    attendance_by_student[student.NguoiDungId].GhiChu
+                    if student.NguoiDungId in attendance_by_student
+                    else None
+                ),
+                "nguoiDiemDanh": (
+                    actors.get(
+                        attendance_by_student[student.NguoiDungId].NguoiDiemDanhId
+                    )
+                    if student.NguoiDungId in attendance_by_student
+                    else None
+                ),
+                "ngayCapNhat": (
+                    attendance_by_student[student.NguoiDungId].NgayCapNhat.isoformat()
+                    if student.NguoiDungId in attendance_by_student
+                    else None
+                ),
+            }
+            for student in roster
+        ],
+        "trangThaiDiemDanh": _attendance_summary(db, schedule),
+    }
+
+
+def _ensure_attendance_scope(
+    db: Session,
+    schedule: LichHoc,
+    current_user: NguoiDung,
+) -> None:
+    class_record = db.query(LopHoc).filter(
+        LopHoc.LopHocId == schedule.LopHocId
+    ).first()
+    if class_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy lớp của buổi học.",
+        )
+    if not can_access_class(db, current_user, class_record):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
+        )
+
+
+@router.get(
+    "/schedules/{schedule_id}/attendance",
+    dependencies=[Depends(require_permission("ATTENDANCE_VIEW"))],
+)
+def get_schedule_attendance(
+    schedule_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    schedule = _get_schedule_or_404(db, schedule_id)
+    _ensure_attendance_scope(db, schedule, current_user)
+    return _attendance_payload(db, schedule)
+
+
+@router.put(
+    "/schedules/{schedule_id}/attendance",
+    dependencies=[Depends(require_permission("ATTENDANCE_UPDATE"))],
+)
+def update_schedule_attendance(
+    schedule_id: int,
+    request: DiemDanhWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    schedule = _get_schedule_or_404(db, schedule_id)
+    _ensure_attendance_scope(db, schedule, current_user)
+    if schedule.TrangThai != SCHEDULED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể điểm danh cho buổi học đã hủy.",
+        )
+
+    roster_ids = {
+        student.NguoiDungId for student in _attendance_roster(db, schedule)
+    }
+    requested_ids = {entry.hoc_vien_id for entry in request.hoc_viens}
+    invalid_ids = requested_ids - roster_ids
+    if invalid_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Danh sách có học viên không thuộc lớp tại ngày diễn ra buổi học.",
+        )
+
+    existing_rows = (
+        db.query(DiemDanh)
+        .filter(
+            DiemDanh.LichHocId == schedule.LichHocId,
+            DiemDanh.HocVienId.in_(requested_ids),
+        )
+        .all()
+    )
+    existing_by_student = {item.HocVienId: item for item in existing_rows}
+    now = datetime.now()
+    for entry in request.hoc_viens:
+        attendance = existing_by_student.get(entry.hoc_vien_id)
+        if attendance is None:
+            attendance = DiemDanh(
+                LichHocId=schedule.LichHocId,
+                HocVienId=entry.hoc_vien_id,
+                NguoiDiemDanhId=current_user.NguoiDungId,
+                NgayCapNhat=now,
+            )
+            db.add(attendance)
+        attendance.TrangThai = entry.trang_thai
+        attendance.GhiChu = entry.ghi_chu
+        attendance.NguoiDiemDanhId = current_user.NguoiDungId
+        attendance.NgayCapNhat = now
+
+    _commit(db, "Không thể lưu điểm danh cho buổi học.")
+    return _attendance_payload(db, schedule)
 
 
 def _history_payload(db: Session, item: LichHocLichSu) -> dict:
