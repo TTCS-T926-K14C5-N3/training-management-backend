@@ -810,6 +810,7 @@ def cancel_schedule(
             status_code=status.HTTP_409_CONFLICT,
             detail="Buổi học đã bắt đầu hoặc đã diễn ra và không thể hủy.",
         )
+    _ensure_no_attendance(db, schedule)
 
     before = _snapshot(db, schedule)
     now = datetime.now()

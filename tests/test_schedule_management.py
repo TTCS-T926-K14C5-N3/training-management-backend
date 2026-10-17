@@ -831,9 +831,20 @@ def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
     )
     assert cancelled["trangThai"] == "Đã hủy"
     assert cancelled["lyDoHuy"] == "Giảng viên bận"
-    assert db.query(LichHocLichSu).filter(
+    saved_schedule = db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one()
+    assert saved_schedule.NguoiHuyId == teacher.NguoiDungId
+    assert saved_schedule.NgayHuy is not None
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == schedule["lichHocId"],
         LichHocLichSu.HanhDong == "Hủy"
-    ).count() == 1
+    ).one()
+    assert history.NguoiThucHienId == teacher.NguoiDungId
+    assert history.ThoiDiem == saved_schedule.NgayHuy
+    assert history.LyDo == "Giảng viên bận"
+    assert json.loads(history.DuLieuCu)["trangThai"] == "Đã lên lịch"
+    assert json.loads(history.DuLieuMoi)["trangThai"] == "Đã hủy"
 
     with pytest.raises(HTTPException) as caught:
         cancel_schedule(
@@ -843,6 +854,56 @@ def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
             db,
         )
     assert caught.value.status_code == 409
+
+
+def test_cancel_schedule_rejects_recorded_attendance_without_changes(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    student = add_user(db, 20, 2, "Học viên đã điểm danh")
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+    attendance = DiemDanh(
+        LichHocId=schedule["lichHocId"],
+        HocVienId=student.NguoiDungId,
+        TrangThai="Có mặt",
+        NguoiDiemDanhId=teacher.NguoiDungId,
+        NgayCapNhat=datetime.now(),
+    )
+    db.add(attendance)
+    db.commit()
+
+    with pytest.raises(HTTPException) as caught:
+        cancel_schedule(
+            schedule["lichHocId"],
+            LichHocCancel(lyDo="Giảng viên bận"),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 409
+    saved_schedule = db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one()
+    assert saved_schedule.TrangThai == "Đã lên lịch"
+    assert saved_schedule.LyDoHuy is None
+    assert saved_schedule.NgayHuy is None
+    assert saved_schedule.NguoiHuyId is None
+    assert db.query(DiemDanh).filter(
+        DiemDanh.LichHocId == schedule["lichHocId"]
+    ).count() == 1
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == schedule["lichHocId"]
+    ).all()
+    assert [item.HanhDong for item in history] == ["Tạo"]
 
 
 def test_update_does_not_allow_changing_class_or_subject(db: Session):
