@@ -127,3 +127,25 @@ def test_update_schedule_requires_end_after_start():
 def test_update_schedule_rejects_timezone_aware_local_time():
     with pytest.raises(ValidationError):
         ThoiKhoaBieuUpdate(gioBatDau="10:00:00+07:00")
+client = TestClient(app)
+
+# 1. Test không có token khi truy cập API quản lý
+def test_schedule_manage_unauthorized():
+    res_preview = client.post("/thoi-khoa-bieu/xem-truoc", json={})
+    assert res_preview.status_code in [401, 403, 422]
+
+    res_save = client.post("/thoi-khoa-bieu/luu-chinh-thuc", json={"danh_sach_buoi_hoc": []})
+    assert res_save.status_code in [401, 403, 400, 422]
+
+# 2. Test gắn bài học khi không đủ quyền hoặc ID không tồn tại
+def test_gan_bai_hoc_permission_and_not_found():
+    response = client.put(
+        "/thoi-khoa-bieu/999999/gan-bai-hoc",
+        json={"bai_hoc_id": 1, "noi_dung_bai_hoc": "Bài 1: Tổng quan"}
+    )
+    assert response.status_code in [401, 403, 404]
+
+# 3. Test lấy lịch học cá nhân khi chưa đăng nhập
+def test_lich_ca_nhan_unauthorized():
+    response = client.get("/thoi-khoa-bieu/ca-nhan")
+    assert response.status_code in [401, 403]
