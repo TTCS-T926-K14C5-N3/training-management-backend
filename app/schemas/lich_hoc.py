@@ -21,6 +21,15 @@ class LichHocWrite(BaseModel):
         max_length=1000,
     )
 
+    @field_validator("gio_bat_dau", "gio_ket_thuc")
+    @classmethod
+    def validate_local_time(cls, value: time) -> time:
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            raise ValueError(
+                "Giờ học phải dùng giờ địa phương, không kèm múi giờ."
+            )
+        return value
+
     @field_validator("ly_do_ghi_de", mode="before")
     @classmethod
     def normalize_override_reason(cls, value: str | None) -> str | None:

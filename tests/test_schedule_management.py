@@ -1,15 +1,17 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.database import Base
+from app.core.security import get_current_user
+from app.database import Base, get_db
 from app.models.diem_danh import DiemDanh
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lich_hoc_thong_bao import LichHocThongBao
@@ -24,6 +26,7 @@ from app.models.phong_hoc import PhongHoc
 from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.vai_tro import VaiTro
 from app.main import app
+from app.routers import schedules as schedules_router
 from app.routers.schedules import (
     _acquire_schedule_write_lock,
     cancel_schedule,
@@ -52,6 +55,99 @@ def test_schedule_endpoints_are_registered():
     assert "post" in paths["/academic/schedule-notifications/retry"]
     assert "get" in paths["/academic/schedules/{schedule_id}/attendance"]
     assert "put" in paths["/academic/schedules/{schedule_id}/attendance"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "put",
+            "/academic/schedules/1",
+            {
+                "lopHocId": 1,
+                "monHocId": 1,
+                "ngayHoc": "2030-01-02",
+                "gioBatDau": "09:00",
+                "gioKetThuc": "10:00",
+                "phongHocId": 1,
+                "giangVienId": 1,
+            },
+        ),
+        (
+            "post",
+            "/academic/schedules/1/cancel",
+            {"lyDo": "Giảng viên bận"},
+        ),
+        (
+            "post",
+            "/academic/schedule-notifications/retry",
+            {},
+        ),
+    ],
+)
+def test_schedule_write_endpoints_reject_unauthenticated_requests(
+    method: str,
+    path: str,
+    payload: dict,
+):
+    test_app = FastAPI()
+    test_app.include_router(schedules_router.router)
+    test_app.dependency_overrides[get_db] = lambda: object()
+
+    with TestClient(test_app) as client:
+        response = client.request(method, path, json=payload)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "put",
+            "/academic/schedules/1",
+            {
+                "lopHocId": 1,
+                "monHocId": 1,
+                "ngayHoc": "2030-01-02",
+                "gioBatDau": "09:00",
+                "gioKetThuc": "10:00",
+                "phongHocId": 1,
+                "giangVienId": 1,
+            },
+        ),
+        (
+            "post",
+            "/academic/schedules/1/cancel",
+            {"lyDo": "Giảng viên bận"},
+        ),
+        (
+            "post",
+            "/academic/schedule-notifications/retry",
+            {},
+        ),
+    ],
+)
+def test_schedule_write_endpoints_reject_users_without_permission(
+    method: str,
+    path: str,
+    payload: dict,
+):
+    class DenyingPermissionDatabase:
+        def execute(self, _query, _parameters):
+            return SimpleNamespace(first=lambda: None)
+
+    test_app = FastAPI()
+    test_app.include_router(schedules_router.router)
+    test_app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        NguoiDungId=3
+    )
+    test_app.dependency_overrides[get_db] = DenyingPermissionDatabase
+
+    with TestClient(test_app) as client:
+        response = client.request(method, path, json=payload)
+
+    assert response.status_code == 403
 
 
 def test_schedule_writes_acquire_transaction_owned_sql_server_lock():
@@ -261,6 +357,26 @@ def test_create_update_and_persist_schedule_history(db: Session):
             gioKetThuc="10:00",
             giangVienId=1,
         )
+    with pytest.raises(ValidationError, match="ngayHoc"):
+        LichHocWrite(
+            lopHocId=1,
+            monHocId=1,
+            ngayHoc="not-a-date",
+            gioBatDau="09:00",
+            gioKetThuc="10:00",
+            phongHocId=1,
+            giangVienId=1,
+        )
+    with pytest.raises(ValidationError, match="không kèm múi giờ"):
+        LichHocWrite(
+            lopHocId=1,
+            monHocId=1,
+            ngayHoc=date.today(),
+            gioBatDau=time(9, tzinfo=timezone.utc),
+            gioKetThuc=time(10),
+            phongHocId=1,
+            giangVienId=1,
+        )
 def test_update_schedule_rejects_any_recorded_attendance_without_changes(
     db: Session,
 ):
@@ -311,6 +427,72 @@ def test_update_schedule_rejects_any_recorded_attendance_without_changes(
     assert db.query(DiemDanh).filter(
         DiemDanh.LichHocId == schedule["lichHocId"]
     ).count() == 1
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == schedule["lichHocId"]
+    ).all()
+    assert [item.HanhDong for item in history] == ["Tạo"]
+    assert db.query(LichHocThongBao).count() == 0
+
+
+def test_update_schedule_not_found_returns_404(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+
+    with pytest.raises(HTTPException) as caught:
+        update_schedule(
+            999,
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+            ),
+            teacher,
+            db,
+        )
+
+    assert caught.value.status_code == 404
+
+
+def test_update_schedule_rejects_unknown_room_and_instructor(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+    invalid_references = (
+        (999, teacher.NguoiDungId),
+        (room.PhongHocId, 999),
+    )
+    for invalid_room_id, invalid_teacher_id in invalid_references:
+        with pytest.raises(HTTPException) as caught:
+            update_schedule(
+                schedule["lichHocId"],
+                schedule_request(
+                    class_record.LopHocId,
+                    subject.MonHocId,
+                    invalid_room_id,
+                    invalid_teacher_id,
+                    start=time(11),
+                    end=time(12),
+                ),
+                teacher,
+                db,
+            )
+        assert caught.value.status_code == 422
+
+    saved_schedule = db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one()
+    assert saved_schedule.PhongHocId == room.PhongHocId
+    assert saved_schedule.GiangVienId == teacher.NguoiDungId
     history = db.query(LichHocLichSu).filter(
         LichHocLichSu.LichHocId == schedule["lichHocId"]
     ).all()
@@ -935,6 +1117,7 @@ def test_update_schedule_rolls_back_schedule_and_history_on_commit_error(
         LichHocLichSu.LichHocId == schedule["lichHocId"]
     ).all()
     assert [item.HanhDong for item in history] == ["Tạo"]
+    assert db.query(LichHocThongBao).count() == 0
 
 
 def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
@@ -951,6 +1134,8 @@ def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
     )
     with pytest.raises(ValidationError, match="Vui lòng nhập lý do hủy"):
         LichHocCancel(lyDo="   ")
+    with pytest.raises(ValidationError):
+        LichHocCancel()
 
     cancelled = cancel_schedule(
         schedule["lichHocId"],
@@ -1245,6 +1430,62 @@ def test_failed_schedule_notification_can_be_retried_without_duplicate_rows(
     ) == {"processed": 0, "sent": 0, "failed": 0}
 
 
+def test_schedule_notification_retries_stop_at_the_configured_limit(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+    attempts = []
+
+    def always_fail(_email, _name, _content):
+        attempts.append(True)
+        raise RuntimeError("SMTP unavailable")
+
+    monkeypatch.setattr(
+        schedule_notifications,
+        "send_schedule_change_email",
+        always_fail,
+    )
+    update_schedule(
+        schedule["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            start=time(11),
+            end=time(12),
+        ),
+        teacher,
+        db,
+    )
+    for _ in range(2):
+        result = schedule_notifications.process_schedule_notifications(
+            db,
+            retry_failed=True,
+        )
+        assert result == {"processed": 1, "sent": 0, "failed": 1}
+
+    assert schedule_notifications.process_schedule_notifications(
+        db,
+        retry_failed=True,
+    ) == {"processed": 0, "sent": 0, "failed": 0}
+    notification = db.query(LichHocThongBao).one()
+    assert notification.TrangThai == "Thất bại"
+    assert notification.SoLanGui == 3
+    assert len(attempts) == 3
+
+
 def test_schedule_notification_is_not_created_for_no_op_update(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     schedule = create_schedule(
@@ -1362,7 +1603,10 @@ def test_list_schedules_only_returns_accessible_class_schedules(db: Session):
     assert options["diemDanhDuocHoTro"] is True
 
 
-def test_attendance_persists_status_and_uses_session_date_roster(db: Session):
+def test_attendance_persists_status_and_uses_session_date_roster(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
     teacher, room, subject, class_record = setup_schedule_context(db)
     first_student = add_user(db, 20, 2, "Học viên được điểm danh")
     withdrawn_student = add_user(db, 21, 2, "Học viên đã thôi học")
@@ -1406,6 +1650,12 @@ def test_attendance_persists_status_and_uses_session_date_roster(db: Session):
     )
 
     roster = get_schedule_attendance(schedule["lichHocId"], teacher, db)
+    lock_calls = []
+    monkeypatch.setattr(
+        schedules_router,
+        "_acquire_schedule_write_lock",
+        lambda session: lock_calls.append(session),
+    )
     saved = update_schedule_attendance(
         schedule["lichHocId"],
         DiemDanhWrite(
@@ -1430,6 +1680,7 @@ def test_attendance_persists_status_and_uses_session_date_roster(db: Session):
     assert queried["hocViens"][0]["ghiChu"] == "Đến sau giờ bắt đầu"
     assert queried["hocViens"][0]["nguoiDiemDanh"] == teacher.HoTen
     assert db.query(DiemDanh).count() == 1
+    assert lock_calls == [db]
 
     with pytest.raises(HTTPException) as error:
         update_schedule_attendance(

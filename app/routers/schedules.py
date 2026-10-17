@@ -1023,6 +1023,7 @@ def update_schedule_attendance(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _acquire_schedule_write_lock(db)
     schedule = _get_schedule_or_404(db, schedule_id)
     _ensure_attendance_scope(db, schedule, current_user)
     if schedule.TrangThai != SCHEDULED:
