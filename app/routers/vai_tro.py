@@ -18,6 +18,7 @@ from app.schemas.role_permissions import RolePermissionsUpdate
 from app.services.rbac_service import (
     list_user_permissions,
     list_permission_catalog,
+    normalize_permission_code,
     replace_role_permissions,
 )
 
@@ -136,7 +137,7 @@ def get_role_permissions(
     return [
         {
             "quyenId": permission.QuyenId,
-            "maQuyen": permission.MaQuyen,
+            "maQuyen": normalize_permission_code(permission.MaQuyen),
             "tenQuyen": permission.TenQuyen,
             "moTa": permission.MoTa,
         }

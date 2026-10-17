@@ -64,6 +64,30 @@ PERMISSION_CATALOG = (
     ("LEAD_ASSIGN", "Phân công tư vấn", "Phân công khách hàng tiềm năng cho tư vấn viên."),
 )
 
+LEGACY_PERMISSION_ALIASES = {
+    "DANG_NHAP": "USER_VIEW",
+    "DAT_LAI_MAT_KHAU": "USER_UPDATE",
+    "DOI_MAT_KHAU": "STUDENT_PROFILE_UPDATE",
+    "DIEM_DANH": "GRADE_VIEW",
+    "GAN_VAI_TRO": "ROLE_UPDATE",
+    "KHOA_TAI_KHOAN": "USER_LOCK",
+    "QUAN_LY_TAI_KHOAN": "USER_VIEW",
+}
+
+
+def normalize_permission_code(code: str) -> str:
+    return LEGACY_PERMISSION_ALIASES.get(code.strip(), code.strip())
+
+
+def normalize_permission_codes(permission_codes: list[str]) -> list[str]:
+    normalized = set()
+    for code in permission_codes:
+        if not isinstance(code, str):
+            continue
+        normalized.add(normalize_permission_code(code))
+    return sorted(normalized)
+
+
 DEFAULT_ROLE_PERMISSIONS = {
     1: (),
     2: ("GRADE_VIEW", "TUITION_VIEW"),
@@ -233,8 +257,8 @@ def replace_role_permissions(
     if role is None:
         raise ValueError("Vai trò không tồn tại.")
 
+    requested_codes = set(normalize_permission_codes(permission_codes))
     available_codes = {code for code, _name, _description in PERMISSION_CATALOG}
-    requested_codes = set(permission_codes)
     unknown_codes = requested_codes - available_codes
     if unknown_codes:
         raise ValueError(
@@ -306,11 +330,15 @@ def list_user_permissions(db: Session, user_id: int) -> list[dict[str, str | int
         .order_by(Quyen.QuyenId)
         .all()
     )
-    unique_permissions = {permission.MaQuyen: permission for permission in permissions}
+    unique_permissions: dict[str, Quyen] = {}
+    for permission in permissions:
+        code = normalize_permission_code(permission.MaQuyen)
+        unique_permissions.setdefault(code, permission)
+
     return [
         {
             "quyenId": permission.QuyenId,
-            "maQuyen": permission.MaQuyen,
+            "maQuyen": normalize_permission_code(permission.MaQuyen),
             "tenQuyen": permission.TenQuyen,
         }
         for permission in unique_permissions.values()

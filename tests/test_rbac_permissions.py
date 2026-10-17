@@ -8,6 +8,7 @@ from app.models.vai_tro_quyen import VaiTroQuyen
 from app.services.rbac_service import (
     DEFAULT_ROLE_PERMISSIONS,
     PERMISSION_CATALOG,
+    normalize_permission_codes,
 )
 
 
@@ -150,6 +151,25 @@ def test_catalog_contains_all_eight_business_role_defaults():
     assert {"ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"} <= set(
         DEFAULT_ROLE_PERMISSIONS[7]
     )
+
+
+def test_legacy_permission_codes_are_normalized_to_current_catalog():
+    normalized = normalize_permission_codes(
+        [
+            "DANG_NHAP",
+            "DOI_MAT_KHAU",
+            "GAN_VAI_TRO",
+            "KHOA_TAI_KHOAN",
+            "USER_VIEW",
+        ],
+    )
+
+    assert set(normalized) == {
+        "ROLE_UPDATE",
+        "STUDENT_PROFILE_UPDATE",
+        "USER_LOCK",
+        "USER_VIEW",
+    }
 
 
 def test_role_permission_model_uses_existing_composite_primary_key():

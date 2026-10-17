@@ -1532,6 +1532,57 @@ def get_student_academic_profile(
         if actor_ids
         else {}
     )
+
+    today = date.today()
+    status_labels = {
+        "BaoLuu": ("Sắp bảo lưu", "Bảo lưu"),
+        "ChuyenLop": ("Sắp chuyển lớp", "Đã chuyển lớp"),
+        "ThoiHoc": ("Sắp thôi học", "Thôi học"),
+    }
+    ended_class_ids = {
+        action.LopHocId
+        for action in action_rows
+        if action.NgayHieuLuc <= today
+    }
+    current_classes = [
+        item
+        for item in classes
+        if item.TrangThai in {"Chuẩn bị", "Đang học", "Đang hoạt động"}
+        and item.LopHocId not in ended_class_ids
+    ]
+    pending_actions = [
+        action for action in action_rows if action.NgayHieuLuc > today
+    ]
+    effective_actions = [
+        action for action in action_rows if action.NgayHieuLuc <= today
+    ]
+    current_action_id = None
+    if current_classes and pending_actions:
+        latest_action = min(
+            pending_actions,
+            key=lambda item: (item.NgayHieuLuc, item.ActionId),
+        )
+        status_label = status_labels[latest_action.LoaiThaoTac][0]
+        effective_date = latest_action.NgayHieuLuc
+        current_action_id = latest_action.ActionId
+    elif current_classes:
+        status_label = "Đang học"
+        effective_date = None
+    elif effective_actions:
+        latest_action = max(
+            effective_actions,
+            key=lambda item: (item.NgayHieuLuc, item.ActionId),
+        )
+        status_label = status_labels[latest_action.LoaiThaoTac][1]
+        effective_date = latest_action.NgayHieuLuc
+        current_action_id = latest_action.ActionId
+    elif classes:
+        status_label = "Đã kết thúc"
+        effective_date = None
+    else:
+        status_label = "Chưa ghi danh"
+        effective_date = None
+
     return {
         "hocVien": {
             "nguoiDungId": student.NguoiDungId,
@@ -1546,23 +1597,64 @@ def get_student_academic_profile(
             "maHocVien": conversion.MaHocVien if conversion else None,
             "ngayNhapHoc": conversion.NgayNhapHoc if conversion else None,
         },
+        "tinhTrangHienTai": {
+            "trangThaiGhiDanh": status_label,
+            "ngayHieuLuc": (
+                effective_date.isoformat()
+                if hasattr(effective_date, "isoformat")
+                else (str(effective_date) if effective_date else None)
+            ),
+            "currentActionId": current_action_id,
+            "lopHocHienTai": (
+                {
+                    "lopHocId": current_classes[0].LopHocId,
+                    "maLop": current_classes[0].MaLop,
+                    "tenLop": current_classes[0].TenLop,
+                }
+                if current_classes
+                else None
+            ),
+        },
         "lopHocs": class_history,
         "thaoTacs": [
             {
                 "actionId": item.ActionId,
                 "loaiThaoTac": item.LoaiThaoTac,
-                "ngayHieuLuc": item.NgayHieuLuc,
+                "ngayHieuLuc": (
+                    item.NgayHieuLuc.isoformat()
+                    if hasattr(item.NgayHieuLuc, "isoformat")
+                    else str(item.NgayHieuLuc)
+                ),
                 "lyDo": item.LyDo,
                 "lopHocId": item.LopHocId,
-                "maLop": action_classes[item.LopHocId].MaLop,
+                "maLop": (
+                    action_classes[item.LopHocId].MaLop
+                    if item.LopHocId in action_classes
+                    else "—"
+                ),
+                "tenLop": (
+                    action_classes[item.LopHocId].TenLop
+                    if item.LopHocId in action_classes
+                    else None
+                ),
                 "lopHocDichId": item.LopHocDichId,
                 "maLopDich": (
                     action_classes[item.LopHocDichId].MaLop
                     if item.LopHocDichId in action_classes
                     else None
                 ),
+                "tenLopDich": (
+                    action_classes[item.LopHocDichId].TenLop
+                    if item.LopHocDichId in action_classes
+                    else None
+                ),
                 "nguoiThucHien": action_actors.get(item.NguoiThucHienId),
-                "ngayTao": item.NgayTao,
+                "ngayTao": (
+                    item.NgayTao.isoformat()
+                    if hasattr(item.NgayTao, "isoformat")
+                    else (str(item.NgayTao) if item.NgayTao else None)
+                ),
+                "isCurrent": item.ActionId == current_action_id,
             }
             for item in action_rows
         ],
