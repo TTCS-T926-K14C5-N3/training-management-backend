@@ -10,7 +10,10 @@ from app.core.security import require_permission
 from app.schemas.thoi_khoa_bieu import (
     SinhThoiKhoaBieuRequest,
     BuoiHocPreviewItem,
-    LuuThoiKhoaBieuRequest
+
+    LuuThoiKhoaBieuRequest,
+    GanBaiHocRequest
+
 )
 router = APIRouter(
     prefix="/thoi-khoa-bieu",
@@ -139,4 +142,37 @@ def save_thoi_khoa_bieu(
     return {
         "message": f"Đã lưu thành công {len(danh_sach_db)} buổi học vào hệ thống!",
         "tongSoBuoi": len(danh_sach_db)
+
+    }
+# API Gắn bài học vào một buổi học cụ thể
+@router.put(
+    "/{thoi_khoa_bieu_id}/gan-bai-hoc",
+    summary="Gắn bài học vào buổi học trong thời khóa biểu (SCRUM-373)",
+    dependencies=[Depends(require_permission("SCHEDULE_MANAGE"))]
+)
+def gan_bai_hoc(
+    thoi_khoa_bieu_id: int,
+    request: GanBaiHocRequest,
+    db: Session = Depends(get_db)
+):
+    buoi_hoc = db.query(ThoiKhoaBieu).filter(ThoiKhoaBieu.ThoiKhoaBieuId == thoi_khoa_bieu_id).first()
+    if not buoi_hoc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy buổi học trong thời khóa biểu"
+        )
+
+    if request.bai_hoc_id is not None:
+        buoi_hoc.BaiHocId = request.bai_hoc_id
+    if request.noi_dung_bai_hoc is not None:
+        buoi_hoc.NoiDungBaiHoc = request.noi_dung_bai_hoc
+
+    db.commit()
+    db.refresh(buoi_hoc)
+    return {
+        "message": "Gắn bài học thành công!",
+        "thoiKhoaBieuId": buoi_hoc.ThoiKhoaBieuId,
+        "baiHocId": buoi_hoc.BaiHocId,
+        "noiDungBaiHoc": buoi_hoc.NoiDungBaiHoc
+
     }
