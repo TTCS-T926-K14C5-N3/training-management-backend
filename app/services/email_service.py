@@ -13,6 +13,43 @@ from app.core.config import (
 
 
 # ============================================================
+# GỬI EMAIL QUA SMTP
+# ============================================================
+
+def _send_email(
+    message: EmailMessage,
+    error_label: str,
+):
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        raise RuntimeError(
+            "Chưa cấu hình SMTP_USERNAME hoặc SMTP_PASSWORD"
+        )
+
+    try:
+        with smtplib.SMTP(
+            SMTP_HOST,
+            SMTP_PORT,
+            timeout=30,
+        ) as server:
+
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+
+            server.login(
+                SMTP_USERNAME,
+                SMTP_PASSWORD,
+            )
+
+            server.send_message(message)
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"{error_label}: {exc}"
+        ) from exc
+
+
+# ============================================================
 # GỬI EMAIL ĐẶT LẠI MẬT KHẨU
 # ============================================================
 
@@ -20,11 +57,6 @@ def send_reset_password_email(
     recipient_email: str,
     reset_link: str,
 ):
-    if not SMTP_USERNAME or not SMTP_PASSWORD:
-        raise RuntimeError(
-            "Chưa cấu hình SMTP_USERNAME hoặc SMTP_PASSWORD"
-        )
-
     message = EmailMessage()
 
     message["Subject"] = (
@@ -59,28 +91,10 @@ Email: {ADMIN_CONTACT_EMAIL}
 """
     )
 
-    try:
-        with smtplib.SMTP(
-            SMTP_HOST,
-            SMTP_PORT,
-            timeout=30,
-        ) as server:
-
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-
-            server.login(
-                SMTP_USERNAME,
-                SMTP_PASSWORD,
-            )
-
-            server.send_message(message)
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"Không thể gửi email đặt lại mật khẩu: {exc}"
-        ) from exc
+    _send_email(
+        message,
+        "Không thể gửi email đặt lại mật khẩu",
+    )
 
 
 # ============================================================
@@ -94,15 +108,10 @@ def send_activation_email(
     activation_link: str,
     ma_hoc_vien: str | None = None,
 ):
-    if not SMTP_USERNAME or not SMTP_PASSWORD:
-        raise RuntimeError(
-            "Chưa cấu hình SMTP_USERNAME hoặc SMTP_PASSWORD"
-        )
-
     message = EmailMessage()
 
     message["Subject"] = (
-        "Kích hoạt tài khoản - Hệ thống quản lý đào tạo"
+        "Thông tin tài khoản - Hệ thống quản lý đào tạo"
     )
 
     message["From"] = SMTP_FROM
@@ -111,24 +120,29 @@ def send_activation_email(
     message.set_content(
         f"""Xin chào {ho_ten},
 
-Tài khoản của bạn đã được tạo trên
-Hệ thống quản lý đào tạo.
+Quản trị viên đã tạo tài khoản cho bạn
+trên Hệ thống quản lý đào tạo.
 
-Thông tin đăng nhập:
-
+THÔNG TIN ĐĂNG NHẬP
+-------------------------
 Email: {recipient_email}
 Mật khẩu tạm thời: {temporary_password}
 {f"Mã học viên: {ma_hoc_vien}" if ma_hoc_vien else ""}
 
-Vui lòng nhấn vào liên kết dưới đây để kích hoạt tài khoản:
+KÍCH HOẠT TÀI KHOẢN
+-------------------------
+Vui lòng nhấn vào liên kết dưới đây:
 
 {activation_link}
 
-Sau khi kích hoạt, bạn có thể sử dụng email
-và mật khẩu tạm thời để đăng nhập vào hệ thống.
+Sau khi kích hoạt, bạn sẽ được chuyển đến
+trang đăng nhập của hệ thống.
 
-Vui lòng đổi mật khẩu sau lần đăng nhập đầu tiên
-để bảo mật tài khoản.
+Hãy sử dụng Email và mật khẩu tạm thời ở trên
+để đăng nhập.
+
+Sau lần đăng nhập đầu tiên, hệ thống sẽ yêu cầu
+bạn đổi sang mật khẩu mới.
 
 Nếu bạn không yêu cầu tạo tài khoản này,
 vui lòng liên hệ quản trị viên.
@@ -142,25 +156,7 @@ Email: {ADMIN_CONTACT_EMAIL}
 """
     )
 
-    try:
-        with smtplib.SMTP(
-            SMTP_HOST,
-            SMTP_PORT,
-            timeout=30,
-        ) as server:
-
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-
-            server.login(
-                SMTP_USERNAME,
-                SMTP_PASSWORD,
-            )
-
-            server.send_message(message)
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"Không thể gửi email kích hoạt tài khoản: {exc}"
-        ) from exc
+    _send_email(
+        message,
+        "Không thể gửi email tạo tài khoản",
+    )

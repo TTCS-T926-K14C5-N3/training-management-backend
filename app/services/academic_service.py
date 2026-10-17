@@ -191,6 +191,25 @@ def ensure_active_instructor(db: Session, user_id: int) -> NguoiDung:
     return teacher
 
 
+def ensure_active_teaching_role(
+    db: Session,
+    user_id: int,
+    required_role_id: int,
+) -> NguoiDung:
+    teacher = (
+        db.query(NguoiDung)
+        .filter(
+            NguoiDung.NguoiDungId == user_id,
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
+        )
+        .first()
+    )
+    if teacher is None or required_role_id not in user_role_ids(db, user_id):
+        role_name = "giảng viên chính" if required_role_id == INSTRUCTOR_ROLE_ID else "trợ giảng"
+        raise ValueError(f"Tài khoản không có vai trò {role_name} hoặc chưa hoạt động.")
+    return teacher
+
+
 def ensure_active_subjects(db: Session, subject_ids: list[int]) -> list[MonHoc]:
     requested_ids = set(subject_ids)
     if len(requested_ids) != len(subject_ids):

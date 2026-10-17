@@ -105,15 +105,31 @@ def test_forgot_password_reports_mail_delivery_failure(monkeypatch):
         fail_to_send,
     )
 
-    with pytest.raises(HTTPException) as error:
-        auth_service.forgot_password(
-            db,
-            auth_service.ForgotPasswordRequest(email=user.Email),
-        )
+    response = auth_service.forgot_password(
+        db,
+        auth_service.ForgotPasswordRequest(email=user.Email),
+    )
 
-    assert error.value.status_code == 503
+    assert response["message"] == (
+        "Nếu email tồn tại trong hệ thống, "
+        "hướng dẫn đặt lại mật khẩu đã được gửi."
+    )
     assert len(db.added) == 1
     assert db.deleted == db.added
+
+
+def test_forgot_password_uses_same_response_for_unknown_email():
+    db = FakeSession(None)
+
+    response = auth_service.forgot_password(
+        db,
+        auth_service.ForgotPasswordRequest(email="unknown@example.com"),
+    )
+
+    assert response["message"] == (
+        "Nếu email tồn tại trong hệ thống, "
+        "hướng dẫn đặt lại mật khẩu đã được gửi."
+    )
 
 
 def test_forgot_password_uses_configured_frontend_url(monkeypatch):

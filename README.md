@@ -48,6 +48,9 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_seed_sprint3_permissions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_student_profiles.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedules.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_sprint3_class_enrichment.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_attendance.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -58,6 +61,10 @@ hoặc kho mã nguồn).
 Ứng dụng tự bổ sung các quyền `SCHEDULE_VIEW`, `SCHEDULE_CREATE` và
 `SCHEDULE_UPDATE` khi khởi động. Giảng viên/trợ giảng mặc định được xem lịch;
 quản lý đào tạo và quản trị viên có quyền tạo, cập nhật và hủy buổi học.
+`013_sprint3_class_enrichment.sql` cập nhật loại phòng cho luồng lớp học;
+`016_assignments.sql` tạo các bảng bài tập/bài nộp/chấm điểm và quyền bài tập;
+`017_attendance.sql` tạo bảng điểm danh, đơn xin vắng, lịch sử, ngưỡng vắng
+và thông báo. Chạy các migration này trước khi sử dụng các màn hình tương ứng.
 
 Các hợp đồng API chính (các trường JSON dùng camelCase):
 

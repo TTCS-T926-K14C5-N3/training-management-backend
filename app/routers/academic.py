@@ -47,7 +47,7 @@ from app.services.academic_service import (
     accessible_grades_query,
     build_prerequisite_map,
     can_access_class,
-    ensure_active_instructor,
+    ensure_active_teaching_role,
     ensure_active_student,
     ensure_active_subjects,
     ensure_valid_academic_year,
@@ -204,6 +204,7 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
         "maPhong": room.MaPhong if room else None,
         "tenPhong": room.TenPhong if room else None,
         "sucChuaPhong": room.SucChua if room else None,
+        "loaiPhong": room.LoaiPhong if room else None,
         "canhBaoSucChuaPhong": (
             room is not None and len(students) > room.SucChua
         ),
@@ -349,6 +350,21 @@ def _apply_class_write(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Phòng học không tồn tại hoặc đã ngừng hoạt động.",
             )
+        expected_room_type = (
+            "Trực tuyến"
+            if request.hinh_thuc == "Trực tuyến"
+            else "Trực tiếp"
+        )
+        if room.LoaiPhong != expected_room_type:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Loại phòng không phù hợp với hình thức học của lớp.",
+            )
+        if len(student_ids) > room.SucChua:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Số học viên vượt quá sức chứa của phòng học.",
+            )
     if request.hinh_thuc == "Trực tuyến" and not request.link_truc_tuyen:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -357,12 +373,25 @@ def _apply_class_write(
 
     try:
         if request.giang_vien_id is not None:
-            ensure_active_instructor(db, request.giang_vien_id)
+            ensure_active_teaching_role(
+                db,
+                request.giang_vien_id,
+                INSTRUCTOR_ROLE_ID,
+            )
         for student_id in sorted(student_ids):
             ensure_active_student(db, student_id)
         ensure_active_subjects(db, request.mon_hoc_ids)
         for assignment in request.phan_cong_giang_vien:
-            ensure_active_instructor(db, assignment.giang_vien_id)
+            required_role_id = (
+                INSTRUCTOR_ROLE_ID
+                if assignment.vai_tro == "Chính"
+                else ASSISTANT_ROLE_ID
+            )
+            ensure_active_teaching_role(
+                db,
+                assignment.giang_vien_id,
+                required_role_id,
+            )
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -427,7 +456,7 @@ def _apply_class_write(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Chỉ được phân công giảng viên cho môn học đã gắn với lớp.",
         )
-    for subject_id in {subject_id for subject_id, _, _ in requested_assignments}:
+    for subject_id in request.mon_hoc_ids:
         subject_assignments = [
             role for assigned_subject, _, role in requested_assignments
             if assigned_subject == subject_id
@@ -435,7 +464,7 @@ def _apply_class_write(
         if subject_assignments.count("Chính") != 1:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Mỗi môn có phân công cần đúng một giảng viên chính.",
+                detail="Mỗi môn học của lớp cần đúng một giảng viên chính.",
             )
     removed_subjects = current_subjects - set(request.mon_hoc_ids)
     if removed_subjects:
@@ -635,6 +664,7 @@ def list_rooms(db: Session = Depends(get_db)):
             "maPhong": room.MaPhong,
             "tenPhong": room.TenPhong,
             "sucChua": room.SucChua,
+            "loaiPhong": room.LoaiPhong,
             "trangThai": room.TrangThai,
         }
         for room in db.query(PhongHoc).order_by(PhongHoc.MaPhong).all()
@@ -651,6 +681,7 @@ def create_room(request: RoomWrite, db: Session = Depends(get_db)):
         MaPhong=request.ma_phong,
         TenPhong=request.ten_phong,
         SucChua=request.suc_chua,
+        LoaiPhong=request.loai_phong,
         TrangThai="Đang hoạt động",
     )
     db.add(room)
@@ -660,6 +691,7 @@ def create_room(request: RoomWrite, db: Session = Depends(get_db)):
         "maPhong": room.MaPhong,
         "tenPhong": room.TenPhong,
         "sucChua": room.SucChua,
+        "loaiPhong": room.LoaiPhong,
         "trangThai": room.TrangThai,
     }
 
@@ -678,12 +710,35 @@ def update_room(room_id: int, request: RoomWrite, db: Session = Depends(get_db))
     room.MaPhong = request.ma_phong
     room.TenPhong = request.ten_phong
     room.SucChua = request.suc_chua
+    room.LoaiPhong = request.loai_phong
+    for lop_hoc in (
+        db.query(LopHoc)
+        .filter(LopHoc.PhongHocId == room_id)
+        .all()
+    ):
+        enrolled_count = (
+            db.query(LopHocHocVien)
+            .filter(LopHocHocVien.LopHocId == lop_hoc.LopHocId)
+            .count()
+        )
+        expected_room_type = (
+            "Trực tuyến"
+            if lop_hoc.HinhThuc == "Trực tuyến"
+            else "Trực tiếp"
+        )
+        if enrolled_count > room.SucChua or room.LoaiPhong != expected_room_type:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Sức chứa hoặc loại phòng không phù hợp với lớp đang sử dụng.",
+            )
     _commit(db, "Mã phòng đã tồn tại hoặc thông tin phòng không hợp lệ.")
     return {
         "phongHocId": room.PhongHocId,
         "maPhong": room.MaPhong,
         "tenPhong": room.TenPhong,
         "sucChua": room.SucChua,
+        "loaiPhong": room.LoaiPhong,
         "trangThai": room.TrangThai,
     }
 
@@ -780,6 +835,7 @@ def get_class_options(db: Session = Depends(get_db)):
                 "maPhong": room.MaPhong,
                 "tenPhong": room.TenPhong,
                 "sucChua": room.SucChua,
+                "loaiPhong": room.LoaiPhong,
             }
             for room in rooms
         ],
@@ -935,10 +991,21 @@ def enroll_students(
             ),
         )
     new_ids = set(request.hoc_vien_ids) - existing_ids
-    if len(existing_ids) + len(new_ids) > lop_hoc.SiSoToiDa:
+    room = (
+        db.query(PhongHoc)
+        .filter(PhongHoc.PhongHocId == lop_hoc.PhongHocId)
+        .first()
+        if lop_hoc.PhongHocId is not None
+        else None
+    )
+    effective_capacity = min(
+        lop_hoc.SiSoToiDa,
+        room.SucChua if room is not None else lop_hoc.SiSoToiDa,
+    )
+    if len(existing_ids) + len(new_ids) > effective_capacity:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Số học viên vượt quá sĩ số tối đa của lớp.",
+            detail="Số học viên vượt quá sĩ số tối đa của lớp hoặc sức chứa phòng.",
         )
     try:
         for student_id in sorted(new_ids):
