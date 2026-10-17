@@ -3,7 +3,6 @@ fastapi[standard]
 sqlalchemy
 pyodbc
 python-dotenv
-tzdata
 pwdlib[argon2]
 email-validator
 PyJWT

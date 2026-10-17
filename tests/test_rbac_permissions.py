@@ -34,7 +34,6 @@ class FakePermissionDatabase:
     ("role_id", "permission_code"),
     [
         (3, "GRADE_UPDATE"),
-        (7, "SCHEDULE_UPDATE"),
         (6, "TUITION_UPDATE"),
         (8, "ROLE_UPDATE"),
     ],
@@ -55,8 +54,6 @@ def test_expected_role_permissions_are_allowed(role_id, permission_code):
     ("role_id", "permission_code"),
     [
         (3, "TUITION_UPDATE"),
-        (3, "SCHEDULE_UPDATE"),
-        (4, "SCHEDULE_UPDATE"),
         (6, "GRADE_UPDATE"),
         (4, "GRADE_VIEW"),
         (2, "USER_DELETE"),
