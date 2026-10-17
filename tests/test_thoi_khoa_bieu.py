@@ -127,3 +127,7 @@ def test_update_schedule_requires_end_after_start():
 def test_update_schedule_rejects_timezone_aware_local_time():
     with pytest.raises(ValidationError):
         ThoiKhoaBieuUpdate(gioBatDau="10:00:00+07:00")
+def test_loc_thoi_khoa_bieu_unauthorized():
+    # Kiểm tra API lọc thời khóa biểu khi chưa truyền Token xác thực
+    response = client.get("/thoi-khoa-bieu/loc-lich?ngay=2026-10-20")
+    assert response.status_code in [401, 403]

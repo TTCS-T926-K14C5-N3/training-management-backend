@@ -1,7 +1,7 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date 
 from typing import List
-
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -308,4 +308,42 @@ def update_thoi_khoa_bieu(
         "gioKetThuc": buoi_hoc.GioKetThuc,
         "phongHocId": buoi_hoc.PhongHocId,
         "giangVienId": buoi_hoc.GiangVienId,
+    }
+# API Lọc thời khóa biểu theo ngày hoặc theo tuần (SCRUM-407)
+@router.get(
+    "/loc-lich",
+    summary="Lọc thời khóa biểu theo ngày hoặc tuần (SCRUM-407)",
+    dependencies=[Depends(require_permission("SCHEDULE_MANAGE"))]
+)
+def loc_thoi_khoa_bieu(
+    ngay: Optional[date] = None,
+    tu_ngay: Optional[date] = None,
+    den_ngay: Optional[date] = None,
+    lop_hoc_id: Optional[int] = None,
+    giang_vien_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(ThoiKhoaBieu)
+
+    # 1. Lọc theo 1 ngày cụ thể
+    if ngay:
+        query = query.filter(ThoiKhoaBieu.NgayHoc == ngay)
+    # 2. Lọc theo khoảng ngày (Ví dụ: Từ Thứ 2 đến Chủ Nhật của tuần)
+    else:
+        if tu_ngay:
+            query = query.filter(ThoiKhoaBieu.NgayHoc >= tu_ngay)
+        if den_ngay:
+            query = query.filter(ThoiKhoaBieu.NgayHoc <= den_ngay)
+
+    # Lọc bổ sung theo lớp hoặc giảng viên nếu có
+    if lop_hoc_id:
+        query = query.filter(ThoiKhoaBieu.LopHocId == lop_hoc_id)
+    if giang_vien_id:
+        query = query.filter(ThoiKhoaBieu.GiangVienId == giang_vien_id)
+
+    danh_sach = query.order_by(ThoiKhoaBieu.NgayHoc.asc(), ThoiKhoaBieu.GioBatDau.asc()).all()
+
+    return {
+        "tong_so_buoi": len(danh_sach),
+        "danh_sach_buoi_hoc": danh_sach
     }
