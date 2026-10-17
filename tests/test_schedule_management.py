@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
@@ -806,6 +807,122 @@ def test_update_schedule_rejects_conflict_without_changing_existing_schedule(
     ).one()
     assert json.loads(override_history.DuLieuMoi)["xacNhanTrungLich"] is True
     assert override_history.LyDo == "Quản lý chấp thuận xếp lịch đặc biệt."
+
+
+def test_update_schedule_excludes_itself_and_allows_adjacent_slots(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    day = date.today() + timedelta(days=14)
+    first = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(9),
+            end=time(10),
+        ),
+        teacher,
+        db,
+    )
+    adjacent = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(10),
+            end=time(11),
+        ),
+        teacher,
+        db,
+    )
+
+    unchanged = update_schedule(
+        first["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(9),
+            end=time(10),
+        ),
+        teacher,
+        db,
+    )
+    adjacent_update = update_schedule(
+        adjacent["lichHocId"],
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+            start=time(10),
+            end=time(11),
+        ),
+        teacher,
+        db,
+    )
+
+    assert unchanged["gioBatDau"] == "09:00"
+    assert adjacent_update["gioBatDau"] == "10:00"
+    assert adjacent_update["gioKetThuc"] == "11:00"
+
+
+def test_update_schedule_rolls_back_schedule_and_history_on_commit_error(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+
+    def fail_commit():
+        raise IntegrityError(
+            "UPDATE LichHoc",
+            {},
+            RuntimeError("simulated constraint failure"),
+        )
+
+    monkeypatch.setattr(db, "commit", fail_commit)
+    with pytest.raises(HTTPException) as caught:
+        update_schedule(
+            schedule["lichHocId"],
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+                start=time(11),
+                end=time(12),
+            ),
+            teacher,
+            db,
+        )
+    monkeypatch.undo()
+
+    assert caught.value.status_code == 409
+    saved_schedule = db.query(LichHoc).filter(
+        LichHoc.LichHocId == schedule["lichHocId"]
+    ).one()
+    assert saved_schedule.GioBatDau == time(9)
+    assert saved_schedule.GioKetThuc == time(10)
+    history = db.query(LichHocLichSu).filter(
+        LichHocLichSu.LichHocId == schedule["lichHocId"]
+    ).all()
+    assert [item.HanhDong for item in history] == ["Tạo"]
 
 
 def test_cancel_requires_reason_and_writes_audit_entry(db: Session):
