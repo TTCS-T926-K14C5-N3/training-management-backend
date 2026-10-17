@@ -1,22 +1,81 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta, timezone
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.security import get_current_user, require_permission
 from app.database import get_db
-from app.models.thoi_khoa_bieu import ThoiKhoaBieu
-from app.schemas.thoi_khoa_bieu import SinhThoiKhoaBieuRequest
-from app.core.security import require_permission
-from app.schemas.thoi_khoa_bieu import (
-    SinhThoiKhoaBieuRequest,
-    BuoiHocPreviewItem,
-    LuuThoiKhoaBieuRequest,
-    GanBaiHocRequest
+from app.models.nguoi_dung import NguoiDung
+from app.models.phong_hoc import PhongHoc
+from app.models.thoi_khoa_bieu import (
+    ThoiKhoaBieu,
+    ThoiKhoaBieuDiemDanh,
+    ThoiKhoaBieuLichSu,
 )
+from app.schemas.thoi_khoa_bieu import (
+    BuoiHocPreviewItem,
+    GanBaiHocRequest,
+    LuuThoiKhoaBieuRequest,
+    SinhThoiKhoaBieuRequest,
+    ThoiKhoaBieuUpdate,
+)
+from app.services.academic_service import ensure_active_instructor
+
+
 router = APIRouter(
     prefix="/thoi-khoa-bieu",
     tags=["Quản lý Thời khóa biểu"]
 )
+
+
+def _get_session_or_404(db: Session, session_id: int) -> ThoiKhoaBieu:
+    session = db.query(ThoiKhoaBieu).filter(
+        ThoiKhoaBieu.ThoiKhoaBieuId == session_id
+    ).first()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy buổi học trong thời khóa biểu.",
+        )
+    return session
+
+
+def _session_snapshot(session: ThoiKhoaBieu) -> dict[str, object]:
+    return {
+        "lopHocId": session.LopHocId,
+        "monHocId": session.MonHocId,
+        "giangVienId": session.GiangVienId,
+        "phongHocId": session.PhongHocId,
+        "ngayHoc": session.NgayHoc.isoformat(),
+        "gioBatDau": session.GioBatDau.isoformat(),
+        "gioKetThuc": session.GioKetThuc.isoformat(),
+        "trangThai": session.TrangThai,
+    }
+
+
+def _ensure_active_room(db: Session, room_id: int) -> None:
+    room = db.query(PhongHoc).filter(
+        PhongHoc.PhongHocId == room_id,
+        PhongHoc.TrangThai == "Đang hoạt động",
+    ).first()
+    if room is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Phòng học không tồn tại hoặc đã ngừng hoạt động.",
+        )
+
+
+def _ensure_active_instructor(db: Session, instructor_id: int) -> None:
+    try:
+        ensure_active_instructor(db, instructor_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(error),
+        ) from error
+
 
 @router.post(
     "/sinh-tu-dong",
@@ -152,12 +211,7 @@ def gan_bai_hoc(
     request: GanBaiHocRequest,
     db: Session = Depends(get_db)
 ):
-    buoi_hoc = db.query(ThoiKhoaBieu).filter(ThoiKhoaBieu.ThoiKhoaBieuId == thoi_khoa_bieu_id).first()
-    if not buoi_hoc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Không tìm thấy buổi học trong thời khóa biểu"
-        )
+    buoi_hoc = _get_session_or_404(db, thoi_khoa_bieu_id)
 
     if request.bai_hoc_id is not None:
         buoi_hoc.BaiHocId = request.bai_hoc_id
@@ -171,4 +225,87 @@ def gan_bai_hoc(
         "thoiKhoaBieuId": buoi_hoc.ThoiKhoaBieuId,
         "baiHocId": buoi_hoc.BaiHocId,
         "noiDungBaiHoc": buoi_hoc.NoiDungBaiHoc
+    }
+
+
+@router.put(
+    "/{thoi_khoa_bieu_id}",
+    summary="Cập nhật buổi học trong thời khóa biểu",
+    dependencies=[Depends(require_permission("SCHEDULE_MANAGE"))],
+)
+def update_thoi_khoa_bieu(
+    thoi_khoa_bieu_id: int,
+    request: ThoiKhoaBieuUpdate,
+    db: Session = Depends(get_db),
+    current_user: NguoiDung = Depends(get_current_user),
+):
+    buoi_hoc = _get_session_or_404(db, thoi_khoa_bieu_id)
+    if buoi_hoc.TrangThai == "Đã hủy":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể cập nhật buổi học đã bị hủy.",
+        )
+
+    has_attendance = db.query(ThoiKhoaBieuDiemDanh).filter(
+        ThoiKhoaBieuDiemDanh.ThoiKhoaBieuId == thoi_khoa_bieu_id
+    ).first()
+    if has_attendance is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể cập nhật buổi học đã có dữ liệu điểm danh.",
+        )
+
+    updates = request.model_dump(exclude_unset=True)
+    if "phong_hoc_id" in updates:
+        _ensure_active_room(db, updates["phong_hoc_id"])
+    if "giang_vien_id" in updates:
+        _ensure_active_instructor(db, updates["giang_vien_id"])
+
+    new_start = updates.get("gio_bat_dau", buoi_hoc.GioBatDau)
+    new_end = updates.get("gio_ket_thuc", buoi_hoc.GioKetThuc)
+    if new_end <= new_start:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Giờ kết thúc phải sau giờ bắt đầu.",
+        )
+
+    before = _session_snapshot(buoi_hoc)
+    for field, value in updates.items():
+        setattr(
+            buoi_hoc,
+            {
+                "ngay_hoc": "NgayHoc",
+                "gio_bat_dau": "GioBatDau",
+                "gio_ket_thuc": "GioKetThuc",
+                "phong_hoc_id": "PhongHocId",
+                "giang_vien_id": "GiangVienId",
+            }[field],
+            value,
+        )
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    buoi_hoc.NgayCapNhat = now
+    buoi_hoc.NguoiCapNhatId = current_user.NguoiDungId
+    after = _session_snapshot(buoi_hoc)
+
+    db.add(
+        ThoiKhoaBieuLichSu(
+            ThoiKhoaBieuId=thoi_khoa_bieu_id,
+            HanhDong="Cập nhật",
+            DuLieuCu=json.dumps(before, ensure_ascii=False),
+            DuLieuMoi=json.dumps(after, ensure_ascii=False),
+            ThoiDiem=now,
+            NguoiThucHienId=current_user.NguoiDungId,
+        )
+    )
+    db.commit()
+    db.refresh(buoi_hoc)
+
+    return {
+        "message": "Cập nhật buổi học thành công.",
+        "thoiKhoaBieuId": buoi_hoc.ThoiKhoaBieuId,
+        "ngayHoc": buoi_hoc.NgayHoc,
+        "gioBatDau": buoi_hoc.GioBatDau,
+        "gioKetThuc": buoi_hoc.GioKetThuc,
+        "phongHocId": buoi_hoc.PhongHocId,
+        "giangVienId": buoi_hoc.GiangVienId,
     }

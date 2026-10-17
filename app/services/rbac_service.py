@@ -43,6 +43,7 @@ PERMISSION_CATALOG = (
     ("CLASS_UPDATE", "Sửa lớp học", "Cập nhật lớp học."),
     ("CLASS_DELETE", "Xóa lớp học", "Xóa lớp học."),
     ("QUAN_LY_LOP", "Truy cập quản lý lớp", "Truy cập khu vực quản lý lớp."),
+    ("SCHEDULE_MANAGE", "Quản lý thời khóa biểu", "Tạo và cập nhật các buổi học."),
 )
 
 DEFAULT_ROLE_PERMISSIONS = {
@@ -68,6 +69,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "CLASS_UPDATE",
         "CLASS_DELETE",
         "QUAN_LY_LOP",
+        "SCHEDULE_MANAGE",
     ),
     8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
 }
@@ -146,7 +148,7 @@ def initialize_role_permissions(db: Session) -> None:
 
         db.flush()
         admin_roles = db.query(VaiTro).filter(
-            (VaiTro.VaiTroId == 8) | (VaiTro.VaiTroId == 1) | (VaiTro.TenVaiTro.ilike("%admin%"))
+            (VaiTro.VaiTroId == 8) | (VaiTro.TenVaiTro.ilike("%admin%"))
         ).all()
         for a_role in admin_roles:
             curr_perms = {

@@ -42,3 +42,12 @@ their own grades, instructors can read and edit grades for classes assigned
 to them, and training managers and system administrators have the broader view
 granted to their roles. All API handlers enforce server-side permissions, and
 the service additionally applies these record-level scopes.
+
+## Lesson schedules
+
+Apply `migrations/005_lesson_schedule_foundation.sql` after the academic
+migrations to create lesson sessions, attendance, and session audit history.
+It maps to the existing `PhongHoc` room table and can be rerun without
+recreating existing tables. The `SCHEDULE_MANAGE` permission is granted by
+default to training managers and system administrators. Schedule updates are
+audited and are rejected after attendance has been recorded.

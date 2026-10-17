@@ -81,6 +81,9 @@ def test_catalog_contains_all_eight_business_role_defaults():
     assert "TUITION_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[3]
     assert "GRADE_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[6]
     assert "GRADE_VIEW" not in DEFAULT_ROLE_PERMISSIONS[4]
+    assert "SCHEDULE_MANAGE" not in DEFAULT_ROLE_PERMISSIONS[1]
+    assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[7]
+    assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[8]
     assert {
         "GRADE_VIEW",
         "GRADE_CREATE",

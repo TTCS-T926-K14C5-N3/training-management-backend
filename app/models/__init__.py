@@ -6,3 +6,11 @@ from app.models.revoked_token import RevokedToken
 from app.models.token_mat_khau import TokenMatKhau
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
+from app.models.lop_hoc import LopHoc
+from app.models.mon_hoc import MonHoc
+from app.models.phong_hoc import PhongHoc
+from app.models.thoi_khoa_bieu import (
+    ThoiKhoaBieu,
+    ThoiKhoaBieuDiemDanh,
+    ThoiKhoaBieuLichSu,
+)
