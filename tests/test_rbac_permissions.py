@@ -33,6 +33,7 @@ class FakePermissionDatabase:
 @pytest.mark.parametrize(
     ("role_id", "permission_code"),
     [
+        (2, "SCHEDULE_VIEW"),
         (3, "GRADE_UPDATE"),
         (6, "TUITION_UPDATE"),
         (8, "ROLE_UPDATE"),
@@ -57,6 +58,8 @@ def test_expected_role_permissions_are_allowed(role_id, permission_code):
         (6, "GRADE_UPDATE"),
         (4, "GRADE_VIEW"),
         (2, "USER_DELETE"),
+        (2, "SCHEDULE_CREATE"),
+        (2, "SCHEDULE_UPDATE"),
     ],
 )
 def test_missing_role_permissions_are_denied(role_id, permission_code):
@@ -82,8 +85,34 @@ def test_catalog_contains_all_eight_business_role_defaults():
     assert "GRADE_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[6]
     assert "GRADE_VIEW" not in DEFAULT_ROLE_PERMISSIONS[4]
     assert "SCHEDULE_MANAGE" not in DEFAULT_ROLE_PERMISSIONS[1]
+    assert "SCHEDULE_VIEW" in DEFAULT_ROLE_PERMISSIONS[2]
+    assert not {
+        "SCHEDULE_CREATE",
+        "SCHEDULE_UPDATE",
+    } & set(DEFAULT_ROLE_PERMISSIONS[2])
     assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[7]
     assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[8]
+    assert not {
+        "SCHEDULE_CREATE",
+        "SCHEDULE_UPDATE",
+    } & set(DEFAULT_ROLE_PERMISSIONS[3])
+    assert {
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+    } <= set(DEFAULT_ROLE_PERMISSIONS[3])
+    assert {
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+    } <= set(DEFAULT_ROLE_PERMISSIONS[4])
+    assert {
+        "SCHEDULE_VIEW",
+        "SCHEDULE_CREATE",
+        "SCHEDULE_UPDATE",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+    } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert {
         "GRADE_VIEW",
         "GRADE_CREATE",

@@ -24,6 +24,7 @@ from app.core.security import (
 from app.schemas.login import LoginRequest
 from app.schemas.update_profile import UpdateProfileRequest
 from app.schemas.activate_account import ActivateAccountRequest
+from app.schemas.resend_activation import ResendActivationRequest
 from app.schemas.forgot_password import ForgotPasswordRequest
 from app.schemas.reset_password import ResetPasswordRequest
 from app.schemas.change_password import ChangePasswordRequest
@@ -35,6 +36,7 @@ from app.services.auth_service import (
     reset_password,
     update_password,
     activate_account,
+    resend_activation,
 )
 
 from app.services.profile_service import (
@@ -227,6 +229,17 @@ def forgot_password_endpoint(
         db,
         request
     )
+
+
+@router.post(
+    "/resend-activation",
+    status_code=status.HTTP_200_OK,
+)
+def resend_activation_endpoint(
+    request: ResendActivationRequest,
+    db: Session = Depends(get_db),
+):
+    return resend_activation(db, request)
 
 
 # ============================================================

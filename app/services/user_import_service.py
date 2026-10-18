@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from pwdlib import PasswordHash
+from app.core.config import FRONTEND_URL
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.token_kich_hoat import TokenKichHoat
@@ -656,8 +657,7 @@ def create_user_from_excel_row(
     # --------------------------------------------------------
 
     activation_link = (
-        "http://localhost:5173/login"
-        f"?activate={raw_token}"
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
     )
 
     # --------------------------------------------------------

@@ -84,7 +84,7 @@ Hệ thống quản lý đào tạo
 def send_activation_email(
     recipient_email: str,
     ho_ten: str,
-    temporary_password: str,
+    temporary_password: str | None,
     activation_link: str,
 ):
     if not SMTP_USERNAME or not SMTP_PASSWORD:
@@ -101,29 +101,28 @@ def send_activation_email(
     message["From"] = SMTP_FROM
     message["To"] = recipient_email
 
+    credentials = (
+        f"Email: {recipient_email}\n"
+        f"Mật khẩu tạm thời: {temporary_password}\n\n"
+        "Sau khi kích hoạt, bạn có thể sử dụng email và mật khẩu tạm thời "
+        "để đăng nhập. Vui lòng đổi mật khẩu sau lần đăng nhập đầu tiên.\n\n"
+        if temporary_password
+        else ""
+    )
+    introduction = (
+        "Tài khoản của bạn đã được tạo trên Hệ thống quản lý đào tạo.\n\n"
+        if temporary_password
+        else "Bạn vừa yêu cầu gửi lại liên kết kích hoạt tài khoản.\n\n"
+    )
+
     message.set_content(
         f"""Xin chào {ho_ten},
 
-Tài khoản của bạn đã được tạo trên
-Hệ thống quản lý đào tạo.
-
-Thông tin đăng nhập:
-
-Email: {recipient_email}
-Mật khẩu tạm thời: {temporary_password}
-
-Vui lòng nhấn vào liên kết dưới đây để kích hoạt tài khoản:
+{introduction}{credentials}Vui lòng nhấn vào liên kết dưới đây để kích hoạt tài khoản:
 
 {activation_link}
 
-Sau khi kích hoạt, bạn có thể sử dụng email
-và mật khẩu tạm thời để đăng nhập vào hệ thống.
-
-Vui lòng đổi mật khẩu sau lần đăng nhập đầu tiên
-để bảo mật tài khoản.
-
-Nếu bạn không yêu cầu tạo tài khoản này,
-vui lòng liên hệ quản trị viên.
+Nếu bạn không yêu cầu thao tác này, vui lòng bỏ qua email.
 
 Trân trọng,
 Hệ thống quản lý đào tạo
@@ -151,4 +150,44 @@ Hệ thống quản lý đào tạo
     except Exception as exc:
         raise RuntimeError(
             f"Không thể gửi email kích hoạt tài khoản: {exc}"
+        ) from exc
+
+
+def send_schedule_change_email(
+    recipient_email: str,
+    ho_ten: str,
+    notification_content: str,
+):
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        raise RuntimeError(
+            "Chưa cấu hình SMTP_USERNAME hoặc SMTP_PASSWORD"
+        )
+
+    message = EmailMessage()
+    message["Subject"] = "Thông báo thay đổi lịch học"
+    message["From"] = SMTP_FROM
+    message["To"] = recipient_email
+    message.set_content(
+        f"""Xin chào {ho_ten},
+
+{notification_content}
+
+Vui lòng đăng nhập hệ thống để xem thông tin lịch học.
+"""
+    )
+
+    try:
+        with smtplib.SMTP(
+            SMTP_HOST,
+            SMTP_PORT,
+            timeout=30,
+        ) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Không thể gửi email thông báo lịch học: {exc}"
         ) from exc

@@ -8,3 +8,4 @@ email-validator
 PyJWT
 Pillow>=11.0.0
 openpyxl
+tzdata; platform_system == "Windows"

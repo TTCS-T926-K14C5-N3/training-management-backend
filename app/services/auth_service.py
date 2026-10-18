@@ -21,6 +21,7 @@ from app.schemas.admin_create_user import AdminCreateUserRequest
 from app.schemas.nguoi_dung import NguoiDungCreate, NguoiDungLock
 from app.schemas.register import RegisterRequest
 from app.schemas.reset_password import ResetPasswordRequest
+from app.schemas.resend_activation import ResendActivationRequest
 from app.services.email_service import (
     send_reset_password_email,
     send_activation_email,
@@ -574,8 +575,8 @@ def admin_create_user(
         # ====================================================
 
         activation_link = (
-            "http://localhost:5173/login"
-            f"?activate={raw_activation_token}"
+            f"{FRONTEND_URL.rstrip('/')}/activate-account"
+            f"?token={raw_activation_token}"
         )
 
         # ====================================================
@@ -1041,6 +1042,7 @@ def forgot_password(
             "message": message
         }
 
+
     raw_token = secrets.token_urlsafe(32)
 
     now = datetime.now()
@@ -1116,6 +1118,104 @@ def forgot_password(
     return {
         "message": message
     }
+
+
+def resend_activation(
+    db: Session,
+    request: ResendActivationRequest,
+):
+    message = (
+        "Yêu cầu đã được tiếp nhận. Nếu email thuộc tài khoản chưa kích hoạt, "
+        "hướng dẫn sẽ được gửi; nếu không nhận được email, vui lòng thử lại "
+        "sau hoặc liên hệ quản trị viên."
+    )
+    email = str(request.email).strip().lower()
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == email)
+        .first()
+    )
+
+    if (
+        not user
+        or user.DaKichHoat
+        or user.TrangThai != "HoatDong"
+    ):
+        return {"message": message}
+
+    now = datetime.now()
+    activation_tokens = (
+        db.query(TokenKichHoat)
+        .filter(
+            TokenKichHoat.NguoiDungId == user.NguoiDungId,
+            TokenKichHoat.DaSuDung == False,
+        )
+        .all()
+    )
+
+    recent_valid_token = any(
+        token.ThoiGianTao >= now - timedelta(minutes=5)
+        and token.ThoiGianHetHan > now
+        for token in activation_tokens
+    )
+    if recent_valid_token:
+        return {"message": message}
+
+    for token in activation_tokens:
+        token.DaSuDung = True
+
+    raw_token = secrets.token_urlsafe(32)
+    activation_token = TokenKichHoat(
+        NguoiDungId=user.NguoiDungId,
+        Token=hashlib.sha256(raw_token.encode()).hexdigest(),
+        ThoiGianTao=now,
+        ThoiGianHetHan=now + timedelta(hours=24),
+        DaSuDung=False,
+    )
+    db.add(activation_token)
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to save activation token for user_id=%s",
+            user.NguoiDungId,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Không thể gửi hướng dẫn kích hoạt lúc này. "
+                "Vui lòng thử lại sau."
+            ),
+        ) from exc
+
+    activation_link = (
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
+    )
+    try:
+        send_activation_email(
+            recipient_email=user.Email,
+            ho_ten=user.HoTen,
+            temporary_password=None,
+            activation_link=activation_link,
+        )
+    except RuntimeError:
+        activation_token.DaSuDung = True
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Failed to invalidate undelivered activation token for user_id=%s",
+                user.NguoiDungId,
+            )
+        logger.exception(
+            "Failed to send activation email for user_id=%s",
+            user.NguoiDungId,
+        )
+
+    return {"message": message}
 
 
 # ============================================================

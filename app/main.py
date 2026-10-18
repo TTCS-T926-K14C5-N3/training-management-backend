@@ -22,8 +22,14 @@ from app.routers.nguoi_dung import (
 from app.routers.academic import (
     router as academic_router
 )
+from app.routers.admissions import (
+    router as admissions_router,
+)
 from app.routers.thoi_khoa_bieu import (
     router as thoi_khoa_bieu_router
+)
+from app.routers.schedules import (
+    router as schedules_router,
 )
 
 
@@ -87,5 +93,13 @@ app.include_router(
 )
 
 app.include_router(
+    admissions_router
+)
+
+app.include_router(
     thoi_khoa_bieu_router
+)
+
+app.include_router(
+    schedules_router
 )
