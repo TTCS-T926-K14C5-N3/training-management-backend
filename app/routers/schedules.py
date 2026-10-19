@@ -301,6 +301,58 @@ def _accessible_schedule_query(
     return query
 
 
+def _filter_schedule_archive_search(query, search: str | None):
+    term = (search or "").strip()
+    if not term:
+        return query
+
+    pattern = f"%{term}%"
+    predicates = [
+        LichHoc.LyDoHuy.ilike(pattern),
+        exists().where(
+            and_(
+                LopHoc.LopHocId == LichHoc.LopHocId,
+                or_(
+                    LopHoc.MaLop.ilike(pattern),
+                    LopHoc.TenLop.ilike(pattern),
+                ),
+            )
+        ),
+        exists().where(
+            and_(
+                MonHoc.MonHocId == LichHoc.MonHocId,
+                or_(
+                    MonHoc.MaMonHoc.ilike(pattern),
+                    MonHoc.TenMonHoc.ilike(pattern),
+                ),
+            )
+        ),
+        exists().where(
+            and_(
+                NguoiDung.NguoiDungId == LichHoc.GiangVienId,
+                or_(
+                    NguoiDung.HoTen.ilike(pattern),
+                    NguoiDung.Email.ilike(pattern),
+                ),
+            )
+        ),
+        exists().where(
+            and_(
+                PhongHoc.PhongHocId == LichHoc.PhongHocId,
+                or_(
+                    PhongHoc.MaPhong.ilike(pattern),
+                    PhongHoc.TenPhong.ilike(pattern),
+                ),
+            )
+        ),
+    ]
+    schedule_code = term.upper().removeprefix("BH-")
+    if schedule_code.isdigit():
+        predicates.append(LichHoc.LichHocId == int(schedule_code))
+
+    return query.filter(or_(*predicates))
+
+
 def _validate_class_subject(
     db: Session,
     class_record: LopHoc,
@@ -647,6 +699,7 @@ def list_schedules(
 def list_completed_schedules(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    search: Annotated[str | None, Query(max_length=255, alias="q")] = None,
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -665,6 +718,39 @@ def list_completed_schedules(
             ),
         ),
     )
+    query = _filter_schedule_archive_search(query, search)
+    total = query.count()
+    schedules = (
+        query.order_by(LichHoc.NgayHoc.desc(), LichHoc.GioBatDau.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return {
+        "items": [_schedule_payload(db, item) for item in schedules],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+    }
+
+
+@router.get(
+    "/schedules/cancelled",
+    dependencies=[Depends(require_permission("SCHEDULE_VIEW"))],
+)
+def list_cancelled_schedules(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    search: Annotated[str | None, Query(max_length=255, alias="q")] = None,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = _accessible_schedule_query(
+        db,
+        current_user,
+        include_inactive_classes=True,
+    ).filter(LichHoc.TrangThai == CANCELLED)
+    query = _filter_schedule_archive_search(query, search)
     total = query.count()
     schedules = (
         query.order_by(LichHoc.NgayHoc.desc(), LichHoc.GioBatDau.desc())
