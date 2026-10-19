@@ -36,6 +36,7 @@ from app.routers.schedules import (
     create_schedule,
     get_schedule_attendance,
     get_schedule_options,
+    list_cancelled_schedules,
     list_completed_schedules,
     list_schedule_history,
     list_schedules,
@@ -52,6 +53,7 @@ def test_schedule_endpoints_are_registered():
     assert "get" in paths["/academic/schedule-options"]
     assert "get" in paths["/academic/schedules"]
     assert "get" in paths["/academic/schedules/completed"]
+    assert "get" in paths["/academic/schedules/cancelled"]
     assert "post" in paths["/academic/schedules"]
     assert "post" in paths["/academic/schedules/check-conflicts"]
     assert "put" in paths["/academic/schedules/{schedule_id}"]
@@ -65,6 +67,14 @@ def test_schedule_endpoints_are_registered():
         for item in paths["/academic/schedule-history"]["get"]["parameters"]
     }
     assert {"page", "pageSize", "q", "eventType"} <= history_parameters
+    assert "q" in {
+        item["name"]
+        for item in paths["/academic/schedules/completed"]["get"]["parameters"]
+    }
+    assert "q" in {
+        item["name"]
+        for item in paths["/academic/schedules/cancelled"]["get"]["parameters"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -1909,6 +1919,13 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
         current_user=teacher,
         db=db,
     )
+    matching_page = list_completed_schedules(
+        page=1,
+        page_size=20,
+        search="BH-" + f"{completed_rows[0].LichHocId:06d}",
+        current_user=teacher,
+        db=db,
+    )
 
     assert current_schedules == []
     assert first_page["total"] == 2
@@ -1917,6 +1934,65 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
     assert len(first_page["items"]) == len(second_page["items"]) == 1
     assert first_page["items"][0]["trangThai"] == "Đã diễn ra"
     assert first_page["items"][0]["lichHocId"] != second_page["items"][0]["lichHocId"]
+    assert matching_page["total"] == 1
+    assert matching_page["items"][0]["maBuoiHoc"] == f"BH-{completed_rows[0].LichHocId:06d}"
+
+
+def test_cancelled_schedules_are_separate_and_paginated(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    now = business_time.business_now_naive()
+    cancelled_rows = [
+        LichHoc(
+            LopHocId=class_record.LopHocId,
+            MonHocId=subject.MonHocId,
+            NgayHoc=now.date() - timedelta(days=days_ago),
+            GioBatDau=time(9),
+            GioKetThuc=time(10),
+            PhongHocId=room.PhongHocId,
+            GiangVienId=teacher.NguoiDungId,
+            TrangThai="Đã hủy",
+            LyDoHuy=f"Lý do hủy {days_ago}",
+            NgayTao=now,
+            NguoiTaoId=teacher.NguoiDungId,
+            NgayCapNhat=now,
+            NguoiCapNhatId=teacher.NguoiDungId,
+            NgayHuy=now,
+            NguoiHuyId=teacher.NguoiDungId,
+        )
+        for days_ago in (1, 2)
+    ]
+    db.add_all(cancelled_rows)
+    db.commit()
+
+    first_page = list_cancelled_schedules(
+        page=1,
+        page_size=1,
+        current_user=teacher,
+        db=db,
+    )
+    second_page = list_cancelled_schedules(
+        page=2,
+        page_size=1,
+        current_user=teacher,
+        db=db,
+    )
+    matching_page = list_cancelled_schedules(
+        page=1,
+        page_size=20,
+        search="Lý do hủy 2",
+        current_user=teacher,
+        db=db,
+    )
+
+    assert first_page["total"] == 2
+    assert first_page["page"] == 1
+    assert first_page["pageSize"] == 1
+    assert len(first_page["items"]) == len(second_page["items"]) == 1
+    assert first_page["items"][0]["trangThai"] == "Đã hủy"
+    assert first_page["items"][0]["lyDoHuy"]
+    assert first_page["items"][0]["lichHocId"] != second_page["items"][0]["lichHocId"]
+    assert matching_page["total"] == 1
+    assert matching_page["items"][0]["lyDoHuy"] == "Lý do hủy 2"
 
 
 def test_student_completed_history_includes_past_assigned_inactive_classes(
