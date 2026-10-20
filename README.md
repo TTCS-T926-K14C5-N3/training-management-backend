@@ -156,6 +156,8 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     tên, ngày/giờ và buổi học/lớp đang trùng. Chỉ người có quyền
     `SCHEDULE_OVERRIDE` mới có thể gửi `ghiDeXungDot: true`; mọi lần ghi đè phải
     lưu `lyDoGhiDe` và được ghi vào lịch sử thay đổi.
+    tên, ngày/giờ và buổi học/lớp đang trùng; mọi xung đột đều chặn lưu, kể cả
+    khi request gửi cờ xác nhận ghi đè.
   - Khi lịch đổi hoặc bị hủy, hệ thống lưu thông báo email theo từng học viên
     đang ghi danh và giảng viên liên quan, kèm dữ liệu trước/sau. Trạng thái
     gửi, số lần thử và lỗi được lưu bền vững; SMTP dùng cấu hình trong `.env`.

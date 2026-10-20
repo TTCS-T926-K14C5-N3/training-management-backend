@@ -470,14 +470,15 @@ def _ensure_not_conflicting(
 ) -> None:
     if not conflicts:
         return
-    if request.xac_nhan_trung_lich and _can_override_conflicts(db, current_user):
+    can_override = _can_override_conflicts(db, current_user)
+    if request.xac_nhan_trung_lich and can_override:
         return
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
             "message": "Lịch học bị trùng với buổi học đã được xếp.",
             "conflicts": conflicts,
-            "canOverride": _can_override_conflicts(db, current_user),
+            "canOverride": can_override,
         },
     )
 
