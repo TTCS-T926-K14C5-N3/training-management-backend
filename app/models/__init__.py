@@ -21,3 +21,13 @@ from app.models.thoi_khoa_bieu import (
     ThoiKhoaBieuDiemDanh,
     ThoiKhoaBieuLichSu,
 )
+from app.models.lop_hoc_mon_hoc import LopHocMonHoc
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
+from app.models.assignment import (
+    Assignment,
+    AssignmentAttachment,
+    AssignmentGrade,
+    AssignmentReopen,
+    AssignmentSubmission,
+    AssignmentSubmissionAttachment,
+)

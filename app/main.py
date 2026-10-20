@@ -34,6 +34,9 @@ from app.routers.schedules import (
 from app.routers.attendance import (
     router as attendance_router,
 )
+from app.routers.assignments import (
+    router as assignments_router,
+)
 
 
 app = FastAPI(
@@ -109,4 +112,8 @@ app.include_router(
 
 app.include_router(
     attendance_router
+)
+
+app.include_router(
+    assignments_router
 )
