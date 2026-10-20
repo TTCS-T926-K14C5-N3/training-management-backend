@@ -31,6 +31,9 @@ from app.routers.thoi_khoa_bieu import (
 from app.routers.schedules import (
     router as schedules_router,
 )
+from app.routers.attendance import (
+    router as attendance_router,
+)
 
 
 app = FastAPI(
@@ -102,4 +105,8 @@ app.include_router(
 
 app.include_router(
     schedules_router
+)
+
+app.include_router(
+    attendance_router
 )

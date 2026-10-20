@@ -54,6 +54,7 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_session_atte
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\014_schedule_notifications.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_student_schedule_view.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\018_sprint4_attendance_completion.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -66,7 +67,9 @@ hoặc kho mã nguồn).
 được xem lịch trong phạm vi lớp được phép truy cập; quản lý đào tạo và quản trị
 viên có quyền tạo, cập nhật và hủy buổi học. Chạy migration
 `017_student_schedule_view.sql` để cấp quyền xem lịch cho vai trò học viên trên
-cơ sở dữ liệu hiện có.
+cơ sở dữ liệu hiện có. Migration `018_sprint4_attendance_completion.sql` bổ sung
+liên kết buổi học với lịch, đơn xin phép vắng, nhật ký/thông báo điểm danh và
+chuẩn hóa trạng thái điểm danh.
 
 Các hợp đồng API chính (các trường JSON dùng camelCase):
 
@@ -128,7 +131,12 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     người dùng được quyền xem; hỗ trợ phân trang `page`, `pageSize` và phản hồi
     `items`, `total`, `page`, `pageSize`.
   - `POST /academic/schedules` nhận `lopHocId`, `monHocId`, `ngayHoc`,
-    `gioBatDau`, `gioKetThuc`, `phongHocId` và `giangVienId`.
+    `gioBatDau`, `gioKetThuc`, `phongHocId`, `giangVienId` và `baiHocId`
+    tùy chọn để gắn buổi học trong chương trình.
+  - `POST /academic/schedules/preview` xem trước lịch lặp;
+    `POST /academic/schedules/bulk` tạo các buổi đã xem trước. Request nhận
+    `ngayBatDau`, `soBuoi`, `thuTrongTuan`, `ngayNghi` cùng lớp/môn, phòng,
+    giảng viên và giờ học; bài học được gắn theo thứ tự chương trình.
   - `PUT /academic/schedules/{schedule_id}` cập nhật ngày, giờ, phòng và
     giảng viên; lớp/môn là thông tin cố định.
   - `POST /academic/schedules/{schedule_id}/cancel` nhận `{ "lyDo": "..." }`;
@@ -145,8 +153,9 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     `page` và `pageSize`. Sự kiện gồm ảnh chụp trước/sau, người thực hiện,
     thời điểm và tổng trạng thái gửi thông báo nếu có.
     Xung đột lịch trả HTTP 409 cùng `detail.conflicts` chứa loại tài nguyên,
-    tên, ngày/giờ và buổi học/lớp đang trùng; mọi xung đột đều chặn lưu, kể cả
-    khi request gửi cờ xác nhận ghi đè.
+    tên, ngày/giờ và buổi học/lớp đang trùng. Chỉ người có quyền
+    `SCHEDULE_OVERRIDE` mới có thể gửi `ghiDeXungDot: true`; mọi lần ghi đè phải
+    lưu `lyDoGhiDe` và được ghi vào lịch sử thay đổi.
   - Khi lịch đổi hoặc bị hủy, hệ thống lưu thông báo email theo từng học viên
     đang ghi danh và giảng viên liên quan, kèm dữ liệu trước/sau. Trạng thái
     gửi, số lần thử và lỗi được lưu bền vững; SMTP dùng cấu hình trong `.env`.
@@ -156,8 +165,21 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     khởi động. Migration `014_schedule_notifications.sql` chỉ thêm bảng; nếu
     cần rollback, sao lưu lịch sử trước rồi chỉ xóa bảng sau khi đã dừng ứng
     dụng và được phê duyệt vì thao tác đó sẽ xóa dữ liệu thông báo.
-  - Điểm danh theo buổi được lưu sau migration `013_session_attendance.sql`;
-    lịch đã có bản ghi điểm danh không thể sửa hoặc hủy.
+  - `GET/PUT /academic/schedules/{schedule_id}/attendance` xem và cập nhật điểm
+    danh cho một buổi học, với trạng thái `Có mặt`, `Đi muộn`, `Vắng có phép`
+    hoặc `Vắng không phép`. Chỉ được ghi điểm danh khi buổi đã bắt đầu; chỉ
+    quản lý đào tạo/quản trị viên được sửa sau khi buổi kết thúc. Mọi thay đổi
+    được lưu trong nhật ký tại `GET /attendance/schedules/{schedule_id}/audit`.
+  - Học viên gửi đơn tại `POST /attendance/absence-requests` hoặc
+    `/attendance/absence-requests/with-evidence` (multipart, PDF/PNG/JPEG tối đa
+    5 MB); người phụ trách lớp duyệt/từ chối tại
+    `POST /attendance/absence-requests/{request_id}/decision`. Đơn được duyệt
+    tự động ghi `Vắng có phép`; quyết định gửi thông báo riêng cho học viên.
+    `GET /attendance/absence-requests`, `/attendance/my-history` và
+    `/attendance/notifications` cung cấp dữ liệu theo quyền người dùng.
+  - Điểm danh và các bảng xin phép vắng/audit/thông báo cần migration
+    `013_session_attendance.sql` và `018_sprint4_attendance_completion.sql`.
+    Lịch đã có bản ghi điểm danh không thể sửa hoặc hủy.
 - Bài tập:
   - `GET /assignments/options` lấy lớp, môn và buổi học mà người dùng được phép
     sử dụng; `GET /assignments/mine` và `/assignments/teacher` liệt kê bài tập

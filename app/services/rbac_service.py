@@ -52,6 +52,11 @@ PERMISSION_CATALOG = (
     ("SCHEDULE_VIEW", "Xem lịch học", "Xem buổi học và lịch sử thay đổi."),
     ("SCHEDULE_CREATE", "Tạo buổi học", "Tạo buổi học mới."),
     ("SCHEDULE_UPDATE", "Cập nhật lịch học", "Sửa hoặc hủy buổi học."),
+    (
+        "SCHEDULE_OVERRIDE",
+        "Ghi đè xung đột lịch",
+        "Xác nhận ngoại lệ khi lịch trùng giảng viên hoặc phòng.",
+    ),
     ("ATTENDANCE_VIEW", "Xem điểm danh", "Xem danh sách điểm danh buổi học."),
     ("ATTENDANCE_UPDATE", "Cập nhật điểm danh", "Ghi nhận hoặc sửa điểm danh."),
     ("CURRICULUM_VIEW", "Xem danh mục đào tạo", "Xem môn học và cấu trúc chương trình."),
@@ -67,7 +72,7 @@ PERMISSION_CATALOG = (
 
 DEFAULT_ROLE_PERMISSIONS = {
     1: (),
-    2: ("GRADE_VIEW", "TUITION_VIEW", "SCHEDULE_VIEW"),
+    2: ("GRADE_VIEW", "TUITION_VIEW", "SCHEDULE_VIEW", "ATTENDANCE_VIEW"),
     3: (
         "GRADE_VIEW",
         "GRADE_CREATE",
@@ -103,6 +108,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "SCHEDULE_VIEW",
         "SCHEDULE_CREATE",
         "SCHEDULE_UPDATE",
+        "SCHEDULE_OVERRIDE",
         "ATTENDANCE_VIEW",
         "ATTENDANCE_UPDATE",
         "CURRICULUM_VIEW",

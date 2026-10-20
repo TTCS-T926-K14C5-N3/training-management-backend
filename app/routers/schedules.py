@@ -22,6 +22,12 @@ from app.database import SessionLocal, get_db
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lich_hoc_thong_bao import LichHocThongBao
 from app.models.diem_danh import DiemDanh
+from app.models.absence_request import (
+    AbsenceRequest,
+    AttendanceAudit,
+    AttendanceNotification,
+)
+from app.models.curriculum import ProgramSession, ProgramSubject
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.lop_hoc import LopHoc
@@ -30,10 +36,13 @@ from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.quyen import Quyen
 from app.models.phong_hoc import PhongHoc
+from app.models.vai_tro_quyen import VaiTroQuyen
 from app.schemas.lich_hoc import (
     DiemDanhWrite,
     LichHocCancel,
+    LichHocRepeatWrite,
     LichHocWrite,
 )
 from app.services.academic_service import (
@@ -42,6 +51,7 @@ from app.services.academic_service import (
     accessible_classes,
     can_access_class,
     ensure_active_instructor,
+    user_role_ids,
 )
 from app.services.schedule_notifications import (
     process_schedule_notifications,
@@ -207,6 +217,13 @@ def _schedule_payload(db: Session, schedule: LichHoc) -> dict:
         .filter(NguoiDung.NguoiDungId == schedule.GiangVienId)
         .first()
     )
+    lesson = (
+        db.query(ProgramSession)
+        .filter(ProgramSession.BuoiHocId == schedule.BaiHocId)
+        .first()
+        if schedule.BaiHocId is not None
+        else None
+    )
     room = (
         db.query(PhongHoc)
         .filter(PhongHoc.PhongHocId == schedule.PhongHocId)
@@ -231,6 +248,9 @@ def _schedule_payload(db: Session, schedule: LichHoc) -> dict:
         "tenLop": class_record.TenLop if class_record else None,
         "monHocId": schedule.MonHocId,
         "tenMonHoc": subject.TenMonHoc if subject else None,
+        "baiHocId": schedule.BaiHocId,
+        "soThuTuBaiHoc": lesson.SoThuTu if lesson else None,
+        "chuDeBaiHoc": lesson.ChuDe if lesson else None,
         "ngayHoc": schedule.NgayHoc.isoformat(),
         "gioBatDau": schedule.GioBatDau.strftime("%H:%M"),
         "gioKetThuc": schedule.GioKetThuc.strftime("%H:%M"),
@@ -444,16 +464,179 @@ def _find_conflicts(
 
 def _ensure_not_conflicting(
     conflicts: list[dict],
+    request: LichHocWrite,
+    current_user: NguoiDung,
+    db: Session,
 ) -> None:
-    if conflicts:
+    if not conflicts:
+        return
+    if request.xac_nhan_trung_lich and _can_override_conflicts(db, current_user):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "message": "Lịch học bị trùng với buổi học đã được xếp.",
+            "conflicts": conflicts,
+            "canOverride": _can_override_conflicts(db, current_user),
+        },
+    )
+
+
+def _repeat_schedules(
+    request: LichHocRepeatWrite,
+    current_user: NguoiDung,
+    db: Session,
+) -> tuple[LopHoc, list[dict]]:
+    class_record = _get_class_or_404(db, request.lop_hoc_id)
+    if not can_access_class(db, current_user, class_record):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Lịch học bị trùng với buổi học đã được xếp.",
-                "conflicts": conflicts,
-                "canOverride": False,
-            },
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
         )
+    _validate_class_subject(db, class_record, request.mon_hoc_id)
+    try:
+        ensure_active_instructor(db, request.giang_vien_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    _validate_room(db, request.phong_hoc_id)
+
+    lessons = _program_lessons(db, class_record, request.mon_hoc_id)
+    if lessons and request.so_buoi > len(lessons):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Số buổi vượt quá số bài học đã khai báo cho môn này.",
+        )
+
+    holidays = set(request.ngay_nghi)
+    sessions: list[dict] = []
+    current_day = request.ngay_bat_dau
+    scan_limit = current_day + timedelta(days=365 * 5)
+    while len(sessions) < request.so_buoi and current_day <= scan_limit:
+        if current_day.isoweekday() in request.thu_trong_tuan and current_day not in holidays:
+            lesson = lessons[len(sessions)] if lessons else None
+            schedule_request = LichHocWrite(
+                lopHocId=request.lop_hoc_id,
+                monHocId=request.mon_hoc_id,
+                baiHocId=lesson.BuoiHocId if lesson else None,
+                ngayHoc=current_day,
+                gioBatDau=request.gio_bat_dau,
+                gioKetThuc=request.gio_ket_thuc,
+                phongHocId=request.phong_hoc_id,
+                giangVienId=request.giang_vien_id,
+                ghiDeXungDot=request.ghi_de_xung_dot,
+                lyDoGhiDe=request.ly_do_ghi_de,
+            )
+            sessions.append(
+                {
+                    "request": schedule_request,
+                    "lesson": lesson,
+                    "conflicts": _find_conflicts(db, schedule_request),
+                }
+            )
+        current_day += timedelta(days=1)
+
+    if len(sessions) != request.so_buoi:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Không thể sinh đủ buổi học trong giới hạn thời gian.",
+        )
+    return class_record, sessions
+
+
+def _repeat_preview_payload(sessions: list[dict]) -> dict:
+    items = []
+    for index, item in enumerate(sessions, start=1):
+        request = item["request"]
+        lesson = item["lesson"]
+        items.append(
+            {
+                "stt": index,
+                "ngayHoc": request.ngay_hoc.isoformat(),
+                "gioBatDau": request.gio_bat_dau.strftime("%H:%M"),
+                "gioKetThuc": request.gio_ket_thuc.strftime("%H:%M"),
+                "baiHocId": lesson.BuoiHocId if lesson else None,
+                "soThuTuBaiHoc": lesson.SoThuTu if lesson else None,
+                "chuDeBaiHoc": lesson.ChuDe if lesson else None,
+                "xungDot": item["conflicts"],
+            }
+        )
+    return {
+        "buoiHocs": items,
+        "soBuoi": len(items),
+        "coXungDot": any(item["xungDot"] for item in items),
+    }
+
+
+def _can_override_conflicts(db: Session, user: NguoiDung) -> bool:
+    return (
+        db.query(Quyen.QuyenId)
+        .join(VaiTroQuyen, VaiTroQuyen.QuyenId == Quyen.QuyenId)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.VaiTroId == VaiTroQuyen.VaiTroId,
+        )
+        .filter(
+            NguoiDungVaiTro.NguoiDungId == user.NguoiDungId,
+            Quyen.MaQuyen == "SCHEDULE_OVERRIDE",
+        )
+        .first()
+        is not None
+    )
+
+
+def _validate_lesson(
+    db: Session,
+    class_record: LopHoc,
+    subject_id: int,
+    lesson_id: int | None,
+) -> None:
+    if lesson_id is None:
+        return
+    lesson = (
+        db.query(ProgramSession)
+        .join(
+            ProgramSubject,
+            ProgramSubject.ChuongTrinhMonHocId
+            == ProgramSession.ChuongTrinhMonHocId,
+        )
+        .filter(
+            ProgramSession.BuoiHocId == lesson_id,
+            ProgramSubject.MonHocId == subject_id,
+            ProgramSubject.ChuongTrinhId == class_record.ChuongTrinhId,
+        )
+        .first()
+    )
+    if lesson is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Bài học không thuộc môn học và chương trình của lớp.",
+        )
+
+
+def _program_lessons(
+    db: Session,
+    class_record: LopHoc,
+    subject_id: int,
+) -> list[ProgramSession]:
+    if class_record.ChuongTrinhId is None:
+        return []
+    return (
+        db.query(ProgramSession)
+        .join(
+            ProgramSubject,
+            ProgramSubject.ChuongTrinhMonHocId
+            == ProgramSession.ChuongTrinhMonHocId,
+        )
+        .filter(
+            ProgramSubject.ChuongTrinhId == class_record.ChuongTrinhId,
+            ProgramSubject.MonHocId == subject_id,
+        )
+        .order_by(ProgramSession.SoThuTu, ProgramSession.BuoiHocId)
+        .all()
+    )
 
 
 def _ensure_schedule_writable(schedule: LichHoc) -> None:
@@ -512,6 +695,18 @@ def get_schedule_options(
                         "monHocId": subject.MonHocId,
                         "maMonHoc": subject.MaMonHoc,
                         "tenMonHoc": subject.TenMonHoc,
+                        "baiHocs": [
+                            {
+                                "baiHocId": lesson.BuoiHocId,
+                                "soThuTu": lesson.SoThuTu,
+                                "chuDe": lesson.ChuDe,
+                            }
+                            for lesson in _program_lessons(
+                                db,
+                                class_record,
+                                subject.MonHocId,
+                            )
+                        ],
                     }
                     for subject in subjects
                 ],
@@ -558,6 +753,93 @@ def get_schedule_options(
             for room in rooms
         ],
         "diemDanhDuocHoTro": True,
+    }
+
+
+@router.post(
+    "/schedules/preview",
+    dependencies=[Depends(require_permission("SCHEDULE_CREATE"))],
+)
+def preview_repeating_schedules(
+    request: LichHocRepeatWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _, sessions = _repeat_schedules(request, current_user, db)
+    return _repeat_preview_payload(sessions)
+
+
+@router.post(
+    "/schedules/bulk",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("SCHEDULE_CREATE"))],
+)
+def create_repeating_schedules(
+    request: LichHocRepeatWrite,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _acquire_schedule_write_lock(db)
+    _, sessions = _repeat_schedules(request, current_user, db)
+    all_conflicts = [
+        conflict
+        for item in sessions
+        for conflict in item["conflicts"]
+    ]
+    if all_conflicts:
+        _ensure_not_conflicting(
+            all_conflicts,
+            sessions[0]["request"],
+            current_user,
+            db,
+        )
+
+    now = business_now_naive()
+    schedules = []
+    for item in sessions:
+        schedule_request = item["request"]
+        schedule = LichHoc(
+            LopHocId=schedule_request.lop_hoc_id,
+            MonHocId=schedule_request.mon_hoc_id,
+            BaiHocId=schedule_request.bai_hoc_id,
+            NgayHoc=schedule_request.ngay_hoc,
+            GioBatDau=schedule_request.gio_bat_dau,
+            GioKetThuc=schedule_request.gio_ket_thuc,
+            PhongHocId=schedule_request.phong_hoc_id,
+            GiangVienId=schedule_request.giang_vien_id,
+            TrangThai=SCHEDULED,
+            NgayTao=now,
+            NguoiTaoId=current_user.NguoiDungId,
+            NgayCapNhat=now,
+            NguoiCapNhatId=current_user.NguoiDungId,
+        )
+        db.add(schedule)
+        schedules.append((schedule, schedule_request.ly_do_ghi_de))
+
+    try:
+        db.flush()
+        for schedule, reason in schedules:
+            payload = _schedule_payload(db, schedule)
+            db.add(
+                LichHocLichSu(
+                    LichHocId=schedule.LichHocId,
+                    HanhDong="Tạo",
+                    DuLieuMoi=json.dumps(payload, ensure_ascii=False),
+                    LyDo=reason,
+                    ThoiDiem=now,
+                    NguoiThucHienId=current_user.NguoiDungId,
+                )
+            )
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Không thể lưu lịch lặp do dữ liệu bị trùng hoặc không hợp lệ.",
+        ) from error
+    return {
+        "created": len(schedules),
+        "items": [_schedule_payload(db, schedule) for schedule, _ in schedules],
     }
 
 
@@ -718,6 +1000,12 @@ def check_schedule_conflicts(
                 detail="Không được thay đổi lớp hoặc môn học của buổi học.",
             )
     _validate_class_subject(db, class_record, request.mon_hoc_id)
+    _validate_lesson(
+        db,
+        class_record,
+        request.mon_hoc_id,
+        request.bai_hoc_id,
+    )
     try:
         ensure_active_instructor(db, request.giang_vien_id)
     except ValueError as error:
@@ -734,7 +1022,7 @@ def check_schedule_conflicts(
     return {
         "hasConflicts": bool(conflicts),
         "conflicts": conflicts,
-        "canOverride": False,
+        "canOverride": _can_override_conflicts(db, current_user),
     }
 
 
@@ -756,6 +1044,12 @@ def create_schedule(
             detail="Bạn không được phân công hoặc ghi danh trong lớp học này.",
         )
     _validate_class_subject(db, class_record, request.mon_hoc_id)
+    _validate_lesson(
+        db,
+        class_record,
+        request.mon_hoc_id,
+        request.bai_hoc_id,
+    )
     try:
         ensure_active_instructor(db, request.giang_vien_id)
     except ValueError as error:
@@ -765,12 +1059,13 @@ def create_schedule(
         ) from error
     _validate_room(db, request.phong_hoc_id)
     conflicts = _find_conflicts(db, request)
-    _ensure_not_conflicting(conflicts)
+    _ensure_not_conflicting(conflicts, request, current_user, db)
 
     now = business_now_naive()
     schedule = LichHoc(
         LopHocId=request.lop_hoc_id,
         MonHocId=request.mon_hoc_id,
+        BaiHocId=request.bai_hoc_id,
         NgayHoc=request.ngay_hoc,
         GioBatDau=request.gio_bat_dau,
         GioKetThuc=request.gio_ket_thuc,
@@ -790,7 +1085,7 @@ def create_schedule(
             LichHocId=schedule.LichHocId,
             HanhDong="Tạo",
             DuLieuMoi=json.dumps(payload, ensure_ascii=False),
-            LyDo=None,
+            LyDo=request.ly_do_ghi_de,
             ThoiDiem=now,
             NguoiThucHienId=current_user.NguoiDungId,
         )
@@ -822,6 +1117,12 @@ def update_schedule(
             detail="Không được thay đổi lớp hoặc môn học của buổi học.",
         )
     _validate_class_subject(db, class_record, schedule.MonHocId)
+    _validate_lesson(
+        db,
+        class_record,
+        schedule.MonHocId,
+        request.bai_hoc_id,
+    )
     try:
         ensure_active_instructor(db, request.giang_vien_id)
     except ValueError as error:
@@ -833,7 +1134,7 @@ def update_schedule(
     conflicts = _find_conflicts(
         db, request, exclude_schedule_id=schedule_id
     )
-    _ensure_not_conflicting(conflicts)
+    _ensure_not_conflicting(conflicts, request, current_user, db)
 
     previous_teacher_id = schedule.GiangVienId
     previous_values = (
@@ -842,6 +1143,7 @@ def update_schedule(
         schedule.GioKetThuc,
         schedule.PhongHocId,
         schedule.GiangVienId,
+        schedule.BaiHocId,
     )
     updated_values = (
         request.ngay_hoc,
@@ -849,6 +1151,7 @@ def update_schedule(
         request.gio_ket_thuc,
         request.phong_hoc_id,
         request.giang_vien_id,
+        request.bai_hoc_id,
     )
     schedule_changed = previous_values != updated_values
     previous_recipients = (
@@ -866,6 +1169,7 @@ def update_schedule(
     schedule.GioKetThuc = request.gio_ket_thuc
     schedule.PhongHocId = request.phong_hoc_id
     schedule.GiangVienId = request.giang_vien_id
+    schedule.BaiHocId = request.bai_hoc_id
     schedule.NgayCapNhat = business_now_naive()
     schedule.NguoiCapNhatId = current_user.NguoiDungId
     after = _schedule_payload(db, schedule)
@@ -895,7 +1199,7 @@ def update_schedule(
             HanhDong="Cập nhật",
             DuLieuCu=before,
             DuLieuMoi=json.dumps(after, ensure_ascii=False),
-            LyDo=None,
+            LyDo=request.ly_do_ghi_de,
             ThoiDiem=schedule.NgayCapNhat,
             NguoiThucHienId=current_user.NguoiDungId,
         )
@@ -1126,6 +1430,11 @@ def get_schedule_attendance(
 ):
     schedule = _get_schedule_or_404(db, schedule_id)
     _ensure_attendance_scope(db, schedule, current_user)
+    if STUDENT_ROLE_ID in user_role_ids(db, current_user.NguoiDungId):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Học viên chỉ được xem lịch sử điểm danh của bản thân.",
+        )
     return _attendance_payload(db, schedule)
 
 
@@ -1146,6 +1455,26 @@ def update_schedule_attendance(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Không thể điểm danh cho buổi học đã hủy.",
+        )
+    now = business_now_naive()
+    start_at = datetime.combine(schedule.NgayHoc, schedule.GioBatDau)
+    end_at = datetime.combine(schedule.NgayHoc, schedule.GioKetThuc)
+    if now < start_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Chỉ có thể điểm danh từ khi buổi học bắt đầu.",
+        )
+    role_ids = user_role_ids(db, current_user.NguoiDungId)
+    is_training_manager = bool(role_ids.intersection({7, 8}))
+    if now >= end_at and not is_training_manager:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ quản lý đào tạo được sửa điểm danh của buổi học đã kết thúc.",
+        )
+    if now >= end_at and not request.ly_do:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Cần nêu lý do khi điều chỉnh điểm danh của buổi học đã kết thúc.",
         )
 
     roster_ids = {
@@ -1168,9 +1497,12 @@ def update_schedule_attendance(
         .all()
     )
     existing_by_student = {item.HocVienId: item for item in existing_rows}
-    now = business_now_naive()
     for entry in request.hoc_viens:
         attendance = existing_by_student.get(entry.hoc_vien_id)
+        old_status = attendance.TrangThai if attendance is not None else None
+        old_note = attendance.GhiChu if attendance is not None else None
+        if old_status == entry.trang_thai and old_note == entry.ghi_chu:
+            continue
         if attendance is None:
             attendance = DiemDanh(
                 LichHocId=schedule.LichHocId,
@@ -1183,6 +1515,20 @@ def update_schedule_attendance(
         attendance.GhiChu = entry.ghi_chu
         attendance.NguoiDiemDanhId = current_user.NguoiDungId
         attendance.NgayCapNhat = now
+        db.add(
+            AttendanceAudit(
+                LichHocId=schedule.LichHocId,
+                HocVienId=entry.hoc_vien_id,
+                TrangThaiCu=old_status,
+                TrangThaiMoi=entry.trang_thai,
+                GhiChu=(
+                    request.ly_do
+                    or entry.ghi_chu
+                ),
+                NguoiThucHienId=current_user.NguoiDungId,
+                ThoiDiem=now,
+            )
+        )
 
     _commit(db, "Không thể lưu điểm danh cho buổi học.")
     return _attendance_payload(db, schedule)

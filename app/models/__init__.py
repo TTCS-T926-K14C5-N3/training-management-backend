@@ -9,6 +9,13 @@ from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.mon_hoc import MonHoc
 from app.models.phong_hoc import PhongHoc
+from app.models.lich_hoc import LichHoc, LichHocLichSu
+from app.models.diem_danh import DiemDanh
+from app.models.absence_request import (
+    AbsenceRequest,
+    AttendanceAudit,
+    AttendanceNotification,
+)
 from app.models.thoi_khoa_bieu import (
     ThoiKhoaBieu,
     ThoiKhoaBieuDiemDanh,

@@ -5,6 +5,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Time,
+    UniqueConstraint,
     Unicode,
     UnicodeText,
 )
@@ -18,6 +19,7 @@ class LichHoc(Base):
     LichHocId = Column(Integer, primary_key=True, autoincrement=True)
     LopHocId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=False)
     MonHocId = Column(Integer, ForeignKey("MonHoc.MonHocId"), nullable=False)
+    BaiHocId = Column(Integer, ForeignKey("BuoiHoc.BuoiHocId"), nullable=True)
     NgayHoc = Column(Date, nullable=False)
     GioBatDau = Column(Time, nullable=False)
     GioKetThuc = Column(Time, nullable=False)
