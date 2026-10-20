@@ -2,24 +2,23 @@ import os
 
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
+# ============================================================
+# SQL SERVER
+# ============================================================
 
-DB_SERVER = os.getenv(
-    "DB_SERVER"
-)
+DB_SERVER = os.getenv("DB_SERVER")
 
 DB_NAME = os.getenv(
     "DB_NAME",
-    "QuanLyDaoTao"
+    "QuanLyDaoTao",
 )
 
 DB_DRIVER = os.getenv(
     "DB_DRIVER",
-    "ODBC Driver 18 for SQL Server"
+    "ODBC Driver 18 for SQL Server",
 )
-
 
 if not DB_SERVER:
     raise ValueError(
@@ -46,39 +45,55 @@ DB_TRUST_SERVER_CERTIFICATE = os.getenv(
     "yes",
 ).strip().lower() in {"1", "true", "yes", "y"}
 
-
 # ============================================================
 # SMTP - GỬI EMAIL
 # ============================================================
 
 SMTP_HOST = os.getenv(
     "SMTP_HOST",
-    "smtp.gmail.com"
+    "smtp.gmail.com",
 )
 
 SMTP_PORT = int(
-    os.getenv(
-        "SMTP_PORT",
-        "587"
-    )
+    os.getenv("SMTP_PORT", "587")
 )
 
-SMTP_USERNAME = os.getenv(
-    "SMTP_USERNAME"
-)
-
-SMTP_PASSWORD = os.getenv(
-    "SMTP_PASSWORD"
-)
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 SMTP_FROM = os.getenv(
     "SMTP_FROM",
-    SMTP_USERNAME
+    SMTP_USERNAME,
 )
+
+# ============================================================
+# JWT - XÁC THỰC
+# ============================================================
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+if not SECRET_KEY:
+    raise ValueError(
+        "Chua cau hinh SECRET_KEY. "
+        "Hay them SECRET_KEY vao file .env."
+    )
+
+ALGORITHM = os.getenv(
+    "JWT_ALGORITHM",
+    "HS256",
+)
+
+ACCESS_TOKEN_EXPIRE_MINUTES = int(
+    os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+)
+
+# ============================================================
+# FRONTEND / CORS
+# ============================================================
 
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "http://localhost:5173"
+    "http://localhost:5173",
 ).rstrip("/")
 
 CORS_ORIGINS = [
@@ -89,6 +104,10 @@ CORS_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+
+# ============================================================
+# THÔNG TIN LIÊN HỆ QUẢN TRỊ
+# ============================================================
 
 ADMIN_CONTACT_PHONE = os.getenv(
     "ADMIN_CONTACT_PHONE",

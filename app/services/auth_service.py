@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import secrets
+import string
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
+
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.revoked_token import RevokedToken
@@ -35,6 +37,47 @@ from app.services.email_service import (
 password_hash = PasswordHash.recommended()
 logger = logging.getLogger(__name__)
 STUDENT_ROLE_ID = 2
+
+
+# =========================================================
+# ĐƯỜNG DẪN TRANG CHỦ THEO VAI TRÒ
+# =========================================================
+
+ROLE_HOME_PATHS = {
+    "admin": "/admin/home",
+    "quản trị hệ thống": "/admin/home",
+    "quản trị viên": "/admin/home",
+}
+
+
+def _role_home_path(role_names: list[str]) -> str:
+    for role_name in role_names:
+        if not role_name:
+            continue
+
+        path = ROLE_HOME_PATHS.get(role_name.strip().lower())
+        if path:
+            return path
+
+    return "/home"
+
+
+def _get_role_names(db: Session, user_id: int) -> list[str]:
+    rows = db.execute(
+        text(
+            """
+            SELECT vt.TenVaiTro
+            FROM NguoiDung_VaiTro ndvt
+            INNER JOIN VaiTro vt
+                ON ndvt.VaiTroId = vt.VaiTroId
+            WHERE ndvt.NguoiDungId = :nguoi_dung_id
+            ORDER BY vt.VaiTroId
+            """
+        ),
+        {"nguoi_dung_id": user_id},
+    ).mappings().all()
+
+    return [row["TenVaiTro"] for row in rows]
 
 
 # ============================================================
@@ -226,7 +269,7 @@ def create_user(
     now = datetime.now()
 
     user = NguoiDung(
-        HoTen=request.ho_ten.strip(),
+        HoTen=ho_ten.strip(),
         Email=email,
         SoDienThoai=phone,
         MatKhauHash=password_hash.hash(
@@ -669,6 +712,57 @@ def login_user(
             detail="Email hoặc mật khẩu không đúng",
         )
 
+    if not getattr(user, "DaKichHoat", True):
+        activation_token = None
+
+        if request.activation_token:
+            token_hash = hashlib.sha256(
+                request.activation_token.encode()
+            ).hexdigest()
+            activation_token = (
+                db.query(TokenKichHoat)
+                .filter(
+                    TokenKichHoat.Token == token_hash,
+                    TokenKichHoat.DaSuDung == False,
+                )
+                .first()
+            )
+
+            if (
+                activation_token
+                and activation_token.NguoiDungId
+                != user.NguoiDungId
+            ):
+                activation_token = None
+
+            if (
+                activation_token
+                and activation_token.ThoiGianHetHan < datetime.now()
+            ):
+                activation_token.DaSuDung = True
+                db.commit()
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Link kích hoạt đã hết hạn. "
+                        "Vui lòng liên hệ quản trị viên."
+                    ),
+                )
+
+            if activation_token:
+                user.DaKichHoat = True
+                activation_token.DaSuDung = True
+                db.commit()
+
+        if not user.DaKichHoat:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Tài khoản chưa được kích hoạt. "
+                    "Vui lòng kiểm tra email để kích hoạt tài khoản."
+                ),
+            )
+
     now = datetime.now()
 
     # ========================================================
@@ -718,6 +812,7 @@ def login_user(
             user.SoLanDangNhapSai or 0
         ) + 1
 
+        # Sai 5 lần → khóa 15 phút
         if user.SoLanDangNhapSai >= 5:
             user.KhoaDen = (
                 now + timedelta(minutes=15)
@@ -827,6 +922,42 @@ def login_user(
         },
     ).mappings().all()
 
+    # =====================================================
+    # TẠO JWT
+    # =====================================================
+
+    # =================================================
+    # BẮT BUỘC ĐỔI MẬT KHẨU TẠM THỜI
+    #
+    # Tài khoản do admin tạo có YeuCauDoiMatKhau=True.
+    # Chỉ cấp token được phép đổi mật khẩu thôi,
+    # để không thể dùng mật khẩu tạm đi khắp hệ thống.
+    # =================================================
+
+    access_token = create_access_token(
+        {
+            "sub": user.Email,
+            "user_id": user_id,
+            "roles": (
+                []
+                if user.YeuCauDoiMatKhau
+                else [
+                    role["TenVaiTro"]
+                    for role in roles
+                ]
+            ),
+            "muc_dich": (
+                "DOI_MAT_KHAU"
+                if user.YeuCauDoiMatKhau
+                else "TRUY_CAP"
+            ),
+        }
+    )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
     return {
         "message": "Đăng nhập thành công",
 
@@ -845,7 +976,9 @@ def login_user(
         "token_type": "bearer",
 
         "nguoiDungId": user.NguoiDungId,
+
         "hoTen": user.HoTen,
+
         "email": user.Email,
 
         "yeuCauDoiMatKhau": bool(
@@ -970,6 +1103,8 @@ def update_password(
     )
 
     user.NgayCapNhat = now
+
+    # Các token cũ không còn hợp lệ
     user.TokenValidAfter = now
 
     user.BatBuocDoiMatKhau = False
@@ -1066,7 +1201,7 @@ def forgot_password(
             reset_link=reset_link,
         )
 
-    except RuntimeError as exc:
+    except RuntimeError:
         logger.exception(
             "Failed to send password-reset email for user_id=%s",
             user.NguoiDungId,
@@ -1083,13 +1218,7 @@ def forgot_password(
                 user.NguoiDungId,
             )
 
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Không thể gửi email đặt lại mật khẩu lúc này. "
-                "Vui lòng thử lại sau."
-            ),
-        ) from exc
+        return {"message": message}
 
     return {
         "message": message
@@ -1126,7 +1255,9 @@ def activate_account(
     now = datetime.now()
 
     if activation_token.ThoiGianHetHan < now:
+
         activation_token.DaSuDung = True
+
         db.commit()
 
         raise HTTPException(
@@ -1167,7 +1298,6 @@ def activate_account(
 
     return {
         "message": "Kích hoạt tài khoản thành công",
-        "nguoiDungId": user.NguoiDungId,
         "email": user.Email,
     }
 
@@ -1199,16 +1329,32 @@ def validate_reset_token(
             detail="Token không hợp lệ",
         )
 
-    now = datetime.now()
+    if reset_token.ThoiGianHetHan < datetime.now():
 
-    if reset_token.ThoiGianHetHan < now:
         reset_token.DaSuDung = True
+
         db.commit()
 
         raise HTTPException(
             status_code=400,
             detail="Token đã hết hạn",
         )
+
+    return reset_token
+
+
+# =========================================================
+# KIỂM TRA TOKEN RESET PASSWORD
+# =========================================================
+
+def validate_reset_token(
+    db: Session,
+    token: str,
+):
+    _get_valid_reset_token(
+        db,
+        token,
+    )
 
     return {
         "message": "Token hợp lệ"
@@ -1316,7 +1462,8 @@ def update_user(
             db.query(NguoiDung)
             .filter(
                 NguoiDung.Email == email,
-                NguoiDung.NguoiDungId != user_id,
+                NguoiDung.NguoiDungId
+                != user_id,
             )
             .first()
         )
@@ -1507,6 +1654,7 @@ def lock_user(
     user = _find_user(db, user_id)
 
     user.TrangThai = "BiKhoa"
+
     user.KhoaDen = None
 
     user.LyDoKhoa = request.ly_do_khoa.strip()
@@ -1552,8 +1700,11 @@ def unlock_user(
         )
 
     user.TrangThai = "HoatDong"
+
     user.KhoaDen = None
+
     user.LyDoKhoa = None
+
     user.SoLanDangNhapSai = 0
     now = datetime.now()
     user.TokenValidAfter = now
@@ -1573,6 +1724,7 @@ def unlock_user(
 
     return {
         "message": "Mở khóa tài khoản thành công",
+
         "user": {
             **_user_data(user),
             "ngayCapNhat": user.NgayCapNhat,

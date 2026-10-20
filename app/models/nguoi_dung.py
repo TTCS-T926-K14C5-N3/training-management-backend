@@ -1,3 +1,4 @@
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -15,29 +16,23 @@ from app.database import Base
 class NguoiDung(Base):
     __tablename__ = "NguoiDung"
 
-    # =========================================================
-    # KHÓA CHÍNH
-    # =========================================================
-
+    # KHOA CHINH
     NguoiDungId = Column(
         Integer,
         primary_key=True,
-        autoincrement=True
+        autoincrement=True,
     )
 
-    # =========================================================
-    # THÔNG TIN CƠ BẢN
-    # =========================================================
-
+    # THONG TIN CO BAN
     HoTen = Column(
         Unicode(100),
-        nullable=False
+        nullable=False,
     )
 
     Email = Column(
         String(255),
         nullable=False,
-        unique=True
+        unique=True,
     )
 
     SoDienThoai = Column(String(20), nullable=True)
@@ -46,136 +41,79 @@ class NguoiDung(Base):
     TrinhDoDauVao = Column(Unicode(150), nullable=True)
     GhiChuHoSo = Column(Unicode(2000), nullable=True)
 
-    # =========================================================
-    # MẬT KHẨU
-    # =========================================================
-
-    # Chỉ lưu mật khẩu đã hash.
-    # Không lưu mật khẩu dạng plain text.
-
+    # MAT KHAU
+    # Chi luu mat khau da hash.
     MatKhauHash = Column(
         String(255),
-        nullable=False
+        nullable=False,
     )
 
-    # =========================================================
-    # TRẠNG THÁI TÀI KHOẢN
-    # =========================================================
-
+    # TRANG THAI TAI KHOAN
     TrangThai = Column(
         String(50),
-        nullable=False
+        nullable=False,
     )
 
-    # =========================================================
-    # KÍCH HOẠT TÀI KHOẢN
-    # =========================================================
-
+    # KICH HOAT TAI KHOAN
     DaKichHoat = Column(
         Boolean,
         nullable=False,
-        default=True
+        default=True,
     )
 
-    # =========================================================
-    # MẬT KHẨU TẠM THỜI
-    # =========================================================
-
-    # Cột thực tế trong database:
-    # BatBuocDoiMatKhau
-    #
-    # True  = tài khoản bắt buộc đổi mật khẩu
-    # False = không bắt buộc đổi mật khẩu
-
+    # DOI MAT KHAU
     BatBuocDoiMatKhau = Column(
         Boolean,
         nullable=False,
-        default=False
+        default=False,
     )
-
-    # Cột thực tế trong database:
-    # CanDoiMatKhau
-    #
-    # True  = người dùng đang cần đổi mật khẩu
-    # False = người dùng không cần đổi mật khẩu
 
     CanDoiMatKhau = Column(
         Boolean,
         nullable=False,
-        default=False
+        default=False,
     )
 
-    # Tên nghiệp vụ dùng trong code.
-    # Không tạo thêm cột database.
-    #
-    # YeuCauDoiMatKhau -> CanDoiMatKhau
+    # Ten nghiep vu dung trong code, khong tao cot moi.
+    YeuCauDoiMatKhau = synonym("CanDoiMatKhau")
 
-    YeuCauDoiMatKhau = synonym(
-        "CanDoiMatKhau"
-    )
-
-    # =========================================================
-    # HẾT HẠN MẬT KHẨU TẠM THỜI
-    # =========================================================
-
-    # Thời điểm mật khẩu tạm thời hết hạn.
-    #
-    # NULL = tài khoản không có thời hạn mật khẩu tạm
-    # hoặc không sử dụng mật khẩu tạm thời.
-
+    # HAN MAT KHAU TAM THOI
     MatKhauTamThoiHetHan = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
-    # =========================================================
-    # BẢO VỆ ĐĂNG NHẬP
-    # =========================================================
-
-    # Số lần đăng nhập sai liên tiếp
-
+    # BAO VE DANG NHAP
     SoLanDangNhapSai = Column(
         Integer,
         nullable=False,
-        default=0
+        default=0,
     )
-
-    # Thời điểm tài khoản được mở khóa
 
     KhoaDen = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
-
-    # Lý do khóa tài khoản
 
     LyDoKhoa = Column(
         String(255),
-        nullable=True
+        nullable=True,
     )
 
-    # =========================================================
-    # THỜI GIAN
-    # =========================================================
-
+    # THOI GIAN
     NgayTao = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
     NgayCapNhat = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )
 
-    # =========================================================
     # JWT TOKEN
-    # =========================================================
-
-    # Khi đổi mật khẩu hoặc cần vô hiệu hóa
-    # các token cũ, TokenValidAfter được cập nhật.
-
+    # Token cap truoc thoi diem nay co the bi vo hieu hoa.
     TokenValidAfter = Column(
         DateTime,
-        nullable=True
+        nullable=True,
     )

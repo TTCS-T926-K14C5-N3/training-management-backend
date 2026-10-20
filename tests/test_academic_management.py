@@ -16,6 +16,7 @@ from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.mon_hoc import MonHoc
+from app.models.phong_hoc import PhongHoc
 from app.models.vai_tro import VaiTro
 from app.routers.academic import (
     _class_payload,
@@ -23,6 +24,7 @@ from app.routers.academic import (
     archive_subject,
     archive_class,
     create_class,
+    create_room,
     create_grade,
     create_subject,
     create_training_program,
@@ -41,6 +43,7 @@ from app.routers.academic import (
     update_training_program,
 )
 from app.schemas.academic import (
+    ClassInstructorAssignment,
     ClassEnrollmentWrite,
     ClassWrite,
     GradeWrite,
@@ -854,12 +857,11 @@ def test_academic_routes_are_registered_in_the_fastapi_app():
     assert "/academic/programs/{program_id}" in paths
     assert "/academic/grades" in paths
     assert "/academic/subjects" in paths
+    assert "/academic/students/{student_id}" in paths
     assert "/academic/rooms/{room_id}" in paths
 
 
 def test_room_can_be_updated_and_missing_room_returns_404(db: Session):
-    from app.models.phong_hoc import PhongHoc
-
     room = PhongHoc(
         MaPhong="A101",
         TenPhong="Phòng A101",
@@ -887,3 +889,192 @@ def test_room_can_be_updated_and_missing_room_returns_404(db: Session):
             db,
         )
     assert error.value.status_code == 404
+
+
+def test_room_type_and_capacity_are_enforced_on_class_updates_and_enrollment(
+    db: Session,
+):
+    teacher, _student, _second_student, subject, class_record = (
+        setup_academic_class(db)
+    )
+    room = create_room(
+        RoomWrite(
+            maPhong="B201",
+            tenPhong="Phòng B201",
+            sucChua=2,
+            loaiPhong="Trực tiếp",
+        ),
+        db,
+    )
+    tiny_room = create_room(
+        RoomWrite(
+            maPhong="B202",
+            tenPhong="Phòng B202",
+            sucChua=1,
+            loaiPhong="Trực tiếp",
+        ),
+        db,
+    )
+    online_room = create_room(
+        RoomWrite(
+            maPhong="WEB-01",
+            tenPhong="Phòng trực tuyến 01",
+            sucChua=100,
+            loaiPhong="Trực tuyến",
+        ),
+        db,
+    )
+    update_request = ClassWrite(
+        maLop=class_record["maLop"],
+        tenLop=class_record["tenLop"],
+        namHoc=class_record["namHoc"],
+        giangVienId=teacher.NguoiDungId,
+        hocVienIds=class_record["hocVienIds"],
+        monHocIds=[subject["monHocId"]],
+        phongHocId=room["phongHocId"],
+        siSoToiDa=30,
+    )
+    updated = update_class(
+        class_record["lopHocId"],
+        update_request,
+        current_user=teacher,
+        db=db,
+    )
+    assert updated["sucChuaPhong"] == 2
+    assert updated["loaiPhong"] == "Trực tiếp"
+
+    third_student = add_user(db, 22, 2, "Học viên Ba")
+    with pytest.raises(HTTPException) as enrollment_error:
+        enroll_students(
+            class_record["lopHocId"],
+            ClassEnrollmentWrite(hocVienIds=[third_student.NguoiDungId]),
+            current_user=teacher,
+            db=db,
+        )
+    assert enrollment_error.value.status_code == 409
+
+    with pytest.raises(HTTPException) as room_capacity_error:
+        update_class(
+            class_record["lopHocId"],
+            update_request.model_copy(
+                update={"phong_hoc_id": tiny_room["phongHocId"]},
+            ),
+            current_user=teacher,
+            db=db,
+        )
+    assert room_capacity_error.value.status_code == 422
+
+    with pytest.raises(HTTPException) as room_type_error:
+        update_class(
+            class_record["lopHocId"],
+            update_request.model_copy(
+                update={"phong_hoc_id": online_room["phongHocId"]},
+            ),
+            current_user=teacher,
+            db=db,
+        )
+    assert room_type_error.value.status_code == 422
+
+    with pytest.raises(HTTPException) as room_update_error:
+        update_room(
+            room["phongHocId"],
+            RoomWrite(
+                maPhong="B201",
+                tenPhong="Phòng B201",
+                sucChua=1,
+                loaiPhong="Trực tiếp",
+            ),
+            db,
+        )
+    assert room_update_error.value.status_code == 409
+    assert db.get(PhongHoc, room["phongHocId"]).SucChua == 2
+
+
+def test_subject_instructor_roles_and_multiple_assistants_are_validated(
+    db: Session,
+):
+    teacher, _student, _second_student, subject, class_record = (
+        setup_academic_class(db)
+    )
+    first_assistant = add_user(db, 31, 4, "Trợ giảng Một")
+    second_assistant = add_user(db, 32, 4, "Trợ giảng Hai")
+    subject_id = subject["monHocId"]
+    request = ClassWrite(
+        maLop=class_record["maLop"],
+        tenLop=class_record["tenLop"],
+        namHoc=class_record["namHoc"],
+        giangVienId=teacher.NguoiDungId,
+        hocVienIds=class_record["hocVienIds"],
+        monHocIds=[subject_id],
+        phanCongGiangVien=[
+            {
+                "monHocId": subject_id,
+                "giangVienId": teacher.NguoiDungId,
+                "vaiTro": "Chính",
+            },
+            {
+                "monHocId": subject_id,
+                "giangVienId": first_assistant.NguoiDungId,
+                "vaiTro": "Trợ giảng",
+            },
+            {
+                "monHocId": subject_id,
+                "giangVienId": second_assistant.NguoiDungId,
+                "vaiTro": "Trợ giảng",
+            },
+        ],
+    )
+    updated = update_class(
+        class_record["lopHocId"],
+        request,
+        current_user=teacher,
+        db=db,
+    )
+    assigned_roles = {
+        item["vaiTro"] for item in updated["monHocs"][0]["giangViens"]
+    }
+    assert assigned_roles == {"Chính", "Trợ giảng"}
+    assert len(updated["monHocs"][0]["giangViens"]) == 3
+
+    with pytest.raises(HTTPException) as primary_role_error:
+        update_class(
+            class_record["lopHocId"],
+            request.model_copy(
+                update={
+                    "phan_cong_giang_vien": [
+                        ClassInstructorAssignment(
+                            monHocId=subject_id,
+                            giangVienId=first_assistant.NguoiDungId,
+                            vaiTro="Chính",
+                        )
+                    ]
+                },
+            ),
+            current_user=teacher,
+            db=db,
+        )
+    assert primary_role_error.value.status_code == 422
+
+    with pytest.raises(HTTPException) as assistant_role_error:
+        update_class(
+            class_record["lopHocId"],
+            request.model_copy(
+                update={
+                    "phan_cong_giang_vien": [
+                        ClassInstructorAssignment(
+                            monHocId=subject_id,
+                            giangVienId=teacher.NguoiDungId,
+                            vaiTro="Chính",
+                        ),
+                        ClassInstructorAssignment(
+                            monHocId=subject_id,
+                            giangVienId=teacher.NguoiDungId,
+                            vaiTro="Trợ giảng",
+                        ),
+                    ]
+                },
+            ),
+            current_user=teacher,
+            db=db,
+        )
+    assert assistant_role_error.value.status_code == 422

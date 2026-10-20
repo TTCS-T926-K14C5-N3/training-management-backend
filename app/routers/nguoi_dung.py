@@ -8,6 +8,7 @@ from fastapi import (
     File,
     HTTPException,
 )
+from pydantic import EmailStr
 from sqlalchemy import String, cast, or_
 from pathlib import Path
 from fastapi.responses import FileResponse
@@ -170,8 +171,50 @@ def get_user_avatar(nguoi_dung_id: int):
 
 
 # =========================================================
-# LẤY DANH SÁCH NGƯỜI DÙNG
+# KIỂM TRA EMAIL ĐÃ TỒN TẠI CHƯA
 #
+# GET /users/check-email?email=...
+#
+# Dùng cho popup tạo tài khoản: hiển thị cảnh báo đỏ
+# ngay dưới ô email trước khi bấm tạo.
+# =========================================================
+
+@router.get(
+    "/check-email",
+    dependencies=[
+        Depends(
+            require_permission("USER_CREATE")
+        )
+    ],
+)
+def check_email_exists(
+    email: EmailStr = Query(
+        description="Email cần kiểm tra",
+    ),
+    db: Session = Depends(get_db),
+):
+    normalized_email = str(email).strip().lower()
+
+    exists = (
+        db.query(NguoiDung.NguoiDungId)
+        .filter(NguoiDung.Email == normalized_email)
+        .first()
+        is not None
+    )
+
+    return {
+        "email": normalized_email,
+        "exists": exists,
+        "message": (
+            "Email đã tồn tại"
+            if exists
+            else "Email hợp lệ"
+        ),
+    }
+
+
+# =========================================================
+# LẤY DANH SÁCH NGƯỜI DÙNG
 # GET /users/
 #
 # Hỗ trợ:
@@ -279,7 +322,8 @@ def get_users(
 
     if status is not None:
         query = query.filter(
-            NguoiDung.TrangThai == status.value
+            NguoiDung.TrangThai
+            == status.value
         )
 
     # =====================================================
@@ -613,7 +657,6 @@ def admin_create_user_endpoint(
 
 @router.post(
     "/",
-    status_code=201,
     dependencies=[
         Depends(
             require_permission("USER_CREATE")

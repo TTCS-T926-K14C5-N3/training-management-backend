@@ -1,0 +1,625 @@
+import json
+import re
+from datetime import date, datetime
+from html import escape
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import and_, or_
+from sqlalchemy.orm import Session
+
+from app.core.security import get_current_user
+from app.database import get_db
+from app.models.attendance import (
+    AbsenceRequest,
+    AbsenceThreshold,
+    AttendanceAudit,
+    AttendanceNotification,
+    AttendanceRecord,
+)
+from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
+from app.models.lich_hoc import LichHoc
+from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.nguoi_dung import NguoiDung
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+
+router = APIRouter(prefix="/attendance", tags=["Attendance"])
+VALID_STATUSES = {"present", "late", "excused_absence", "unexcused_absence"}
+MANAGER_ROLES = {7, 8}
+TEACHER_ROLES = {3, 4}
+
+
+class AttendanceItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    student_id: int = Field(alias="studentId", gt=0)
+    status: str
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class AttendanceBatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    attendance_date: date = Field(alias="date")
+    records: list[AttendanceItem]
+
+
+class AbsenceRequestInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    class_id: int = Field(alias="classId", gt=0)
+    attendance_date: date = Field(alias="date")
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: str | None = Field(default=None, max_length=1000)
+
+
+class AbsenceDecision(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    decision: str
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class ThresholdInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    percentage: int = Field(alias="percentage", ge=0, le=100)
+
+
+def _role_ids(db: Session, user: NguoiDung) -> set[int]:
+    return {int(row[0]) for row in db.query(NguoiDungVaiTro.VaiTroId).filter(
+        NguoiDungVaiTro.NguoiDungId == user.NguoiDungId
+    ).all()}
+
+
+def _manager(db: Session, user: NguoiDung) -> bool:
+    return bool(_role_ids(db, user) & MANAGER_ROLES)
+
+
+def _is_student(db: Session, user: NguoiDung) -> bool:
+    return 2 in _role_ids(db, user)
+
+
+def _class_or_404(db: Session, class_id: int) -> LopHoc:
+    record = db.query(LopHoc).filter(LopHoc.LopHocId == class_id).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Class not found")
+    return record
+
+
+def _ensure_teacher_or_manager(db: Session, user: NguoiDung, class_record: LopHoc) -> None:
+    roles = _role_ids(db, user)
+    if roles & MANAGER_ROLES:
+        return
+    assigned = class_record.GiangVienId == user.NguoiDungId or db.query(LichHoc.LichHocId).filter(
+        LichHoc.LopHocId == class_record.LopHocId,
+        LichHoc.GiangVienId == user.NguoiDungId,
+    ).first() is not None
+    if not (roles & TEACHER_ROLES) or not assigned:
+        raise HTTPException(status_code=403, detail="You cannot manage attendance for this class")
+
+
+def _ensure_edit_date(attendance_date: date, manager: bool) -> None:
+    if attendance_date > date.today():
+        raise HTTPException(status_code=400, detail="Attendance can only be recorded for today or earlier")
+    if attendance_date < date.today() and not manager:
+        raise HTTPException(status_code=403, detail="Only a manager can edit past attendance")
+
+
+def _audit(db: Session, kind: str, entity_id: int, action: str, old, new, reason, actor_id: int) -> None:
+    db.add(AttendanceAudit(
+        DoiTuong=kind,
+        DoiTuongId=entity_id,
+        HanhDong=action,
+        DuLieuCu=json.dumps(old, ensure_ascii=False, default=str) if old is not None else None,
+        DuLieuMoi=json.dumps(new, ensure_ascii=False, default=str) if new is not None else None,
+        LyDo=reason,
+        NguoiThucHienId=actor_id,
+        ThoiDiem=datetime.now(),
+    ))
+
+
+def _threshold(db: Session, program_id: int | None) -> int:
+    if program_id is None:
+        return 20
+    row = db.query(AbsenceThreshold).filter(AbsenceThreshold.ChuongTrinhId == program_id).first()
+    return row.TiLeToiDa if row else 20
+
+
+def _absence_rate(db: Session, student_id: int, program_id: int) -> tuple[int, int, float]:
+    rows = db.query(AttendanceRecord.TrangThai).join(
+        LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
+    ).filter(
+        AttendanceRecord.HocVienId == student_id,
+        LopHoc.ChuongTrinhId == program_id,
+    ).all()
+    total = len(rows)
+    absent = sum(1 for row in rows if row[0] == "unexcused_absence")
+    return absent, total, (absent * 100 / total if total else 0)
+
+
+def _notify_threshold_crossing(db: Session, class_record: LopHoc, student: NguoiDung, before_rate: float) -> None:
+    program_id = class_record.ChuongTrinhId
+    if program_id is None:
+        return
+    absent, total, after_rate = _absence_rate(db, student.NguoiDungId, program_id)
+    limit = _threshold(db, program_id)
+    if total == 0 or before_rate >= limit or after_rate < limit:
+        return
+    recipients = {class_record.GiangVienId} if class_record.GiangVienId else set()
+    recipients.update(row[0] for row in db.query(NguoiDungVaiTro.NguoiDungId).filter(
+        NguoiDungVaiTro.VaiTroId.in_(MANAGER_ROLES)
+    ).all())
+    for recipient in recipients:
+        db.add(AttendanceNotification(
+            NguoiNhanId=recipient,
+            HocVienId=student.NguoiDungId,
+            ChuongTrinhId=program_id,
+            Loai="absence_threshold",
+            TieuDe="Absence threshold reached",
+            NoiDung=f"{student.HoTen} has {absent}/{total} unexcused absences ({after_rate:.1f}%), reaching the {limit}% limit.",
+            ThoiDiem=datetime.now(),
+        ))
+
+
+def _upsert_record(db: Session, class_record: LopHoc, student_id: int, attendance_date: date,
+                   state: str, reason: str | None, actor: NguoiDung) -> AttendanceRecord:
+    if state not in VALID_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Invalid attendance state: {state}")
+    if db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == class_record.LopHocId,
+        LopHocHocVien.HocVienId == student_id,
+    ).first() is None:
+        raise HTTPException(status_code=400, detail="Student is not enrolled in this class")
+    student = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == student_id).first()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+    before_rate = 0.0
+    if class_record.ChuongTrinhId is not None:
+        before_rate = _absence_rate(db, student_id, class_record.ChuongTrinhId)[2]
+    record = db.query(AttendanceRecord).filter(
+        AttendanceRecord.LopHocId == class_record.LopHocId,
+        AttendanceRecord.HocVienId == student_id,
+        AttendanceRecord.NgayHoc == attendance_date,
+    ).first()
+    old = {"status": record.TrangThai, "reason": record.GhiChu} if record else None
+    if record is None:
+        record = AttendanceRecord(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student_id,
+            NgayHoc=attendance_date,
+            TrangThai=state,
+            GhiChu=reason,
+            NguoiCapNhatId=actor.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+        )
+        db.add(record)
+        db.flush()
+        action = "created"
+    else:
+        record.TrangThai = state
+        record.GhiChu = reason
+        record.NguoiCapNhatId = actor.NguoiDungId
+        record.NgayCapNhat = datetime.now()
+        action = "updated"
+    new = {"status": state, "reason": reason}
+    _audit(db, "attendance", record.DiemDanhId, action, old, new, reason, actor.NguoiDungId)
+    if state == "unexcused_absence" and old is None or (
+        state == "unexcused_absence" and old and old["status"] != state
+    ):
+        _notify_threshold_crossing(db, class_record, student, before_rate)
+    return record
+
+
+def _class_payload(db: Session, class_record: LopHoc) -> dict:
+    return {
+        "classId": class_record.LopHocId,
+        "classCode": class_record.MaLop,
+        "className": class_record.TenLop,
+        "programId": class_record.ChuongTrinhId,
+        "absenceThreshold": _threshold(db, class_record.ChuongTrinhId),
+    }
+
+
+@router.get("/classes")
+def list_attendance_classes(
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    roles = _role_ids(db, current_user)
+    query = db.query(LopHoc)
+    if not roles & MANAGER_ROLES:
+        if roles & TEACHER_ROLES:
+            taught = db.query(LichHoc.LopHocId).filter(LichHoc.GiangVienId == current_user.NguoiDungId)
+            query = query.filter(or_(LopHoc.GiangVienId == current_user.NguoiDungId, LopHoc.LopHocId.in_(taught)))
+        elif 2 in roles:
+            enrolled = db.query(LopHocHocVien.LopHocId).filter(LopHocHocVien.HocVienId == current_user.NguoiDungId)
+            query = query.filter(LopHoc.LopHocId.in_(enrolled))
+        else:
+            raise HTTPException(status_code=403, detail="Attendance access is not allowed")
+    return [_class_payload(db, record) for record in query.order_by(LopHoc.MaLop).all()]
+
+
+@router.get("/classes/{class_id}/matrix")
+def get_attendance_matrix(
+    class_id: int,
+    attendance_date: date | None = Query(default=None, alias="date"),
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    day = attendance_date or date.today()
+    roster = db.query(NguoiDung).join(
+        LopHocHocVien, LopHocHocVien.HocVienId == NguoiDung.NguoiDungId
+    ).filter(LopHocHocVien.LopHocId == class_id).order_by(NguoiDung.HoTen).all()
+    recorded = {row.HocVienId: row for row in db.query(AttendanceRecord).filter(
+        AttendanceRecord.LopHocId == class_id, AttendanceRecord.NgayHoc == day
+    ).all()}
+    requests = db.query(AbsenceRequest).filter(
+        AbsenceRequest.LopHocId == class_id, AbsenceRequest.NgayHoc == day
+    ).all()
+    requests_by_student = {request.HocVienId: request for request in requests if request.TrangThai == "pending"}
+    rows = []
+    for student in roster:
+        record = recorded.get(student.NguoiDungId)
+        request = requests_by_student.get(student.NguoiDungId)
+        rows.append({
+            "studentId": student.NguoiDungId,
+            "studentName": student.HoTen,
+            "email": student.Email,
+            "status": record.TrangThai if record else "unmarked",
+            "reason": record.GhiChu if record else None,
+            "requestId": request.DonXinVangId if request else None,
+        })
+    present = sum(1 for row in rows if row["status"] in {"present", "late"})
+    absent = sum(1 for row in rows if row["status"] in {"excused_absence", "unexcused_absence"})
+    unexcused = sum(1 for row in rows if row["status"] == "unexcused_absence")
+    threshold = _threshold(db, class_record.ChuongTrinhId)
+    flagged_students = []
+    if class_record.ChuongTrinhId is not None:
+        for student in roster:
+            total_absent, total_marked, rate = _absence_rate(db, student.NguoiDungId, class_record.ChuongTrinhId)
+            if total_marked and rate >= threshold:
+                flagged_students.append({"studentId": student.NguoiDungId, "studentName": student.HoTen,
+                                         "absencePercent": round(rate, 1), "unexcused": total_absent,
+                                         "total": total_marked})
+    return {
+        **_class_payload(db, class_record),
+        "date": day.isoformat(),
+        "students": rows,
+        "counts": {"present": present, "absent": absent, "unexcused": unexcused, "total": len(rows)},
+        "attendancePercent": round(present * 100 / len(rows), 1) if rows else 0,
+        "absencePercent": round(unexcused * 100 / len(rows), 1) if rows else 0,
+        "flaggedStudents": flagged_students,
+        "aboveThreshold": bool(flagged_students),
+    }
+
+
+@router.post("/classes/{class_id}/records")
+def save_attendance(
+    class_id: int,
+    payload: AttendanceBatch,
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    manager = _manager(db, current_user)
+    _ensure_edit_date(payload.attendance_date, manager)
+    touched = set()
+    try:
+        for item in payload.records:
+            if item.student_id in touched:
+                raise HTTPException(status_code=422, detail="A student can only appear once per attendance batch")
+            touched.add(item.student_id)
+            _upsert_record(db, class_record, item.student_id, payload.attendance_date,
+                           item.status, item.reason, current_user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return get_attendance_matrix(class_id, payload.attendance_date, current_user, db)
+
+
+@router.post("/classes/{class_id}/mark-all-present")
+def mark_all_present(
+    class_id: int,
+    attendance_date: date = Query(default_factory=date.today, alias="date"),
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    _ensure_edit_date(attendance_date, _manager(db, current_user))
+    students = db.query(LopHocHocVien.HocVienId).filter(LopHocHocVien.LopHocId == class_id).all()
+    try:
+        for (student_id,) in students:
+            _upsert_record(db, class_record, student_id, attendance_date, "present", None, current_user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return get_attendance_matrix(class_id, attendance_date, current_user, db)
+
+
+@router.get("/classes/{class_id}/audit")
+def list_attendance_audit(
+    class_id: int,
+    attendance_date: date | None = Query(default=None, alias="date"),
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    ids = [row[0] for row in db.query(AttendanceRecord.DiemDanhId).filter(
+        AttendanceRecord.LopHocId == class_id,
+        *([AttendanceRecord.NgayHoc == attendance_date] if attendance_date else []),
+    ).all()]
+    audit = db.query(AttendanceAudit).filter(
+        AttendanceAudit.DoiTuong == "attendance",
+        AttendanceAudit.DoiTuongId.in_(ids),
+    ).order_by(AttendanceAudit.ThoiDiem.desc()).all() if ids else []
+    return [{
+        "id": row.LichSuId, "action": row.HanhDong, "old": row.DuLieuCu,
+        "new": row.DuLieuMoi, "reason": row.LyDo, "at": row.ThoiDiem.isoformat(),
+        "actorId": row.NguoiThucHienId,
+    } for row in audit]
+
+
+@router.post("/absence-requests")
+def submit_absence_request(
+    payload: AbsenceRequestInput,
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    enrolled = db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == payload.class_id,
+        LopHocHocVien.HocVienId == current_user.NguoiDungId,
+    ).first()
+    if enrolled is None or not _is_student(db, current_user):
+        raise HTTPException(status_code=403, detail="Only an enrolled student can request an excused absence")
+    if payload.attendance_date > date.today():
+        scheduled = db.query(LichHoc).filter(
+            LichHoc.LopHocId == payload.class_id,
+            LichHoc.NgayHoc == payload.attendance_date,
+            LichHoc.TrangThai != "Đã hủy",
+        ).first()
+        if scheduled is None:
+            raise HTTPException(status_code=400, detail="No scheduled class exists on this date")
+    pending = db.query(AbsenceRequest).filter(
+        AbsenceRequest.LopHocId == payload.class_id,
+        AbsenceRequest.HocVienId == current_user.NguoiDungId,
+        AbsenceRequest.NgayHoc == payload.attendance_date,
+        AbsenceRequest.TrangThai == "pending",
+    ).first()
+    if pending:
+        raise HTTPException(status_code=409, detail="A pending request already exists for this class and date")
+    request = AbsenceRequest(
+        LopHocId=payload.class_id,
+        HocVienId=current_user.NguoiDungId,
+        NgayHoc=payload.attendance_date,
+        LyDo=payload.reason.strip(),
+        TepChungMinh=payload.evidence,
+        TrangThai="pending",
+        NgayTao=datetime.now(),
+    )
+    if not request.LyDo:
+        raise HTTPException(status_code=422, detail="A reason is required")
+    db.add(request)
+    db.flush()
+    _audit(db, "absence_request", request.DonXinVangId, "submitted", None,
+           {"status": "pending", "reason": request.LyDo, "evidence": request.TepChungMinh},
+           None, current_user.NguoiDungId)
+    db.commit()
+    return {"requestId": request.DonXinVangId, "status": request.TrangThai, "date": request.NgayHoc.isoformat()}
+
+
+@router.get("/absence-requests")
+def list_absence_requests(
+    status: str | None = Query(default=None),
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    roles = _role_ids(db, current_user)
+    query = db.query(AbsenceRequest)
+    if roles & MANAGER_ROLES:
+        pass
+    elif roles & TEACHER_ROLES:
+        taught = db.query(LopHoc.LopHocId).filter(LopHoc.GiangVienId == current_user.NguoiDungId)
+        scheduled = db.query(LichHoc.LopHocId).filter(LichHoc.GiangVienId == current_user.NguoiDungId)
+        query = query.filter(or_(AbsenceRequest.LopHocId.in_(taught), AbsenceRequest.LopHocId.in_(scheduled)))
+    elif 2 in roles:
+        query = query.filter(AbsenceRequest.HocVienId == current_user.NguoiDungId)
+    else:
+        raise HTTPException(status_code=403, detail="Attendance access is not allowed")
+    if status:
+        query = query.filter(AbsenceRequest.TrangThai == status)
+    result = []
+    for request in query.order_by(AbsenceRequest.NgayTao.desc()).all():
+        class_record = db.query(LopHoc).filter(LopHoc.LopHocId == request.LopHocId).first()
+        student = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == request.HocVienId).first()
+        result.append({
+            "requestId": request.DonXinVangId, "classId": request.LopHocId,
+            "classCode": class_record.MaLop if class_record else "",
+            "studentId": request.HocVienId, "studentName": student.HoTen if student else "",
+            "date": request.NgayHoc.isoformat(), "reason": request.LyDo,
+            "evidence": request.TepChungMinh, "status": request.TrangThai,
+            "reviewReason": request.LyDoXuLy,
+        })
+    return result
+
+
+@router.post("/absence-requests/{request_id}/decision")
+def decide_absence_request(
+    request_id: int,
+    payload: AbsenceDecision,
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if payload.decision not in {"approved", "rejected"}:
+        raise HTTPException(status_code=422, detail="Decision must be approved or rejected")
+    if not payload.reason.strip():
+        raise HTTPException(status_code=422, detail="A review reason is required")
+    request = db.query(AbsenceRequest).filter(AbsenceRequest.DonXinVangId == request_id).first()
+    if request is None:
+        raise HTTPException(status_code=404, detail="Absence request not found")
+    class_record = _class_or_404(db, request.LopHocId)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    if request.TrangThai != "pending":
+        raise HTTPException(status_code=409, detail="This absence request has already been reviewed")
+    old = {"status": request.TrangThai, "reviewReason": request.LyDoXuLy}
+    request.TrangThai = payload.decision
+    request.LyDoXuLy = payload.reason.strip()
+    request.NguoiXuLyId = current_user.NguoiDungId
+    request.NgayXuLy = datetime.now()
+    _audit(db, "absence_request", request.DonXinVangId, payload.decision, old,
+           {"status": request.TrangThai, "reviewReason": request.LyDoXuLy}, request.LyDoXuLy, current_user.NguoiDungId)
+    if payload.decision == "approved":
+        _upsert_record(db, class_record, request.HocVienId, request.NgayHoc,
+                       "excused_absence", request.LyDo, current_user)
+    db.add(AttendanceNotification(
+        NguoiNhanId=request.HocVienId, HocVienId=request.HocVienId,
+        ChuongTrinhId=class_record.ChuongTrinhId, Loai="absence_request_" + payload.decision,
+        TieuDe="Absence request " + payload.decision,
+        NoiDung=f"Your request for {request.NgayHoc.isoformat()} was {payload.decision}. {request.LyDoXuLy}",
+        ThoiDiem=datetime.now(),
+    ))
+    db.commit()
+    return {"requestId": request.DonXinVangId, "status": request.TrangThai, "reviewReason": request.LyDoXuLy}
+
+
+@router.get("/my-history")
+def get_my_attendance_history(
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not _is_student(db, current_user):
+        raise HTTPException(status_code=403, detail="This endpoint is for students")
+    rows = db.query(AttendanceRecord, LopHoc).join(
+        LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
+    ).filter(AttendanceRecord.HocVienId == current_user.NguoiDungId).order_by(
+        AttendanceRecord.NgayHoc.desc()
+    ).all()
+    history = [{
+        "classId": cls.LopHocId, "classCode": cls.MaLop, "className": cls.TenLop,
+        "date": record.NgayHoc.isoformat(), "status": record.TrangThai,
+        "reason": record.GhiChu,
+    } for record, cls in rows]
+    warning = None
+    program_ids = {cls.ChuongTrinhId for _, cls in rows if cls.ChuongTrinhId is not None}
+    for program_id in program_ids:
+        absent, total, rate = _absence_rate(db, current_user.NguoiDungId, program_id)
+        limit = _threshold(db, program_id)
+        if total and rate >= limit:
+            warning = {"programId": program_id, "absencePercent": round(rate, 1), "threshold": limit,
+                       "message": f"Your unexcused absence rate is {rate:.1f}% (limit {limit}%)."}
+            break
+    requests = list_absence_requests(None, current_user, db)
+    notifications = db.query(AttendanceNotification).filter(
+        AttendanceNotification.NguoiNhanId == current_user.NguoiDungId
+    ).order_by(AttendanceNotification.ThoiDiem.desc()).limit(50).all()
+    notices = [{"id": item.ThongBaoId, "type": item.Loai, "title": item.TieuDe,
+                "message": item.NoiDung, "at": item.ThoiDiem.isoformat(), "read": item.DaDoc is not None}
+               for item in notifications]
+    return {"records": history, "requests": requests, "warning": warning, "notifications": notices}
+
+
+@router.get("/notifications")
+def list_attendance_notifications(
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    items = db.query(AttendanceNotification).filter(
+        AttendanceNotification.NguoiNhanId == current_user.NguoiDungId
+    ).order_by(AttendanceNotification.ThoiDiem.desc()).limit(50).all()
+    return [{"id": item.ThongBaoId, "type": item.Loai, "title": item.TieuDe,
+             "message": item.NoiDung, "at": item.ThoiDiem.isoformat(), "read": item.DaDoc is not None}
+            for item in items]
+
+
+@router.get("/thresholds")
+def list_thresholds(
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not _manager(db, current_user):
+        raise HTTPException(status_code=403, detail="Only a manager can view program thresholds")
+    return [{"programId": row.ChuongTrinhId, "programCode": row.MaChuongTrinh,
+             "programName": row.TenChuongTrinh, "percentage": _threshold(db, row.ChuongTrinhId)}
+            for row in db.query(ChuongTrinhDaoTao).order_by(ChuongTrinhDaoTao.MaChuongTrinh).all()]
+
+
+@router.put("/thresholds/{program_id}")
+def update_threshold(
+    program_id: int,
+    payload: ThresholdInput,
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not _manager(db, current_user):
+        raise HTTPException(status_code=403, detail="Only a manager can update program thresholds")
+    if db.query(ChuongTrinhDaoTao).filter(ChuongTrinhDaoTao.ChuongTrinhId == program_id).first() is None:
+        raise HTTPException(status_code=404, detail="Program not found")
+    row = db.query(AbsenceThreshold).filter(AbsenceThreshold.ChuongTrinhId == program_id).first()
+    old = {"percentage": row.TiLeToiDa} if row else {"percentage": 20}
+    if row is None:
+        row = AbsenceThreshold(ChuongTrinhId=program_id)
+        db.add(row)
+    row.TiLeToiDa = payload.percentage
+    row.NguoiCapNhatId = current_user.NguoiDungId
+    row.NgayCapNhat = datetime.now()
+    _audit(db, "threshold", program_id, "updated", old, {"percentage": payload.percentage}, None,
+           current_user.NguoiDungId)
+    db.flush()
+    manager_ids = {row[0] for row in db.query(NguoiDungVaiTro.NguoiDungId).filter(
+        NguoiDungVaiTro.VaiTroId.in_(MANAGER_ROLES)
+    ).all()}
+    teacher_ids = {row[0] for row in db.query(LopHoc.GiangVienId).filter(
+        LopHoc.ChuongTrinhId == program_id, LopHoc.GiangVienId.isnot(None)
+    ).all()}
+    student_ids = {row[0] for row in db.query(AttendanceRecord.HocVienId).join(
+        LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
+    ).filter(LopHoc.ChuongTrinhId == program_id).distinct().all()}
+    for student_id in student_ids:
+        absent, total, rate = _absence_rate(db, student_id, program_id)
+        if not total or rate < payload.percentage:
+            continue
+        student = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == student_id).first()
+        for recipient_id in manager_ids | teacher_ids:
+            already_notified = db.query(AttendanceNotification.ThongBaoId).filter(
+                AttendanceNotification.NguoiNhanId == recipient_id,
+                AttendanceNotification.HocVienId == student_id,
+                AttendanceNotification.ChuongTrinhId == program_id,
+                AttendanceNotification.Loai == "absence_threshold",
+            ).first()
+            if already_notified:
+                continue
+            db.add(AttendanceNotification(
+                NguoiNhanId=recipient_id, HocVienId=student_id, ChuongTrinhId=program_id,
+                Loai="absence_threshold", TieuDe="Absence threshold reached",
+                NoiDung=f"{student.HoTen if student else 'Student'} has {absent}/{total} unexcused absences ({rate:.1f}%), reaching the {payload.percentage}% limit.",
+                ThoiDiem=datetime.now(),
+            ))
+    db.commit()
+    return {"programId": program_id, "percentage": row.TiLeToiDa}
+
+
+@router.get("/classes/{class_id}/export")
+def export_attendance(
+    class_id: int,
+    attendance_date: date | None = Query(default=None, alias="date"),
+    current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    day = attendance_date or date.today()
+    matrix = get_attendance_matrix(class_id, day, current_user, db)
+    labels = {"present": "Present", "late": "Late", "excused_absence": "Excused absence",
+              "unexcused_absence": "Unexcused absence", "unmarked": "Not marked"}
+    cells = [["Student", "Date", "Attendance status", "Reason"]]
+    cells.extend([[row["studentName"], day.isoformat(), labels[row["status"]], row["reason"] or ""]
+                  for row in matrix["students"]])
+    xml_rows = "".join("<Row>" + "".join(
+        f'<Cell><Data ss:Type="String">{escape(str(value))}</Data></Cell>' for value in row
+    ) + "</Row>" for row in cells)
+    document = ('<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>'
+                '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+                'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'
+                '<Worksheet ss:Name="Attendance"><Table>' + xml_rows + '</Table></Worksheet></Workbook>')
+    safe_code = re.sub(r"[^A-Za-z0-9_-]", "_", class_record.MaLop)
+    filename = f"{safe_code}-{day.isoformat()}.xls"
+    return Response(content=document, media_type="application/vnd.ms-excel",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+
+
+
+
+

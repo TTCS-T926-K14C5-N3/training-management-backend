@@ -201,6 +201,10 @@ class RoomWrite(BaseModel):
     ma_phong: str = Field(alias="maPhong", min_length=1, max_length=30)
     ten_phong: str = Field(alias="tenPhong", min_length=1, max_length=100)
     suc_chua: int = Field(alias="sucChua", gt=0, le=1000)
+    loai_phong: Literal["Trực tiếp", "Trực tuyến"] = Field(
+        default="Trực tiếp",
+        alias="loaiPhong",
+    )
 
     @field_validator("ma_phong", "ten_phong", mode="before")
     @classmethod

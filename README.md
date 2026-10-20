@@ -51,6 +51,9 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedu
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_schedule_lesson_link.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_schedule_attendance.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_schedule_notifications.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_sprint3_class_enrichment.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_attendance.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -58,9 +61,19 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_schedule_not
 `-E` bằng `-U <DB_USER> -P <DB_PASSWORD>` (không ghi mật khẩu vào lịch sử lệnh
 hoặc kho mã nguồn).
 
+Hai tập lệnh có tiền tố `013` là các migration riêng biệt và đều cần được áp
+dụng; có thể chạy theo thứ tự liệt kê ở trên.
+
 Ứng dụng tự bổ sung các quyền `SCHEDULE_VIEW`, `SCHEDULE_CREATE` và
 `SCHEDULE_UPDATE` khi khởi động. Giảng viên/trợ giảng mặc định được xem lịch;
 quản lý đào tạo và quản trị viên có quyền tạo, cập nhật và hủy buổi học.
+`011_schedule_lesson_link.sql`, `012_schedule_attendance.sql` và
+`013_schedule_notifications.sql` liên kết lịch với buổi học, tạo dữ liệu điểm
+danh theo buổi và thông báo thay đổi lịch.
+`013_sprint3_class_enrichment.sql` cập nhật loại phòng cho luồng lớp học;
+`016_assignments.sql` tạo các bảng bài tập/bài nộp/chấm điểm và quyền bài tập;
+`017_attendance.sql` tạo bảng điểm danh, đơn xin vắng, lịch sử, ngưỡng vắng
+và thông báo. Chạy các migration này trước khi sử dụng các màn hình tương ứng.
 
 Các hợp đồng API chính (các trường JSON dùng camelCase):
 
