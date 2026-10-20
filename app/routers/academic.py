@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user, require_permission
@@ -54,6 +54,7 @@ from app.services.academic_service import (
     user_is_admin,
     user_role_ids,
 )
+from app.services.avatar_service import avatar_url_for_user
 
 
 router = APIRouter(prefix="/academic", tags=["Academic management"])
@@ -63,6 +64,13 @@ CLASS_STATUS_TRANSITIONS = {
     "Đang hoạt động": {"Đang học", "Kết thúc", "Hủy"},
     "Kết thúc": set(),
     "Hủy": set(),
+}
+ACTIVE_CLASS_STATUSES = {"Chuẩn bị", "Đang học", "Đang hoạt động"}
+ENROLLMENT_STATUS_CLASS_FILTERS = {
+    "Đang học": {"Đang học", "Đang hoạt động"},
+    "Sắp bắt đầu": {"Chuẩn bị"},
+    "Đã kết thúc": {"Kết thúc"},
+    "Đã hủy": {"Hủy"},
 }
 
 
@@ -1034,6 +1042,222 @@ def enroll_students(
         "daCoTrongLop": sorted(existing_ids & set(request.hoc_vien_ids)),
         "siSoHienTai": len(existing_ids) + len(new_ids),
         "siSoToiDa": lop_hoc.SiSoToiDa,
+    }
+
+
+@router.get(
+    "/students/statuses",
+    dependencies=[Depends(require_permission("USER_VIEW"))],
+)
+def list_student_statuses(
+    search: str | None = Query(default=None),
+    class_id: int | None = Query(default=None, alias="classId", gt=0),
+    enrollment_status: str | None = Query(
+        default=None,
+        alias="enrollmentStatus",
+    ),
+    has_history: bool | None = Query(default=None, alias="hasHistory"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    student_ids_query = (
+        db.query(NguoiDung.NguoiDungId)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
+        )
+        .filter(NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID)
+    )
+    enrollment_ids_query = db.query(LopHocHocVien.HocVienId).distinct()
+
+    if search and search.strip():
+        search_pattern = f"%{search.strip()}%"
+        student_ids_query = student_ids_query.filter(
+            or_(
+                NguoiDung.HoTen.ilike(search_pattern),
+                NguoiDung.Email.ilike(search_pattern),
+                NguoiDung.SoDienThoai.ilike(search_pattern),
+                cast(NguoiDung.NguoiDungId, String).ilike(search_pattern),
+                NguoiDung.NguoiDungId.in_(
+                    db.query(LeadConversion.NguoiDungId).filter(
+                        LeadConversion.MaHocVien.ilike(search_pattern)
+                    )
+                ),
+            )
+        )
+
+    if class_id is not None:
+        student_ids_query = student_ids_query.filter(
+            NguoiDung.NguoiDungId.in_(
+                db.query(LopHocHocVien.HocVienId).filter(
+                    LopHocHocVien.LopHocId == class_id
+                )
+            )
+        )
+
+    if has_history is True:
+        student_ids_query = student_ids_query.filter(
+            NguoiDung.NguoiDungId.in_(enrollment_ids_query)
+        )
+    elif has_history is False:
+        student_ids_query = student_ids_query.filter(
+            ~NguoiDung.NguoiDungId.in_(enrollment_ids_query)
+        )
+
+    if enrollment_status == "Chưa ghi danh":
+        student_ids_query = student_ids_query.filter(
+            ~NguoiDung.NguoiDungId.in_(enrollment_ids_query)
+        )
+    elif enrollment_status:
+        class_statuses = ENROLLMENT_STATUS_CLASS_FILTERS.get(enrollment_status)
+        if class_statuses:
+            student_ids_query = student_ids_query.filter(
+                NguoiDung.NguoiDungId.in_(
+                    db.query(LopHocHocVien.HocVienId)
+                    .join(
+                        LopHoc,
+                        LopHoc.LopHocId == LopHocHocVien.LopHocId,
+                    )
+                    .filter(LopHoc.TrangThai.in_(class_statuses))
+                )
+            )
+        else:
+            student_ids_query = student_ids_query.filter(False)
+
+    total = student_ids_query.distinct().count()
+    student_ids = [
+        user_id
+        for (user_id,) in (
+            student_ids_query.distinct()
+            .order_by(NguoiDung.NguoiDungId)
+            .offset((page - 1) * limit)
+            .limit(limit)
+            .all()
+        )
+    ]
+
+    students = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.NguoiDungId.in_(student_ids))
+        .order_by(NguoiDung.NguoiDungId)
+        .all()
+    ) if student_ids else []
+
+    enrollments = (
+        db.query(LopHocHocVien.HocVienId, LopHoc, LopHocHocVien.NgayThamGia)
+        .join(LopHoc, LopHoc.LopHocId == LopHocHocVien.LopHocId)
+        .filter(LopHocHocVien.HocVienId.in_(student_ids))
+        .order_by(LopHoc.NgayKhaiGiang.desc(), LopHoc.LopHocId)
+        .all()
+    ) if student_ids else []
+    classes_by_student: dict[int, list[tuple[LopHoc, datetime]]] = {}
+    for student_id, class_record, enrolled_at in enrollments:
+        classes_by_student.setdefault(student_id, []).append(
+            (class_record, enrolled_at)
+        )
+
+    conversions = (
+        db.query(LeadConversion.NguoiDungId, LeadConversion.MaHocVien,
+                 LeadConversion.NgayNhapHoc)
+        .filter(LeadConversion.NguoiDungId.in_(student_ids))
+        .all()
+    ) if student_ids else []
+    conversion_by_student = {
+        student_id: (student_code, admission_date)
+        for student_id, student_code, admission_date in conversions
+    }
+
+    class_options = (
+        db.query(LopHoc.LopHocId, LopHoc.MaLop, LopHoc.TenLop)
+        .join(
+            LopHocHocVien,
+            LopHocHocVien.LopHocId == LopHoc.LopHocId,
+        )
+        .distinct()
+        .order_by(LopHoc.MaLop)
+        .all()
+    )
+    items = []
+    for student in students:
+        student_enrollments = classes_by_student.get(student.NguoiDungId, [])
+        current_enrollments = [
+            (class_record, enrolled_at)
+            for class_record, enrolled_at in student_enrollments
+            if class_record.TrangThai in ACTIVE_CLASS_STATUSES
+        ]
+        current_classes = [
+            class_record for class_record, _enrolled_at in current_enrollments
+        ]
+        if any(
+            class_record.TrangThai in {"Đang học", "Đang hoạt động"}
+            for class_record in current_classes
+        ):
+            enrollment_status_value = "Đang học"
+        elif current_classes:
+            enrollment_status_value = "Sắp bắt đầu"
+        elif student_enrollments:
+            enrollment_status_value = (
+                "Đã hủy"
+                if student_enrollments[0][0].TrangThai == "Hủy"
+                else "Đã kết thúc"
+            )
+        else:
+            enrollment_status_value = "Chưa ghi danh"
+
+        student_code, admission_date = conversion_by_student.get(
+            student.NguoiDungId,
+            (None, None),
+        )
+        if current_enrollments:
+            effective_date = min(
+                enrolled_at.date()
+                for _class_record, enrolled_at in current_enrollments
+            )
+        else:
+            effective_date = admission_date.date() if admission_date else None
+        items.append(
+            {
+                "nguoiDungId": student.NguoiDungId,
+                "hoTen": student.HoTen,
+                "email": student.Email,
+                "soDienThoai": student.SoDienThoai,
+                "anhDaiDien": avatar_url_for_user(student.NguoiDungId),
+                "trangThai": student.TrangThai,
+                "trangThaiTaiKhoan": student.TrangThai,
+                "maHocVien": student_code,
+                "trangThaiGhiDanh": enrollment_status_value,
+                "ngayHieuLuc": effective_date.isoformat() if effective_date else None,
+                "lopHienTai": [
+                    {
+                        "lopHocId": class_record.LopHocId,
+                        "maLop": class_record.MaLop,
+                        "tenLop": class_record.TenLop,
+                    }
+                    for class_record in current_classes
+                ],
+                "lopHocs": [
+                    {
+                        "lopHocId": class_record.LopHocId,
+                        "maLop": class_record.MaLop,
+                        "tenLop": class_record.TenLop,
+                        "trangThai": class_record.TrangThai,
+                    }
+                    for class_record, _enrolled_at in student_enrollments
+                ],
+            }
+        )
+
+    return {
+        "items": items,
+        "classes": [
+            {"lopHocId": class_id, "maLop": class_code, "tenLop": class_name}
+            for class_id, class_code, class_name in class_options
+        ],
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": (total + limit - 1) // limit if total else 0,
     }
 
 

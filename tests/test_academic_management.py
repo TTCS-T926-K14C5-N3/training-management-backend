@@ -34,6 +34,7 @@ from app.routers.academic import (
     enroll_students,
     get_class_options,
     get_student_academic_profile,
+    list_student_statuses,
     list_grades,
     list_subjects,
     update_class,
@@ -139,6 +140,60 @@ def test_class_visibility_is_scoped_to_roles(db: Session):
     assert [item.LopHocId for item in accessible_classes(db, manager)] == [
         lop_hoc["lopHocId"]
     ]
+
+
+def test_student_status_list_supports_search_history_and_class_filters(
+    db: Session,
+):
+    _teacher, student, _second_student, _subject, class_payload = (
+        setup_academic_class(db)
+    )
+    unassigned_student = add_user(db, 22, 2, "Học viên chưa ghi danh")
+
+    def get_statuses(**filters):
+        arguments = {
+            "search": None,
+            "class_id": None,
+            "enrollment_status": None,
+            "has_history": None,
+            "page": 1,
+            "limit": 10,
+            "db": db,
+        }
+        arguments.update(filters)
+        return list_student_statuses(**arguments)
+
+    response = get_statuses()
+    assert response["total"] == 3
+    enrolled_record = next(
+        item for item in response["items"]
+        if item["nguoiDungId"] == student.NguoiDungId
+    )
+    assert enrolled_record["trangThaiGhiDanh"] == "Sắp bắt đầu"
+    assert enrolled_record["lopHienTai"][0]["lopHocId"] == class_payload["lopHocId"]
+    assert response["classes"] == [
+        {
+            "lopHocId": class_payload["lopHocId"],
+            "maLop": class_payload["maLop"],
+            "tenLop": class_payload["tenLop"],
+        }
+    ]
+
+    history_response = get_statuses(has_history=True)
+    assert history_response["total"] == 2
+    class_response = get_statuses(
+        class_id=class_payload["lopHocId"],
+        search="Học viên Một",
+    )
+    assert class_response["total"] == 1
+    assert class_response["items"][0]["nguoiDungId"] == student.NguoiDungId
+    unassigned_response = get_statuses(
+        enrollment_status="Chưa ghi danh",
+    )
+    assert unassigned_response["total"] == 1
+    assert unassigned_response["items"][0]["nguoiDungId"] == (
+        unassigned_student.NguoiDungId
+    )
 
 
 def test_instructor_can_enter_assigned_class_grades_and_student_sees_own_only(
@@ -857,6 +912,7 @@ def test_academic_routes_are_registered_in_the_fastapi_app():
     assert "/academic/programs/{program_id}" in paths
     assert "/academic/grades" in paths
     assert "/academic/subjects" in paths
+    assert "/academic/students/statuses" in paths
     assert "/academic/students/{student_id}" in paths
     assert "/academic/rooms/{room_id}" in paths
 
