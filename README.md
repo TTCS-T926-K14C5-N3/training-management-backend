@@ -48,6 +48,9 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_seed_sprint3_permissions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_student_profiles.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedules.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_schedule_lesson_link.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_schedule_attendance.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_schedule_notifications.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -113,16 +116,28 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     `status`.
   - `POST /academic/schedules` nhận `lopHocId`, `monHocId`, `ngayHoc`,
     `gioBatDau`, `gioKetThuc`, `phongHocId` (có thể `null`) và `giangVienId`.
+  - `POST /academic/schedules/generate-preview` xem trước lịch theo mẫu gồm
+    ngày bắt đầu, các thứ trong tuần, số buổi, giờ, giảng viên, phòng và danh
+    sách ngày nghỉ cần bỏ qua; mỗi buổi được ghép lần lượt với bài học của môn.
+    `POST /academic/schedules/generate` nhận cùng cấu hình và lưu toàn bộ lịch
+    trong một giao dịch, có kiểm tra xung đột trước khi tạo.
+  - `GET /academic/schedules/{schedule_id}/attendance` lấy danh sách học viên
+    và điểm danh theo buổi; `PUT` cùng đường dẫn cập nhật trạng thái có mặt,
+    đi muộn, vắng có phép hoặc vắng không phép.
   - `PUT /academic/schedules/{schedule_id}` cập nhật ngày, giờ, phòng và
     giảng viên; lớp/môn là thông tin cố định.
   - `POST /academic/schedules/{schedule_id}/cancel` nhận `{ "lyDo": "..." }`;
-    lý do bắt buộc, lịch đã bắt đầu/đã qua giờ không thể sửa hoặc hủy.
+    lý do bắt buộc, lịch đã bắt đầu/đã qua giờ hoặc đã có điểm danh không thể
+    sửa hoặc hủy. Mỗi thay đổi/hủy sẽ lưu lịch sử và tạo thông báo cho học viên
+    trong lớp, giảng viên cũ/mới và giảng viên chính của lớp.
+  - `GET /academic/schedule-notifications` trả tối đa 100 thông báo lịch học
+    của người đang đăng nhập; áp dụng migration `013_schedule_notifications.sql`.
   - `GET /academic/schedule-history` trả các sự kiện tạo, cập nhật và hủy đã
     được lưu cùng ảnh chụp dữ liệu trước/sau, người thực hiện và thời điểm.
     Xung đột lịch trả HTTP 409 cùng `detail.conflicts` chứa loại tài nguyên,
     tên, ngày/giờ và buổi học/lớp đang trùng.
-  - Cơ sở dữ liệu hiện chưa có tính năng điểm danh theo buổi; API trả
-    `diemDanhDuocHoTro: false` và không giả định trạng thái điểm danh.
+  - Cơ sở dữ liệu cần áp dụng migration `012_schedule_attendance.sql` để bật
+    tính năng điểm danh theo buổi.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

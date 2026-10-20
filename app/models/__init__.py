@@ -14,4 +14,5 @@ from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.phong_hoc import PhongHoc
-from app.models.lich_hoc import LichHoc, LichHocLichSu
+from app.models.lich_hoc import LichHoc, LichHocLichSu, LichHocThongBao
+from app.models.diem_danh_buoi_hoc import DiemDanhBuoiHoc
