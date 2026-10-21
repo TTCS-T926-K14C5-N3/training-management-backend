@@ -1,110 +1,26 @@
-from datetime import datetime, timezone
-
-from sqlalchemy import (
-    Column,
-    Date,
-    DateTime,
-    ForeignKey,
-    Integer,
-    Time,
-    Unicode,
-    UnicodeText,
-)
-
+from sqlalchemy import Column, Integer, String, Date, Time, Text, ForeignKey, DateTime
+from sqlalchemy.orm import relationship
+from datetime import datetime
 from app.database import Base
 
-
 class ThoiKhoaBieu(Base):
-    __tablename__ = "ThoiKhoaBieu"
+    __tablename__ = "thoi_khoa_bieu"
 
-    ThoiKhoaBieuId = Column(Integer, primary_key=True, autoincrement=True)
-    LopHocId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=False)
-    MonHocId = Column(Integer, ForeignKey("MonHoc.MonHocId"), nullable=False)
-    GiangVienId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-    PhongHocId = Column(
-        Integer,
-        ForeignKey("PhongHoc.PhongHocId"),
-        nullable=False,
-    )
+    ThoiKhoaBieuId = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    LopHocId = Column(Integer, ForeignKey("lop_hoc.LopHocId"), nullable=False)
+    MonHocId = Column(Integer, ForeignKey("mon_hoc.MonHocId"), nullable=True)
+    GiangVienId = Column(Integer, ForeignKey("nguoi_dung.NguoiDungId"), nullable=True)
+    PhongHocId = Column(Integer, ForeignKey("phong_hoc.PhongHocId"), nullable=True)
+    
     NgayHoc = Column(Date, nullable=False)
     GioBatDau = Column(Time, nullable=False)
     GioKetThuc = Column(Time, nullable=False)
-    TrangThai = Column(Unicode(20), nullable=False, default="Lên lịch")
+    GhiChu = Column(Text, nullable=True)
+    TrangThai = Column(String(50), default="Lên lịch", nullable=False)  # LenLich, DaHoc, Huy, DoiLich
     BaiHocId = Column(Integer, nullable=True)
-    NoiDungBaiHoc = Column(Unicode(1000), nullable=True)
-    LyDoHuy = Column(Unicode(1000), nullable=True)
-    NgayHuy = Column(DateTime, nullable=True)
-    NguoiHuyId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=True)
-    NgayTao = Column(
-        DateTime,
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-    )
-    NguoiTaoId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=True)
-    NgayCapNhat = Column(
-        DateTime,
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-    )
-    NguoiCapNhatId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=True,
-    )
+    NoiDungBaiHoc = Column(Text, nullable=True)
+    NgayTao = Column(DateTime, default=datetime.utcnow)
 
-
-class ThoiKhoaBieuLichSu(Base):
-    __tablename__ = "ThoiKhoaBieu_LichSu"
-
-    ThoiKhoaBieuLichSuId = Column(Integer, primary_key=True, autoincrement=True)
-    ThoiKhoaBieuId = Column(
-        Integer,
-        ForeignKey("ThoiKhoaBieu.ThoiKhoaBieuId"),
-        nullable=False,
-    )
-    HanhDong = Column(Unicode(20), nullable=False)
-    DuLieuCu = Column(UnicodeText, nullable=True)
-    DuLieuMoi = Column(UnicodeText, nullable=True)
-    LyDo = Column(Unicode(1000), nullable=True)
-    ThoiDiem = Column(
-        DateTime,
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-    )
-    NguoiThucHienId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-
-
-class ThoiKhoaBieuDiemDanh(Base):
-    __tablename__ = "ThoiKhoaBieu_DiemDanh"
-
-    ThoiKhoaBieuDiemDanhId = Column(Integer, primary_key=True, autoincrement=True)
-    ThoiKhoaBieuId = Column(
-        Integer,
-        ForeignKey("ThoiKhoaBieu.ThoiKhoaBieuId"),
-        nullable=False,
-    )
-    HocVienId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-    TrangThai = Column(Unicode(20), nullable=False)
-    GhiChu = Column(UnicodeText, nullable=True)
-    NguoiDiemDanhId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-    NgayCapNhat = Column(
-        DateTime,
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
-    )
+    # Relationships (khai báo liên kết dữ liệu)
+    lop_hoc = relationship("LopHoc", backref="danh_sach_thoi_khoa_bieu", foreign_keys=[LopHocId])
+    giang_vien = relationship("NguoiDung", backref="lich_day_list", foreign_keys=[GiangVienId])
