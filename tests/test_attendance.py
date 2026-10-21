@@ -1,7 +1,9 @@
+from io import BytesIO
 from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
+from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,6 +26,7 @@ from app.routers.attendance import (
     AttendanceBatch,
     AttendanceItem,
     decide_absence_request,
+    export_attendance,
     get_attendance_matrix,
     mark_all_present,
     save_attendance,
@@ -32,6 +35,7 @@ from app.routers.attendance import (
     update_threshold,
     router as attendance_router,
 )
+from app.main import app
 
 
 @pytest.fixture
@@ -92,9 +96,29 @@ def classroom(db: Session):
 def test_mark_all_present_creates_auditable_records(db):
     teacher, _, _, _, cls = classroom(db)
     response = mark_all_present(cls.LopHocId, date.today(), teacher, db)
-    assert response["counts"] == {"present": 2, "absent": 0, "unexcused": 0, "total": 2}
+    assert response["counts"] == {
+        "present": 2,
+        "late": 0,
+        "excused": 0,
+        "unexcused": 0,
+        "absent": 0,
+        "unmarked": 0,
+        "total": 2,
+    }
     assert db.query(AttendanceRecord).count() == 2
     assert db.query(AttendanceAudit).count() == 2
+
+
+def test_attendance_export_is_a_real_xlsx_with_summary_and_details(db):
+    teacher, _, _, _, cls = classroom(db)
+    response = export_attendance(cls.LopHocId, date.today(), teacher, db)
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    assert workbook.sheetnames == ["Tổng hợp", "Chi tiết"]
+    assert workbook["Tổng hợp"]["A3"].value == "Tổng học viên"
+    assert workbook["Chi tiết"]["A1"].value == "Mã học viên"
+    assert response.headers["content-disposition"].endswith(
+        f'filename="{cls.MaLop}-{date.today().isoformat()}.xlsx"'
+    )
 
 
 def test_threshold_crossing_flags_and_notifies_teacher_and_manager(db):
@@ -106,14 +130,25 @@ def test_threshold_crossing_flags_and_notifies_teacher_and_manager(db):
         AttendanceNotification.HocVienId == student.NguoiDungId,
         AttendanceNotification.Loai == "absence_threshold",
     ).all()
-    assert {notice.NguoiNhanId for notice in notices} == {teacher.NguoiDungId, manager.NguoiDungId}
+    assert {notice.NguoiNhanId for notice in notices} == {
+        teacher.NguoiDungId,
+        manager.NguoiDungId,
+        student.NguoiDungId,
+    }
     matrix = get_attendance_matrix(cls.LopHocId, date.today(), teacher, db)
     assert matrix["aboveThreshold"] is True
 
 
 def test_only_manager_can_edit_past_attendance(db):
     teacher, student, _, manager, cls = classroom(db)
-    payload = AttendanceBatch(date=date.today() - timedelta(days=1), records=[
+    past_day = date.today() - timedelta(days=1)
+    enrollment = db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == cls.LopHocId,
+        LopHocHocVien.HocVienId == student.NguoiDungId,
+    ).one()
+    enrollment.NgayThamGia = datetime.combine(past_day - timedelta(days=1), datetime.min.time())
+    db.commit()
+    payload = AttendanceBatch(date=past_day, records=[
         AttendanceItem(studentId=student.NguoiDungId, status="present"),
     ])
     with pytest.raises(HTTPException) as error:
@@ -160,7 +195,7 @@ def test_lowering_program_threshold_notifies_existing_flagged_student(db):
     assert {row.NguoiNhanId for row in db.query(AttendanceNotification).filter(
         AttendanceNotification.HocVienId == student.NguoiDungId,
         AttendanceNotification.Loai == "absence_threshold",
-    ).all()} == {teacher.NguoiDungId, manager.NguoiDungId}
+    ).all(    )} == {teacher.NguoiDungId, manager.NguoiDungId, student.NguoiDungId}
 
 
 
@@ -173,3 +208,8 @@ def test_attendance_routes_cover_workflows():
     assert "/attendance/my-history" in paths
     assert "/attendance/classes/{class_id}/export" in paths
     assert "/attendance/notifications" in paths
+
+    app_paths = set(app.openapi()["paths"])
+    assert "/attendance/absence-requests" in app_paths
+    assert "/attendance/sessions/absence-requests" in app_paths
+    assert "/attendance/sessions/absence-requests/with-evidence" in app_paths

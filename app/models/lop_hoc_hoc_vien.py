@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, Unicode
 
 from app.database import Base
 
@@ -22,3 +22,23 @@ class LopHocHocVien(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=True,
     )
+    TrangThaiGhiDanh = Column(
+        Unicode(20),
+        nullable=False,
+        default="Đang học",
+    )
+    NgayKetThuc = Column(DateTime, nullable=True)
+
+
+class LopHocHocVienThaoTac(Base):
+    __tablename__ = "LopHoc_HocVien_ThaoTac"
+
+    ThaoTacId = Column(Integer, primary_key=True, autoincrement=True)
+    LopHocId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=False)
+    HocVienId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=False)
+    LoaiThaoTac = Column(Unicode(20), nullable=False)
+    NgayHieuLuc = Column(DateTime, nullable=False)
+    LopHocDichId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=True)
+    LyDo = Column(Unicode(1000), nullable=False)
+    NguoiThucHienId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=False)
+    NgayTao = Column(DateTime, nullable=False)

@@ -117,3 +117,15 @@ class AssignmentReopen(Base):
     GiangVienId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=False)
     ReopenedAt = Column(DateTime, nullable=False)
     LyDo = Column(Unicode(1000), nullable=False)
+
+
+class AssignmentNotification(Base):
+    __tablename__ = "AssignmentNotification"
+
+    NotificationId = Column(Integer, primary_key=True, autoincrement=True)
+    AssignmentId = Column(Integer, ForeignKey("Assignment.AssignmentId"), nullable=False)
+    NguoiNhanId = Column(Integer, ForeignKey("NguoiDung.NguoiDungId"), nullable=False)
+    Loai = Column(String(30), nullable=False)
+    TieuDe = Column(Unicode(200), nullable=False)
+    NoiDung = Column(UnicodeText, nullable=False)
+    NgayTao = Column(DateTime, nullable=False)

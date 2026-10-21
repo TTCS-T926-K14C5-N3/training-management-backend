@@ -48,12 +48,15 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\008_sprint_3.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_seed_sprint3_permissions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_student_profiles.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedules.sql
-sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_schedule_lesson_link.sql
-sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_schedule_attendance.sql
-sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_schedule_notifications.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_require_schedule_room.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_student_enrollment_actions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_sprint3_class_enrichment.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_session_attendance.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\014_schedule_notifications.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_attendance.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_student_schedule_view.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\018_sprint4_attendance_completion.sql
 ```
 
 `-f 65001` giúp `sqlcmd` đọc đúng các ký tự tiếng Việt trong tập lệnh UTF-8.
@@ -67,13 +70,18 @@ dụng; có thể chạy theo thứ tự liệt kê ở trên.
 Ứng dụng tự bổ sung các quyền `SCHEDULE_VIEW`, `SCHEDULE_CREATE` và
 `SCHEDULE_UPDATE` khi khởi động. Giảng viên/trợ giảng mặc định được xem lịch;
 quản lý đào tạo và quản trị viên có quyền tạo, cập nhật và hủy buổi học.
-`011_schedule_lesson_link.sql`, `012_schedule_attendance.sql` và
-`013_schedule_notifications.sql` liên kết lịch với buổi học, tạo dữ liệu điểm
-danh theo buổi và thông báo thay đổi lịch.
+Học viên cũng được xem lịch trong phạm vi các lớp đã ghi danh.
 `013_sprint3_class_enrichment.sql` cập nhật loại phòng cho luồng lớp học;
 `016_assignments.sql` tạo các bảng bài tập/bài nộp/chấm điểm và quyền bài tập;
 `017_attendance.sql` tạo bảng điểm danh, đơn xin vắng, lịch sử, ngưỡng vắng
 và thông báo. Chạy các migration này trước khi sử dụng các màn hình tương ứng.
+Học viên, giảng viên và trợ giảng mặc định
+được xem lịch trong phạm vi lớp được phép truy cập; quản lý đào tạo và quản trị
+viên có quyền tạo, cập nhật và hủy buổi học. Chạy migration
+`017_student_schedule_view.sql` để cấp quyền xem lịch cho vai trò học viên trên
+cơ sở dữ liệu hiện có. Migration `018_sprint4_attendance_completion.sql` bổ sung
+liên kết buổi học với lịch, đơn xin phép vắng, nhật ký/thông báo điểm danh và
+chuẩn hóa trạng thái điểm danh.
 
 Các hợp đồng API chính (các trường JSON dùng camelCase):
 
@@ -120,37 +128,97 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
 - `GET /academic/classes` hỗ trợ lọc `status`, `programId`, `instructorId`,
   `startDate`, `endDate`. `GET /academic/students/{student_id}` trả hồ sơ học
   viên cùng lịch sử lớp và điểm, giới hạn theo quyền lớp/giảng viên/học viên.
+  `GET /academic/students/statuses` hỗ trợ `hasHistory=true` để chỉ lấy học viên
+  có lớp được bảo lưu, chuyển lớp, thôi học hoặc đã kết thúc; có thể kết hợp
+  `search`, `status`, `classId`, `enrollmentStatus` và phân trang.
   Mỗi môn lớp có một giảng viên chính và có thể có nhiều trợ giảng; danh sách
   phân công sử dụng cả vai trò giảng viên và trợ giảng.
 - Lịch buổi học:
   - `GET /academic/schedule-options` lấy lớp/môn trong phạm vi truy cập cùng
     danh sách giảng viên và phòng đang hoạt động.
   - `GET /academic/schedules` liệt kê lịch; hỗ trợ `startDate`, `endDate`,
-    `status`.
+    `status` và `excludeCompleted=true` để ẩn buổi đã kết thúc khỏi danh sách
+    lịch hiện hành.
+  - `GET /academic/schedules/completed` trả lịch sử buổi đã diễn ra theo lớp
+    người dùng được quyền xem; hỗ trợ phân trang `page`, `pageSize` và phản hồi
+    `items`, `total`, `page`, `pageSize`.
   - `POST /academic/schedules` nhận `lopHocId`, `monHocId`, `ngayHoc`,
-    `gioBatDau`, `gioKetThuc`, `phongHocId` (có thể `null`) và `giangVienId`.
-  - `POST /academic/schedules/generate-preview` xem trước lịch theo mẫu gồm
-    ngày bắt đầu, các thứ trong tuần, số buổi, giờ, giảng viên, phòng và danh
-    sách ngày nghỉ cần bỏ qua; mỗi buổi được ghép lần lượt với bài học của môn.
-    `POST /academic/schedules/generate` nhận cùng cấu hình và lưu toàn bộ lịch
-    trong một giao dịch, có kiểm tra xung đột trước khi tạo.
-  - `GET /academic/schedules/{schedule_id}/attendance` lấy danh sách học viên
-    và điểm danh theo buổi; `PUT` cùng đường dẫn cập nhật trạng thái có mặt,
-    đi muộn, vắng có phép hoặc vắng không phép.
+    `gioBatDau`, `gioKetThuc`, `phongHocId`, `giangVienId` và `baiHocId`
+    tùy chọn để gắn buổi học trong chương trình.
+  - `POST /academic/schedules/preview` xem trước lịch lặp;
+    `POST /academic/schedules/bulk` tạo các buổi đã xem trước. Request nhận
+    `ngayBatDau`, `soBuoi`, `thuTrongTuan`, `ngayNghi` cùng lớp/môn, phòng,
+    giảng viên và giờ học; bài học được gắn theo thứ tự chương trình.
+  - `POST /academic/schedules/generate-preview` và
+    `POST /academic/schedules/generate` xem trước và tạo hàng loạt lịch theo
+    tuần, bỏ qua ngày nghỉ và kiểm tra xung đột trước khi lưu.
   - `PUT /academic/schedules/{schedule_id}` cập nhật ngày, giờ, phòng và
     giảng viên; lớp/môn là thông tin cố định.
   - `POST /academic/schedules/{schedule_id}/cancel` nhận `{ "lyDo": "..." }`;
-    lý do bắt buộc, lịch đã bắt đầu/đã qua giờ hoặc đã có điểm danh không thể
-    sửa hoặc hủy. Mỗi thay đổi/hủy sẽ lưu lịch sử và tạo thông báo cho học viên
-    trong lớp, giảng viên cũ/mới và giảng viên chính của lớp.
-  - `GET /academic/schedule-notifications` trả tối đa 100 thông báo lịch học
-    của người đang đăng nhập; áp dụng migration `013_schedule_notifications.sql`.
-  - `GET /academic/schedule-history` trả các sự kiện tạo, cập nhật và hủy đã
-    được lưu cùng ảnh chụp dữ liệu trước/sau, người thực hiện và thời điểm.
+    lý do bắt buộc, lịch đã bắt đầu/đã qua giờ không thể sửa hoặc hủy.
+  - Ngày/giờ của lịch được truyền dưới dạng ngày và giờ địa phương, không kèm
+    offset múi giờ; SQL Server lưu `DATE`, `TIME` và `DATETIME2` theo giờ nghiệp
+    vụ `Asia/Ho_Chi_Minh`. Ngày quá khứ, khung giờ kết thúc hoặc bắt đầu đã qua
+    trong ngày hiện tại và giờ kết thúc không sau giờ bắt đầu đều bị từ chối ở
+    API, độc lập với kiểm tra trên giao diện.
+  - `GET /academic/schedule-history` nhận `page`, `pageSize` (tối đa 100),
+    `q` và `eventType` (`all`, `date_time`, `room`, `instructor`, `cancelled`).
+    Tìm kiếm thực hiện phía Backend trên mã buổi, lớp, người thực hiện, nội
+    dung thông báo, lý do và ảnh chụp thay đổi; phản hồi có `items`, `total`,
+    `page` và `pageSize`. Sự kiện gồm ảnh chụp trước/sau, người thực hiện,
+    thời điểm và tổng trạng thái gửi thông báo nếu có.
     Xung đột lịch trả HTTP 409 cùng `detail.conflicts` chứa loại tài nguyên,
-    tên, ngày/giờ và buổi học/lớp đang trùng.
-  - Cơ sở dữ liệu cần áp dụng migration `012_schedule_attendance.sql` để bật
-    tính năng điểm danh theo buổi.
+    tên, ngày/giờ và buổi học/lớp đang trùng. Chỉ người có quyền
+    `SCHEDULE_OVERRIDE` mới có thể gửi `ghiDeXungDot: true`; mọi lần ghi đè phải
+    lưu `lyDoGhiDe` và được ghi vào lịch sử thay đổi.
+  - Khi lịch đổi hoặc bị hủy, hệ thống lưu thông báo email theo từng học viên
+    đang ghi danh và giảng viên liên quan, kèm dữ liệu trước/sau. Trạng thái
+    gửi, số lần thử và lỗi được lưu bền vững; SMTP dùng cấu hình trong `.env`.
+    `POST /academic/schedule-notifications/retry` (quyền `SCHEDULE_UPDATE`)
+    thử lại thông báo đang chờ/thất bại tối đa ba lần gửi tổng cộng mỗi bản ghi,
+    tối đa 100 bản ghi mỗi lần gọi. Bản ghi chờ gửi được xử lý lại khi ứng dụng
+    khởi động. Migration `014_schedule_notifications.sql` chỉ thêm bảng; nếu
+    cần rollback, sao lưu lịch sử trước rồi chỉ xóa bảng sau khi đã dừng ứng
+    dụng và được phê duyệt vì thao tác đó sẽ xóa dữ liệu thông báo.
+  - `GET/PUT /academic/schedules/{schedule_id}/attendance` xem và cập nhật điểm
+    danh cho một buổi học, với trạng thái `Có mặt`, `Đi muộn`, `Vắng có phép`
+    hoặc `Vắng không phép`. Chỉ được ghi điểm danh khi buổi đã bắt đầu; chỉ
+    quản lý đào tạo/quản trị viên được sửa sau khi buổi kết thúc. Mọi thay đổi
+    được lưu trong nhật ký tại `GET /academic/schedules/{schedule_id}/attendance/audit`
+    (tối đa 360 ngày).
+  - Học viên gửi đơn xin phép cho buổi học tại
+    `POST /attendance/sessions/absence-requests` hoặc
+    `/attendance/sessions/absence-requests/with-evidence` (multipart, PDF/PNG/JPEG
+    tối đa 5 MB); người phụ trách lớp duyệt/từ chối tại
+    `POST /attendance/sessions/absence-requests/{request_id}/decision`. Đơn được
+    duyệt tự động ghi `Vắng có phép`; quyết định gửi thông báo riêng cho học viên.
+    `GET /attendance/sessions/absence-requests`,
+    `/attendance/sessions/my-history` và
+    `/attendance/sessions/notifications` cung cấp dữ liệu theo quyền người dùng.
+    Điểm danh theo lớp/ngày và đơn xin vắng theo lớp tiếp tục dùng các endpoint
+    `/attendance/classes/...` và `/attendance/absence-requests`.
+  - Điểm danh và các bảng xin phép vắng/audit/thông báo cần migration
+    `013_session_attendance.sql`, `017_attendance.sql` và
+    `018_sprint4_attendance_completion.sql`. `017_attendance.sql` lưu điểm danh
+    theo lớp/ngày trong bảng `DiemDanhTheoNgay`; `DiemDanh` vẫn dành riêng cho
+    điểm danh theo buổi.
+    Lịch đã có bản ghi điểm danh không thể sửa hoặc hủy.
+- Bài tập:
+  - `GET /assignments/options` lấy lớp, môn và buổi học mà người dùng được phép
+    sử dụng; `GET /assignments/mine` và `/assignments/teacher` liệt kê bài tập
+    theo vai trò học viên hoặc giảng viên.
+  - `POST /assignments` tạo bài tập; `POST /assignments/{assignment_id}/publish`
+    phát hành bài tập. Học viên nộp bài tại
+    `POST /assignments/{assignment_id}/submissions`; giảng viên xem danh sách
+    nộp tại `GET /assignments/{assignment_id}/roster`, chấm bài tại
+    `POST /assignments/submissions/{submission_id}/grade` và có thể mở lại bài
+    đã chấm tại `POST /assignments/{assignment_id}/students/{student_id}/reopen`.
+  - Tệp đính kèm được tải qua
+    `GET /assignments/attachments/{kind}/{attachment_id}`. Quyền `ASSIGNMENT_*`
+    được khởi tạo cùng catalog RBAC; học viên được xem/nộp, giảng viên/trợ giảng
+    được quản lý/chấm bài.
+  - Migration `016_assignments.sql` tạo các bảng bài tập, tệp đính kèm, bài nộp
+    điểm và lịch sử mở lại.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và

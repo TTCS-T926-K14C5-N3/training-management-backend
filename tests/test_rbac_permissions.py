@@ -2,13 +2,20 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.core.security import require_permission
+from app.models.quyen import Quyen
+from app.models.vai_tro import VaiTro
 from app.models.vai_tro_quyen import VaiTroQuyen
 from app.services.rbac_service import (
     DEFAULT_ROLE_PERMISSIONS,
     PERMISSION_CATALOG,
+    ROLE_NAMES,
+    initialize_role_permissions,
 )
+from app.services.user_import_service import ROLE_ID_TO_NAME, parse_role
 
 
 class FakePermissionResult:
@@ -140,6 +147,58 @@ def test_catalog_contains_all_eight_business_role_defaults():
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert "STUDENT_PROFILE_UPDATE" in codes
     assert "STUDENT_PROFILE_UPDATE" in DEFAULT_ROLE_PERMISSIONS[7]
+
+
+def test_system_role_names_are_canonical_vietnamese_and_used_for_imports():
+    expected_names = {
+        1: "Khách",
+        2: "Học viên",
+        3: "Giảng viên",
+        4: "Trợ giảng",
+        5: "Tuyển sinh",
+        6: "Kế toán",
+        7: "Quản lý đào tạo",
+        8: "Quản trị hệ thống",
+    }
+
+    assert {
+        role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
+    } == expected_names
+    assert ROLE_ID_TO_NAME == expected_names
+    assert parse_role("Học viên") == 2
+    assert parse_role("Sinh viên") == 2
+    assert parse_role("Student") == 2
+    assert parse_role("Quản trị hệ thống") == 8
+    assert parse_role("Admin") == 8
+
+
+def test_rbac_initialization_updates_existing_role_names_to_vietnamese():
+    engine = create_engine("sqlite:///:memory:")
+    VaiTro.__table__.create(engine)
+    Quyen.__table__.create(engine)
+    VaiTroQuyen.__table__.create(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.add_all(
+            VaiTro(VaiTroId=role_id, TenVaiTro=f"Legacy role {role_id}", MoTa="Legacy")
+            for role_id in range(1, 9)
+        )
+        session.commit()
+
+        initialize_role_permissions(session)
+
+        assert {
+            role.VaiTroId: role.TenVaiTro
+            for role in session.query(VaiTro).all()
+        } == {
+            role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
+        }
+    finally:
+        session.close()
+        VaiTroQuyen.__table__.drop(engine)
+        Quyen.__table__.drop(engine)
+        VaiTro.__table__.drop(engine)
+        engine.dispose()
 
 
 def test_role_permission_model_uses_existing_composite_primary_key():

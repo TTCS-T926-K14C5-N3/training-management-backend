@@ -35,10 +35,11 @@ class LichHoc(Base):
     LopHocId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=False)
     MonHocId = Column(Integer, ForeignKey("MonHoc.MonHocId"), nullable=False)
     BuoiHocId = Column(Integer, ForeignKey("BuoiHoc.BuoiHocId"), nullable=True)
+    BaiHocId = Column(Integer, ForeignKey("BuoiHoc.BuoiHocId"), nullable=True)
     NgayHoc = Column(Date, nullable=False)
     GioBatDau = Column(Time, nullable=False)
     GioKetThuc = Column(Time, nullable=False)
-    PhongHocId = Column(Integer, ForeignKey("PhongHoc.PhongHocId"), nullable=True)
+    PhongHocId = Column(Integer, ForeignKey("PhongHoc.PhongHocId"), nullable=False)
     GiangVienId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),
@@ -77,29 +78,3 @@ class LichHocLichSu(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=False,
     )
-
-
-class LichHocThongBao(Base):
-    __tablename__ = "LichHoc_ThongBao"
-    __table_args__ = (
-        Index(
-            "IX_LichHoc_ThongBao_NguoiNhan_ThoiDiem",
-            "NguoiNhanId",
-            "ThoiDiem",
-        ),
-    )
-
-    LichHocThongBaoId = Column(Integer, primary_key=True, autoincrement=True)
-    LichHocId = Column(
-        Integer,
-        ForeignKey("LichHoc.LichHocId"),
-        nullable=False,
-    )
-    NguoiNhanId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-    TieuDe = Column(Unicode(200), nullable=False)
-    NoiDung = Column(UnicodeText, nullable=False)
-    ThoiDiem = Column(DateTime, nullable=False)

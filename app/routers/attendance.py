@@ -1,10 +1,11 @@
 import json
 import re
+from io import BytesIO
 from datetime import date, datetime
-from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from openpyxl import Workbook
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -24,6 +25,11 @@ from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.routers.attendance_sessions import (
+    create_absence_request,
+    decide_absence_request as decide_session_absence_request,
+)
+from app.schemas.attendance import AbsenceRequestDecision
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 VALID_STATUSES = {"present", "late", "excused_absence", "unexcused_absence"}
@@ -144,6 +150,7 @@ def _notify_threshold_crossing(db: Session, class_record: LopHoc, student: Nguoi
     if total == 0 or before_rate >= limit or after_rate < limit:
         return
     recipients = {class_record.GiangVienId} if class_record.GiangVienId else set()
+    recipients.add(student.NguoiDungId)
     recipients.update(row[0] for row in db.query(NguoiDungVaiTro.NguoiDungId).filter(
         NguoiDungVaiTro.VaiTroId.in_(MANAGER_ROLES)
     ).all())
@@ -166,6 +173,12 @@ def _upsert_record(db: Session, class_record: LopHoc, student_id: int, attendanc
     if db.query(LopHocHocVien).filter(
         LopHocHocVien.LopHocId == class_record.LopHocId,
         LopHocHocVien.HocVienId == student_id,
+        LopHocHocVien.NgayThamGia <= datetime.combine(attendance_date, datetime.max.time()),
+        (LopHocHocVien.NgayKetThuc.is_(None))
+        | (
+            LopHocHocVien.NgayKetThuc
+            > datetime.combine(attendance_date, datetime.max.time())
+        ),
     ).first() is None:
         raise HTTPException(status_code=400, detail="Student is not enrolled in this class")
     student = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == student_id).first()
@@ -247,7 +260,12 @@ def get_attendance_matrix(
     day = attendance_date or date.today()
     roster = db.query(NguoiDung).join(
         LopHocHocVien, LopHocHocVien.HocVienId == NguoiDung.NguoiDungId
-    ).filter(LopHocHocVien.LopHocId == class_id).order_by(NguoiDung.HoTen).all()
+    ).filter(
+        LopHocHocVien.LopHocId == class_id,
+        LopHocHocVien.NgayThamGia <= datetime.combine(day, datetime.max.time()),
+        (LopHocHocVien.NgayKetThuc.is_(None))
+        | (LopHocHocVien.NgayKetThuc > datetime.combine(day, datetime.max.time())),
+    ).order_by(NguoiDung.HoTen).all()
     recorded = {row.HocVienId: row for row in db.query(AttendanceRecord).filter(
         AttendanceRecord.LopHocId == class_id, AttendanceRecord.NgayHoc == day
     ).all()}
@@ -267,7 +285,10 @@ def get_attendance_matrix(
             "reason": record.GhiChu if record else None,
             "requestId": request.DonXinVangId if request else None,
         })
-    present = sum(1 for row in rows if row["status"] in {"present", "late"})
+    present = sum(1 for row in rows if row["status"] == "present")
+    late = sum(1 for row in rows if row["status"] == "late")
+    excused = sum(1 for row in rows if row["status"] == "excused_absence")
+    unmarked = sum(1 for row in rows if row["status"] == "unmarked")
     absent = sum(1 for row in rows if row["status"] in {"excused_absence", "unexcused_absence"})
     unexcused = sum(1 for row in rows if row["status"] == "unexcused_absence")
     threshold = _threshold(db, class_record.ChuongTrinhId)
@@ -283,8 +304,16 @@ def get_attendance_matrix(
         **_class_payload(db, class_record),
         "date": day.isoformat(),
         "students": rows,
-        "counts": {"present": present, "absent": absent, "unexcused": unexcused, "total": len(rows)},
-        "attendancePercent": round(present * 100 / len(rows), 1) if rows else 0,
+        "counts": {
+            "present": present,
+            "late": late,
+            "excused": excused,
+            "unexcused": unexcused,
+            "absent": absent,
+            "unmarked": unmarked,
+            "total": len(rows),
+        },
+        "attendancePercent": round((present + late) * 100 / len(rows), 1) if rows else 0,
         "absencePercent": round(unexcused * 100 / len(rows), 1) if rows else 0,
         "flaggedStudents": flagged_students,
         "aboveThreshold": bool(flagged_students),
@@ -325,7 +354,12 @@ def mark_all_present(
     class_record = _class_or_404(db, class_id)
     _ensure_teacher_or_manager(db, current_user, class_record)
     _ensure_edit_date(attendance_date, _manager(db, current_user))
-    students = db.query(LopHocHocVien.HocVienId).filter(LopHocHocVien.LopHocId == class_id).all()
+    students = db.query(LopHocHocVien.HocVienId).filter(
+        LopHocHocVien.LopHocId == class_id,
+        LopHocHocVien.NgayThamGia <= datetime.combine(attendance_date, datetime.max.time()),
+        (LopHocHocVien.NgayKetThuc.is_(None))
+        | (LopHocHocVien.NgayKetThuc > datetime.combine(attendance_date, datetime.max.time())),
+    ).all()
     try:
         for (student_id,) in students:
             _upsert_record(db, class_record, student_id, attendance_date, "present", None, current_user)
@@ -367,6 +401,13 @@ def submit_absence_request(
     enrolled = db.query(LopHocHocVien).filter(
         LopHocHocVien.LopHocId == payload.class_id,
         LopHocHocVien.HocVienId == current_user.NguoiDungId,
+        LopHocHocVien.NgayThamGia
+        <= datetime.combine(payload.attendance_date, datetime.max.time()),
+        (LopHocHocVien.NgayKetThuc.is_(None))
+        | (
+            LopHocHocVien.NgayKetThuc
+            > datetime.combine(payload.attendance_date, datetime.max.time())
+        ),
     ).first()
     if enrolled is None or not _is_student(db, current_user):
         raise HTTPException(status_code=403, detail="Only an enrolled student can request an excused absence")
@@ -441,7 +482,7 @@ def list_absence_requests(
 
 
 @router.post("/absence-requests/{request_id}/decision")
-def decide_absence_request(
+def decide_class_absence_request(
     request_id: int,
     payload: AbsenceDecision,
     current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
@@ -586,6 +627,22 @@ def update_threshold(
                 NoiDung=f"{student.HoTen if student else 'Student'} has {absent}/{total} unexcused absences ({rate:.1f}%), reaching the {payload.percentage}% limit.",
                 ThoiDiem=datetime.now(),
             ))
+        already_notified_student = db.query(AttendanceNotification.ThongBaoId).filter(
+            AttendanceNotification.NguoiNhanId == student_id,
+            AttendanceNotification.HocVienId == student_id,
+            AttendanceNotification.ChuongTrinhId == program_id,
+            AttendanceNotification.Loai == "absence_threshold",
+        ).first()
+        if not already_notified_student:
+            db.add(AttendanceNotification(
+                NguoiNhanId=student_id,
+                HocVienId=student_id,
+                ChuongTrinhId=program_id,
+                Loai="absence_threshold",
+                TieuDe="Cảnh báo tỷ lệ vắng",
+                NoiDung=f"Tỷ lệ vắng không phép của bạn là {rate:.1f}% ({absent}/{total}), đạt ngưỡng {payload.percentage}%.",
+                ThoiDiem=datetime.now(),
+            ))
     db.commit()
     return {"programId": program_id, "percentage": row.TiLeToiDa}
 
@@ -600,26 +657,62 @@ def export_attendance(
     _ensure_teacher_or_manager(db, current_user, class_record)
     day = attendance_date or date.today()
     matrix = get_attendance_matrix(class_id, day, current_user, db)
-    labels = {"present": "Present", "late": "Late", "excused_absence": "Excused absence",
-              "unexcused_absence": "Unexcused absence", "unmarked": "Not marked"}
-    cells = [["Student", "Date", "Attendance status", "Reason"]]
-    cells.extend([[row["studentName"], day.isoformat(), labels[row["status"]], row["reason"] or ""]
-                  for row in matrix["students"]])
-    xml_rows = "".join("<Row>" + "".join(
-        f'<Cell><Data ss:Type="String">{escape(str(value))}</Data></Cell>' for value in row
-    ) + "</Row>" for row in cells)
-    document = ('<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>'
-                '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
-                'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'
-                '<Worksheet ss:Name="Attendance"><Table>' + xml_rows + '</Table></Worksheet></Workbook>')
+    labels = {
+        "present": "Có mặt",
+        "late": "Đi muộn",
+        "excused_absence": "Vắng có phép",
+        "unexcused_absence": "Vắng không phép",
+        "unmarked": "Chưa điểm danh",
+    }
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Tổng hợp"
+    counts = matrix["counts"]
+    summary.append(["Lớp", class_record.MaLop, class_record.TenLop])
+    summary.append(["Ngày", day.isoformat()])
+    summary.append(["Tổng học viên", counts["total"]])
+    summary.append(["Có mặt", counts["present"]])
+    summary.append(["Đi muộn", counts["late"]])
+    summary.append(["Vắng có phép", counts["excused"]])
+    summary.append(["Vắng không phép", counts["unexcused"]])
+    summary.append(["Chưa điểm danh", counts["unmarked"]])
+    summary.append(["Tỷ lệ tham gia (%)", matrix["attendancePercent"]])
+    details = workbook.create_sheet("Chi tiết")
+    details.append(["Mã học viên", "Họ tên", "Email", "Ngày", "Trạng thái", "Ghi chú"])
+    for row in matrix["students"]:
+        details.append([
+            row["studentId"],
+            row["studentName"],
+            row["email"],
+            day.isoformat(),
+            labels[row["status"]],
+            row["reason"] or "",
+        ])
+    output = BytesIO()
+    workbook.save(output)
     safe_code = re.sub(r"[^A-Za-z0-9_-]", "_", class_record.MaLop)
-    filename = f"{safe_code}-{day.isoformat()}.xls"
-    return Response(content=document, media_type="application/vnd.ms-excel",
+    filename = f"{safe_code}-{day.isoformat()}.xlsx"
+    return Response(content=output.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-
-
-
-
-
+def decide_absence_request(
+    request_id: int,
+    decision: AbsenceDecision | AbsenceRequestDecision,
+    current_user: NguoiDung,
+    db: Session,
+):
+    if isinstance(decision, AbsenceRequestDecision):
+        return decide_session_absence_request(
+            request_id,
+            decision,
+            current_user,
+            db,
+        )
+    return decide_class_absence_request(
+        request_id,
+        decision,
+        current_user,
+        db,
+    )

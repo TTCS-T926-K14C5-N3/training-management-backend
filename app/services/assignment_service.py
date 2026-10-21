@@ -81,11 +81,15 @@ def ensure_assignment_teacher(db: Session, user: NguoiDung, assignment: Assignme
 
 
 def ensure_enrolled(db: Session, class_id: int, student_id: int) -> None:
+    now = local_now()
     enrolled = (
         db.query(LopHocHocVien)
         .filter(
             LopHocHocVien.LopHocId == class_id,
             LopHocHocVien.HocVienId == student_id,
+            LopHocHocVien.NgayThamGia <= now,
+            (LopHocHocVien.NgayKetThuc.is_(None))
+            | (LopHocHocVien.NgayKetThuc > now),
         )
         .first()
     )
@@ -180,12 +184,3 @@ def has_active_reopen(db: Session, assignment_id: int, student_id: int, graded_a
         .first()
     )
     return reopen is not None
-
-
-
-
-
-
-
-
-

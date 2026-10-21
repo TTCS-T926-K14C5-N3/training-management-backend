@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import FRONTEND_URL
 from pwdlib import PasswordHash
+from app.core.config import FRONTEND_URL
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.token_kich_hoat import TokenKichHoat
 from app.services.auth_service import generate_temporary_password
 from app.services.email_service import send_activation_email
+from app.services.rbac_service import ROLE_NAMES
 
 password_hash = PasswordHash.recommended()
 # ============================================================
@@ -23,25 +25,29 @@ password_hash = PasswordHash.recommended()
 # ============================================================
 
 ROLE_ID_TO_NAME = {
-    1: "Guest",
-    2: "Student",
-    3: "Instructor",
-    4: "TA",
-    5: "Admissions",
-    6: "Accountant",
-    7: "Training Manager",
-    8: "Admin",
+    role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
 }
 
 ROLE_NAME_TO_ID = {
     "guest": 1,
+    "khách": 1,
     "student": 2,
+    "sinh viên": 2,
+    "học viên": 2,
     "instructor": 3,
+    "giảng viên": 3,
     "ta": 4,
+    "trợ giảng": 4,
     "admissions": 5,
+    "tuyển sinh": 5,
     "accountant": 6,
+    "kế toán": 6,
     "training manager": 7,
+    "quản lý đào tạo": 7,
     "admin": 8,
+    "quản trị hệ thống": 8,
+    "quản trị viên": 8,
+    "quản trị viên hệ thống": 8,
 }
 
 
@@ -96,14 +102,16 @@ def parse_role(value):
 
     hoặc:
 
-    Guest
-    Student
-    Instructor
-    TA
-    Admissions
-    Accountant
-    Training Manager
-    Admin
+    Khách
+    Học viên
+    Giảng viên
+    Trợ giảng
+    Tuyển sinh
+    Kế toán
+    Quản lý đào tạo
+    Quản trị hệ thống
+
+    Các tên tiếng Anh cũ vẫn được chấp nhận để tương thích với tệp hiện có.
     """
 
     if value is None:
@@ -140,7 +148,7 @@ def parse_role(value):
         return None
 
     # Nhập tên vai trò
-    return ROLE_NAME_TO_ID.get(role_value.lower())
+    return ROLE_NAME_TO_ID.get(role_value.casefold())
 
 
 def validate_excel_headers(headers):
@@ -627,8 +635,7 @@ def create_user_from_excel_row(
     # --------------------------------------------------------
 
     activation_link = (
-        f"{FRONTEND_URL}/login"
-        f"?activate={raw_token}"
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
     )
 
     # --------------------------------------------------------

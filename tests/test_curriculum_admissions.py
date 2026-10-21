@@ -58,6 +58,18 @@ from app.services.academic_service import user_is_admin
 from app.services.rbac_service import DEFAULT_ROLE_PERMISSIONS
 
 
+@pytest.mark.parametrize(("credits", "expected_sessions"), [(1, 3), (2, 6), (3, 9), (30, 90)])
+def test_subject_session_count_is_derived_from_credits(credits, expected_sessions):
+    subject = SubjectCreate(
+        maMonHoc="SUBJECT",
+        tenMonHoc="Môn kiểm thử",
+        soTinChi=credits,
+        soBuoi=1,
+    )
+
+    assert subject.so_buoi == expected_sessions
+
+
 @pytest.fixture
 def db():
     engine = create_engine("sqlite:///:memory:")

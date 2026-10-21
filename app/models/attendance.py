@@ -6,12 +6,17 @@ from app.database import Base
 
 
 class AttendanceRecord(Base):
-    __tablename__ = "DiemDanh"
+    __tablename__ = "DiemDanhTheoNgay"
     __table_args__ = (
-        UniqueConstraint("LopHocId", "HocVienId", "NgayHoc", name="UQ_DiemDanh_Lop_HocVien_Ngay"),
+        UniqueConstraint(
+            "LopHocId",
+            "HocVienId",
+            "NgayHoc",
+            name="UQ_DiemDanhTheoNgay_Lop_HocVien_Ngay",
+        ),
         CheckConstraint(
             "TrangThai IN ('present', 'late', 'excused_absence', 'unexcused_absence')",
-            name="CK_DiemDanh_TrangThai",
+            name="CK_DiemDanhTheoNgay_TrangThai",
         ),
     )
 
@@ -45,7 +50,7 @@ class AbsenceRequest(Base):
 
 
 class AttendanceAudit(Base):
-    __tablename__ = "DiemDanh_LichSu"
+    __tablename__ = "DiemDanhTheoNgay_LichSu"
 
     LichSuId = Column(Integer, primary_key=True, autoincrement=True)
     DoiTuong = Column(Unicode(30), nullable=False)

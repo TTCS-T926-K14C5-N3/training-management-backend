@@ -3,7 +3,15 @@ from decimal import Decimal
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
+from app.services.business_time import business_now
 
 
 class TrainingProgramWrite(BaseModel):
@@ -96,7 +104,7 @@ class SubjectCreate(BaseModel):
     ma_mon_hoc: str = Field(alias="maMonHoc", min_length=1, max_length=30)
     ten_mon_hoc: str = Field(alias="tenMonHoc", min_length=1, max_length=150)
     so_tin_chi: int | None = Field(default=None, alias="soTinChi", ge=1, le=30)
-    so_buoi: int = Field(default=1, alias="soBuoi", ge=1)
+    so_buoi: int = Field(default=1, alias="soBuoi", gt=0)
     trong_so: Decimal = Field(
         default=Decimal("1"),
         alias="trongSo",
@@ -129,6 +137,12 @@ class SubjectCreate(BaseModel):
             raise ValueError("Trạng thái môn học không hợp lệ.")
         return value
 
+    @model_validator(mode="after")
+    def calculate_sessions_from_credits(self):
+        if self.so_tin_chi is not None:
+            self.so_buoi = self.so_tin_chi * 15 // 5
+        return self
+
 
 class SubjectUpdate(SubjectCreate):
     pass
@@ -138,6 +152,43 @@ class ClassInstructorAssignment(BaseModel):
     mon_hoc_id: int = Field(alias="monHocId", gt=0)
     giang_vien_id: int = Field(alias="giangVienId", gt=0)
     vai_tro: Literal["Chính", "Trợ giảng"] = Field(alias="vaiTro")
+
+
+class StudentEnrollmentActionWrite(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    loai_thao_tac: Literal["BaoLuu", "ChuyenLop", "ThoiHoc"] = Field(
+        alias="loaiThaoTac"
+    )
+    ngay_hieu_luc: date = Field(alias="ngayHieuLuc")
+    ly_do: str = Field(alias="lyDo", min_length=1, max_length=1000)
+    lop_hoc_dich_id: int | None = Field(
+        default=None,
+        alias="lopHocDichId",
+        gt=0,
+    )
+
+    @field_validator("ly_do", mode="before")
+    @classmethod
+    def normalize_action_reason(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ly_do")
+    @classmethod
+    def validate_action_reason(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Vui lòng nhập lý do xử lý học viên.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_transfer_target(self):
+        if (self.loai_thao_tac == "ChuyenLop") != (
+            self.lop_hoc_dich_id is not None
+        ):
+            raise ValueError(
+                "Chỉ thao tác chuyển lớp mới được chọn lớp đích."
+            )
+        return self
 
 
 class ClassWrite(BaseModel):
@@ -152,7 +203,10 @@ class ClassWrite(BaseModel):
     giang_vien_id: int | None = Field(default=None, alias="giangVienId", gt=0)
     hoc_vien_ids: list[int] = Field(default_factory=list, alias="hocVienIds")
     mon_hoc_ids: list[int] = Field(default_factory=list, alias="monHocIds")
-    ngay_khai_giang: date = Field(default_factory=date.today, alias="ngayKhaiGiang")
+    ngay_khai_giang: date = Field(
+        default_factory=lambda: business_now().date(),
+        alias="ngayKhaiGiang",
+    )
     si_so_toi_da: int = Field(default=30, alias="siSoToiDa", gt=0, le=500)
     hinh_thuc: Literal["Trực tiếp", "Trực tuyến", "Kết hợp"] = Field(
         default="Trực tiếp",
@@ -179,8 +233,8 @@ class ClassWrite(BaseModel):
         "Hủy",
         "Đang hoạt động",
     ] = Field(default="Chuẩn bị", alias="trangThai")
-    phan_cong_giang_vien: list[ClassInstructorAssignment] = Field(
-        default_factory=list,
+    phan_cong_giang_vien: list[ClassInstructorAssignment] | None = Field(
+        default=None,
         alias="phanCongGiangVien",
     )
 
@@ -218,9 +272,47 @@ class ClassEnrollmentWrite(BaseModel):
     @field_validator("hoc_vien_ids")
     @classmethod
     def validate_student_ids(cls, value: list[int]) -> list[int]:
-        if any(item <= 0 for item in value) or len(value) != len(set(value)):
-            raise ValueError("Danh sách học viên không hợp lệ hoặc bị trùng.")
+        if any(item <= 0 for item in value):
+            raise ValueError("Mã học viên không hợp lệ.")
         return value
+
+
+RoomCreate = RoomWrite
+ClassEnrollmentsWrite = ClassEnrollmentWrite
+StudentProfileUpdate = StudentProfileWrite
+
+
+class ClassStudentActionWrite(BaseModel):
+    loai_thao_tac: Literal["BaoLuu", "ChuyenLop", "ThoiHoc"] = Field(
+        alias="loaiThaoTac"
+    )
+    ngay_hieu_luc: date = Field(alias="ngayHieuLuc")
+    ly_do: str = Field(alias="lyDo", min_length=1, max_length=1000)
+    lop_hoc_dich_id: int | None = Field(
+        default=None,
+        alias="lopHocDichId",
+        gt=0,
+    )
+
+    @field_validator("ly_do", mode="before")
+    @classmethod
+    def normalize_action_reason(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ly_do")
+    @classmethod
+    def validate_action_reason(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Vui lòng nhập lý do xử lý học viên.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_destination(self):
+        if (self.loai_thao_tac == "ChuyenLop") != (
+            self.lop_hoc_dich_id is not None
+        ):
+            raise ValueError("Chỉ thao tác chuyển lớp mới cần chọn lớp đích.")
+        return self
 
 
 class GradeWrite(BaseModel):

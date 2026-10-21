@@ -16,6 +16,7 @@ from app.models.assignment import (
     Assignment,
     AssignmentAttachment,
     AssignmentGrade,
+    AssignmentNotification,
     AssignmentReopen,
     AssignmentSubmission,
     AssignmentSubmissionAttachment,
@@ -24,6 +25,7 @@ from app.models.lich_hoc import LichHoc
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
+from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.services.academic_service import accessible_classes, user_role_ids
@@ -154,6 +156,27 @@ def _assignment_payload(db: Session, assignment: Assignment, student_id: int | N
     return payload
 
 
+def _create_assignment_notification(
+    db: Session,
+    assignment: Assignment,
+    recipient_id: int,
+    kind: str,
+    title: str,
+    message: str,
+    now: datetime,
+) -> None:
+    db.add(
+        AssignmentNotification(
+            AssignmentId=assignment.AssignmentId,
+            NguoiNhanId=recipient_id,
+            Loai=kind,
+            TieuDe=title,
+            NoiDung=message,
+            NgayTao=now,
+        )
+    )
+
+
 def _parse_assignment(payload: str) -> AssignmentWrite:
     try:
         return AssignmentWrite.model_validate_json(payload)
@@ -220,8 +243,11 @@ def list_my_assignments(
     user: NguoiDung = Depends(get_current_user),
 ):
     _require_student(user, db)
+    now = local_now()
     class_ids = [row[0] for row in db.query(LopHocHocVien.LopHocId).filter(
-        LopHocHocVien.HocVienId == user.NguoiDungId
+        LopHocHocVien.HocVienId == user.NguoiDungId,
+        LopHocHocVien.NgayThamGia <= now,
+        (LopHocHocVien.NgayKetThuc.is_(None)) | (LopHocHocVien.NgayKetThuc > now),
     ).all()]
     if not class_ids:
         return []
@@ -232,6 +258,36 @@ def list_my_assignments(
         .all()
     )
     return [_assignment_payload(db, item, user.NguoiDungId) for item in assignments]
+
+
+@router.get("/notifications", dependencies=[Depends(require_permission(ASSIGNMENT_VIEW))])
+def list_assignment_notifications(
+    db: Session = Depends(get_db),
+    user: NguoiDung = Depends(get_current_user),
+):
+    rows = (
+        db.query(AssignmentNotification, Assignment.TieuDe)
+        .join(Assignment, Assignment.AssignmentId == AssignmentNotification.AssignmentId)
+        .filter(AssignmentNotification.NguoiNhanId == user.NguoiDungId)
+        .order_by(
+            AssignmentNotification.NgayTao.desc(),
+            AssignmentNotification.NotificationId.desc(),
+        )
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": notification.NotificationId,
+            "assignmentId": notification.AssignmentId,
+            "type": notification.Loai,
+            "title": notification.TieuDe,
+            "message": notification.NoiDung,
+            "assignmentTitle": assignment_title,
+            "at": notification.NgayTao.isoformat(),
+        }
+        for notification, assignment_title in rows
+    ]
 
 
 @router.get("/teacher", dependencies=[Depends(require_permission(ASSIGNMENT_VIEW))])
@@ -310,7 +366,29 @@ def publish_assignment(
     if assignment.HanNop <= local_now():
         raise HTTPException(status_code=422, detail="Hạn nộp phải ở thời điểm tương lai.")
     assignment.TrangThai = "Published"
-    assignment.NgayCapNhat = local_now()
+    now = local_now()
+    assignment.NgayCapNhat = now
+    enrolled_ids = {
+        row[0]
+        for row in db.query(LopHocHocVien.HocVienId)
+        .filter(
+            LopHocHocVien.LopHocId == assignment.LopHocId,
+            LopHocHocVien.NgayThamGia <= now,
+            (LopHocHocVien.NgayKetThuc.is_(None))
+            | (LopHocHocVien.NgayKetThuc > now),
+        )
+        .all()
+    }
+    for student_id in enrolled_ids:
+        _create_assignment_notification(
+            db,
+            assignment,
+            student_id,
+            "published",
+            "Bài tập mới được phát hành",
+            f"Bài tập “{assignment.TieuDe}” đã được phát hành. Hạn nộp: {assignment.HanNop.isoformat()}.",
+            now,
+        )
     _commit(db, "Không thể phát hành bài tập.")
     return _assignment_payload(db, assignment)
 
@@ -324,12 +402,17 @@ def assignment_roster(
 ):
     assignment = _get_assignment(db, assignment_id)
     ensure_assignment_teacher(db, user, assignment)
-    if status_filter not in {"all", "missing", "submitted", "late", "graded"}:
+    if status_filter not in {"all", "missing", "submitted", "late", "graded", "ungraded"}:
         raise HTTPException(status_code=422, detail="Bộ lọc trạng thái không hợp lệ.")
     enrolled = (
         db.query(NguoiDung)
         .join(LopHocHocVien, LopHocHocVien.HocVienId == NguoiDung.NguoiDungId)
-        .filter(LopHocHocVien.LopHocId == assignment.LopHocId)
+        .filter(
+            LopHocHocVien.LopHocId == assignment.LopHocId,
+            LopHocHocVien.NgayThamGia <= local_now(),
+            (LopHocHocVien.NgayKetThuc.is_(None))
+            | (LopHocHocVien.NgayKetThuc > local_now()),
+        )
         .order_by(NguoiDung.HoTen)
         .all()
     )
@@ -365,6 +448,11 @@ def assignment_roster(
                 status_filter == "late"
                 and submission is not None
                 and submission.SubmissionStatus == "Late"
+            )
+            or (
+                status_filter == "ungraded"
+                and submission is not None
+                and grade is None
             )
         ):
             roster.append(item)
@@ -435,7 +523,33 @@ async def submit_assignment(
                 LoaiNoiDung=item["content_type"],
                 KichThuoc=item["size"],
             ))
-        _commit(db, "Không thể lưu phiên bản nộp bài.")
+        if is_late:
+            recipients = {assignment.GiangVienId}
+            class_record = db.query(LopHoc).filter(
+                LopHoc.LopHocId == assignment.LopHocId
+            ).first()
+            if class_record and class_record.GiangVienId:
+                recipients.add(class_record.GiangVienId)
+            recipients.update(
+                row[0]
+                for row in db.query(LopHocMonHocGiangVien.GiangVienId)
+                .filter(
+                    LopHocMonHocGiangVien.LopHocId == assignment.LopHocId,
+                    LopHocMonHocGiangVien.MonHocId == assignment.MonHocId,
+                )
+                .all()
+            )
+            for teacher_id in recipients:
+                _create_assignment_notification(
+                    db,
+                    assignment,
+                    teacher_id,
+                    "late_submission",
+                    "Học viên nộp bài muộn",
+                    f"{user.HoTen} đã nộp bài tập “{assignment.TieuDe}” sau hạn nộp.",
+                    now,
+                )
+        _commit(db, "Không thể lưu phiên bản nộp bài hoặc thông báo.")
     except Exception:
         db.rollback()
         delete_stored_files(stored)
@@ -547,8 +661,6 @@ def download_attachment(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Tệp không còn tồn tại trên máy chủ.")
     return FileResponse(path, filename=original_name)
-
-
 
 
 
