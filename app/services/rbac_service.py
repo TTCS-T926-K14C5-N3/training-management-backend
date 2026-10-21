@@ -48,14 +48,21 @@ PERMISSION_CATALOG = (
     ("CLASS_UPDATE", "Sửa lớp học", "Cập nhật lớp học."),
     ("CLASS_DELETE", "Xóa lớp học", "Xóa lớp học."),
     ("QUAN_LY_LOP", "Truy cập quản lý lớp", "Truy cập khu vực quản lý lớp."),
-    ("SCHEDULE_VIEW", "Xem lịch học", "Xem lịch buổi học và lịch sử thay đổi."),
-    ("SCHEDULE_CREATE", "Tạo lịch học", "Tạo lịch cho buổi học."),
-    ("SCHEDULE_UPDATE", "Cập nhật lịch học", "Chỉnh sửa hoặc hủy buổi học."),
+    ("SCHEDULE_MANAGE", "Quản lý thời khóa biểu", "Tạo và cập nhật các buổi học."),
+    ("SCHEDULE_VIEW", "Xem lịch học", "Xem buổi học và lịch sử thay đổi."),
+    ("SCHEDULE_CREATE", "Tạo buổi học", "Tạo buổi học mới."),
+    ("SCHEDULE_UPDATE", "Cập nhật lịch học", "Sửa hoặc hủy buổi học."),
+    (
+        "SCHEDULE_OVERRIDE",
+        "Ghi đè xung đột lịch",
+        "Xác nhận ngoại lệ khi lịch trùng giảng viên hoặc phòng.",
+    ),
+    ("ATTENDANCE_VIEW", "Xem điểm danh", "Xem danh sách điểm danh buổi học."),
+    ("ATTENDANCE_UPDATE", "Cập nhật điểm danh", "Ghi nhận hoặc sửa điểm danh."),
     ("ASSIGNMENT_VIEW", "Xem bài tập", "Xem bài tập và trạng thái nộp bài."),
     ("ASSIGNMENT_CREATE", "Quản lý bài tập", "Tạo và giao bài tập cho lớp."),
     ("ASSIGNMENT_SUBMIT", "Nộp bài tập", "Nộp và cập nhật bài làm."),
     ("ASSIGNMENT_GRADE", "Chấm bài tập", "Xem danh sách bài nộp và chấm bài."),
-    ("ATTENDANCE_VIEW", "Xem điểm danh", "Xem lịch sử và chức năng điểm danh."),
     ("CURRICULUM_VIEW", "Xem danh mục đào tạo", "Xem môn học và cấu trúc chương trình."),
     ("CURRICULUM_CREATE", "Tạo danh mục đào tạo", "Tạo môn học trong danh mục đào tạo."),
     ("CURRICULUM_UPDATE", "Sửa danh mục đào tạo", "Sửa môn học và cấu trúc chương trình."),
@@ -69,7 +76,14 @@ PERMISSION_CATALOG = (
 
 DEFAULT_ROLE_PERMISSIONS = {
     1: (),
-    2: ("GRADE_VIEW", "TUITION_VIEW", "ATTENDANCE_VIEW", "ASSIGNMENT_VIEW", "ASSIGNMENT_SUBMIT"),
+    2: (
+        "GRADE_VIEW",
+        "TUITION_VIEW",
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_SUBMIT",
+    ),
     3: (
         "GRADE_VIEW",
         "GRADE_CREATE",
@@ -82,8 +96,16 @@ DEFAULT_ROLE_PERMISSIONS = {
         "ASSIGNMENT_CREATE",
         "ASSIGNMENT_GRADE",
         "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
     ),
-    4: ("SCHEDULE_VIEW", "ASSIGNMENT_VIEW", "ASSIGNMENT_CREATE", "ASSIGNMENT_GRADE", "ATTENDANCE_VIEW"),
+    4: (
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
+    ),
     5: (
         "USER_VIEW",
         "USER_CREATE",
@@ -108,6 +130,9 @@ DEFAULT_ROLE_PERMISSIONS = {
         "SCHEDULE_CREATE",
         "SCHEDULE_UPDATE",
         "ATTENDANCE_VIEW",
+        "SCHEDULE_MANAGE",
+        "SCHEDULE_OVERRIDE",
+        "ATTENDANCE_UPDATE",
         "ASSIGNMENT_VIEW",
         "ASSIGNMENT_CREATE",
         "ASSIGNMENT_GRADE",
@@ -120,6 +145,10 @@ DEFAULT_ROLE_PERMISSIONS = {
         "LEAD_UPDATE",
         "LEAD_DELETE",
         "LEAD_ASSIGN",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_SUBMIT",
+        "ASSIGNMENT_GRADE",
     ),
     8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
 }
@@ -197,21 +226,25 @@ def initialize_role_permissions(db: Session) -> None:
                     )
 
         db.flush()
-        admin_role_permissions = {
-            link.QuyenId
-            for link in db.query(VaiTroQuyen)
-            .filter(VaiTroQuyen.VaiTroId == 8)
-            .all()
-        }
-        for code in ("ROLE_VIEW", "ROLE_UPDATE"):
-            permission_id = permissions_by_code[code].QuyenId
-            if permission_id not in admin_role_permissions:
-                db.add(
-                    VaiTroQuyen(
-                        VaiTroId=8,
-                        QuyenId=permission_id,
+        admin_roles = db.query(VaiTro).filter(
+            (VaiTro.VaiTroId == 8) | (VaiTro.TenVaiTro.ilike("%admin%"))
+        ).all()
+        for a_role in admin_roles:
+            curr_perms = {
+                link.QuyenId
+                for link in db.query(VaiTroQuyen)
+                .filter(VaiTroQuyen.VaiTroId == a_role.VaiTroId)
+                .all()
+            }
+            for code, _, _ in PERMISSION_CATALOG:
+                perm = permissions_by_code.get(code)
+                if perm and perm.QuyenId not in curr_perms:
+                    db.add(
+                        VaiTroQuyen(
+                            VaiTroId=a_role.VaiTroId,
+                            QuyenId=perm.QuyenId,
+                        )
                     )
-                )
 
     db.commit()
 

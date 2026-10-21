@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -143,12 +142,9 @@ def verify_access_token(
 
         valid_after = user.TokenValidAfter
 
-        # SQL Server DATETIME/DATETIME2 không lưu timezone.
-        # Đoạn này giả định giá trị trong DB là giờ Việt Nam.
+        # TokenValidAfter is stored as a naive UTC datetime.
         if valid_after.tzinfo is None:
-            valid_after = valid_after.replace(
-                tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")
-            )
+            valid_after = valid_after.replace(tzinfo=timezone.utc)
 
         valid_after = valid_after.astimezone(timezone.utc)
 

@@ -12,7 +12,7 @@ BEGIN TRY
             NgayHoc DATE NOT NULL,
             GioBatDau TIME(0) NOT NULL,
             GioKetThuc TIME(0) NOT NULL,
-            PhongHocId INT NULL,
+            PhongHocId INT NOT NULL,
             GiangVienId INT NOT NULL,
             TrangThai NVARCHAR(20) NOT NULL
                 CONSTRAINT DF_LichHoc_TrangThai DEFAULT N'Đã lên lịch',

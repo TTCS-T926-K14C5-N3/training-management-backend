@@ -181,11 +181,3 @@ def has_active_reopen(db: Session, assignment_id: int, student_id: int, graded_a
     )
     return reopen is not None
 
-
-
-
-
-
-
-
-

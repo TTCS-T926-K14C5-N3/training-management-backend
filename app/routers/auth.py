@@ -24,6 +24,7 @@ from app.models.nguoi_dung import NguoiDung
 from app.schemas.login import LoginRequest
 from app.schemas.update_profile import UpdateProfileRequest
 from app.schemas.activate_account import ActivateAccountRequest
+from app.schemas.resend_activation import ResendActivationRequest
 from app.schemas.forgot_password import ForgotPasswordRequest
 from app.schemas.reset_password import ResetPasswordRequest
 from app.schemas.change_password import ChangePasswordRequest
@@ -36,6 +37,7 @@ from app.services.auth_service import (
     activate_account,
     _get_role_names,
     _role_home_path,
+    resend_activation,
 )
 from app.services.profile_service import update_my_profile
 from app.services.avatar_service import (
@@ -216,6 +218,17 @@ def forgot_password_endpoint(
     db: Session = Depends(get_db),
 ):
     return forgot_password(db, request)
+
+
+@router.post(
+    "/resend-activation",
+    status_code=status.HTTP_200_OK,
+)
+def resend_activation_endpoint(
+    request: ResendActivationRequest,
+    db: Session = Depends(get_db),
+):
+    return resend_activation(db, request)
 
 
 # ============================================================

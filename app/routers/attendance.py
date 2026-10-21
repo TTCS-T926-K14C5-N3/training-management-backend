@@ -24,6 +24,11 @@ from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.routers.attendance_sessions import (
+    create_absence_request,
+    decide_absence_request as decide_session_absence_request,
+)
+from app.schemas.attendance import AbsenceRequestDecision
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 VALID_STATUSES = {"present", "late", "excused_absence", "unexcused_absence"}
@@ -441,7 +446,7 @@ def list_absence_requests(
 
 
 @router.post("/absence-requests/{request_id}/decision")
-def decide_absence_request(
+def decide_class_absence_request(
     request_id: int,
     payload: AbsenceDecision,
     current_user: NguoiDung = Depends(get_current_user), db: Session = Depends(get_db),
@@ -618,8 +623,22 @@ def export_attendance(
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-
-
-
-
-
+def decide_absence_request(
+    request_id: int,
+    decision: AbsenceDecision | AbsenceRequestDecision,
+    current_user: NguoiDung,
+    db: Session,
+):
+    if isinstance(decision, AbsenceRequestDecision):
+        return decide_session_absence_request(
+            request_id,
+            decision,
+            current_user,
+            db,
+        )
+    return decide_class_absence_request(
+        request_id,
+        decision,
+        current_user,
+        db,
+    )

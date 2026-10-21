@@ -1,14 +1,7 @@
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    String,
-    Unicode,
-)
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Unicode
 
 from app.database import Base
+from app.models.lead_activity import LeadInteraction, LeadStatusHistory
 
 
 class Lead(Base):
@@ -86,3 +79,9 @@ class LeadConversion(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=False,
     )
+
+
+AdmissionsLead = Lead
+AdmissionsLeadAssignment = LeadAssignmentHistory
+AdmissionsLeadStatusHistory = LeadStatusHistory
+AdmissionsLeadInteraction = LeadInteraction

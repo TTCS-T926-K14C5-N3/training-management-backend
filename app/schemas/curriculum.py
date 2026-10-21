@@ -4,7 +4,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class ProgramSubjectWrite(BaseModel):
     mon_hoc_id: int = Field(alias="monHocId", gt=0)
     thu_tu: int = Field(alias="thuTu", gt=0)
-    mon_tien_quyet_id: int | None = Field(default=None, alias="monTienQuyetId", gt=0)
+    mon_tien_quyet_id: int | None = Field(
+        default=None,
+        alias="monTienQuyetId",
+        gt=0,
+    )
 
 
 class ProgramSubjectsWrite(BaseModel):
@@ -50,4 +54,14 @@ class SessionsWrite(BaseModel):
 
 class SessionCloneWrite(BaseModel):
     source_subject_id: int = Field(alias="sourceSubjectId", gt=0)
-    source_program_id: int | None = Field(default=None, alias="sourceProgramId", gt=0)
+    source_program_id: int | None = Field(
+        default=None,
+        alias="sourceProgramId",
+        gt=0,
+    )
+
+
+ProgramSubjectItem = ProgramSubjectWrite
+ProgramSessionItem = SessionWrite
+ProgramSessionsWrite = SessionsWrite
+ProgramSessionsClone = SessionCloneWrite

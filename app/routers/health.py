@@ -22,6 +22,7 @@ def test_db():
 
 
 @router.get("/api/health")
+@router.get("/health")
 def health():
     return {
         "status": "ok",

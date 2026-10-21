@@ -28,6 +28,7 @@ from app.schemas.admin_create_user import AdminCreateUserRequest
 from app.schemas.nguoi_dung import NguoiDungCreate, NguoiDungLock
 from app.schemas.register import RegisterRequest
 from app.schemas.reset_password import ResetPasswordRequest
+from app.schemas.resend_activation import ResendActivationRequest
 from app.services.email_service import (
     send_reset_password_email,
     send_activation_email,
@@ -78,6 +79,10 @@ def _get_role_names(db: Session, user_id: int) -> list[str]:
     ).mappings().all()
 
     return [row["TenVaiTro"] for row in rows]
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ============================================================
@@ -430,8 +435,8 @@ def _create_activation_token(
     db.add(activation_token)
 
     return (
-        f"{FRONTEND_URL}/login"
-        f"?activate={raw_activation_token}"
+        f"{FRONTEND_URL.rstrip('/')}/activate-account"
+        f"?token={raw_activation_token}"
     )
 
 
@@ -757,10 +762,7 @@ def login_user(
         if not user.DaKichHoat:
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "Tài khoản chưa được kích hoạt. "
-                    "Vui lòng kiểm tra email để kích hoạt tài khoản."
-                ),
+                detail="Tài khoản chưa được kích hoạt",
             )
 
     now = datetime.now()
@@ -864,13 +866,14 @@ def login_user(
     user.TrangThai = "HoatDong"
     user.NgayCapNhat = now
 
-    if user.TokenValidAfter and user.TokenValidAfter > now:
+    token_valid_after = user.TokenValidAfter
+    if token_valid_after is not None and token_valid_after > utc_now():
         logger.warning(
             "TokenValidAfter for user %s is in the future; "
             "clamping it to the successful login time.",
             user.NguoiDungId,
         )
-        user.TokenValidAfter = now
+        user.TokenValidAfter = utc_now()
 
     db.commit()
     db.refresh(user)
@@ -1103,9 +1106,7 @@ def update_password(
     )
 
     user.NgayCapNhat = now
-
-    # Các token cũ không còn hợp lệ
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
 
     user.BatBuocDoiMatKhau = False
     user.CanDoiMatKhau = False
@@ -1154,6 +1155,7 @@ def forgot_password(
             "message": message
         }
 
+
     raw_token = secrets.token_urlsafe(32)
 
     now = datetime.now()
@@ -1201,7 +1203,7 @@ def forgot_password(
             reset_link=reset_link,
         )
 
-    except RuntimeError:
+    except RuntimeError as error:
         logger.exception(
             "Failed to send password-reset email for user_id=%s",
             user.NguoiDungId,
@@ -1218,11 +1220,112 @@ def forgot_password(
                 user.NguoiDungId,
             )
 
-        return {"message": message}
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể gửi email đặt lại mật khẩu lúc này. Vui lòng thử lại sau.",
+        ) from error
 
     return {
         "message": message
     }
+
+
+def resend_activation(
+    db: Session,
+    request: ResendActivationRequest,
+):
+    message = (
+        "Yêu cầu đã được tiếp nhận. Nếu email thuộc tài khoản chưa kích hoạt, "
+        "hướng dẫn sẽ được gửi; nếu không nhận được email, vui lòng thử lại "
+        "sau hoặc liên hệ quản trị viên."
+    )
+    email = str(request.email).strip().lower()
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == email)
+        .first()
+    )
+
+    if (
+        not user
+        or user.DaKichHoat
+        or user.TrangThai != "HoatDong"
+    ):
+        return {"message": message}
+
+    now = datetime.now()
+    activation_tokens = (
+        db.query(TokenKichHoat)
+        .filter(
+            TokenKichHoat.NguoiDungId == user.NguoiDungId,
+            TokenKichHoat.DaSuDung == False,
+        )
+        .all()
+    )
+
+    recent_valid_token = any(
+        token.ThoiGianTao >= now - timedelta(minutes=5)
+        and token.ThoiGianHetHan > now
+        for token in activation_tokens
+    )
+    if recent_valid_token:
+        return {"message": message}
+
+    for token in activation_tokens:
+        token.DaSuDung = True
+
+    raw_token = secrets.token_urlsafe(32)
+    activation_token = TokenKichHoat(
+        NguoiDungId=user.NguoiDungId,
+        Token=hashlib.sha256(raw_token.encode()).hexdigest(),
+        ThoiGianTao=now,
+        ThoiGianHetHan=now + timedelta(hours=24),
+        DaSuDung=False,
+    )
+    db.add(activation_token)
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to save activation token for user_id=%s",
+            user.NguoiDungId,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Không thể gửi hướng dẫn kích hoạt lúc này. "
+                "Vui lòng thử lại sau."
+            ),
+        ) from exc
+
+    activation_link = (
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
+    )
+    try:
+        send_activation_email(
+            recipient_email=user.Email,
+            ho_ten=user.HoTen,
+            temporary_password=None,
+            activation_link=activation_link,
+        )
+    except RuntimeError:
+        activation_token.DaSuDung = True
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Failed to invalidate undelivered activation token for user_id=%s",
+                user.NguoiDungId,
+            )
+        logger.exception(
+            "Failed to send activation email for user_id=%s",
+            user.NguoiDungId,
+        )
+
+    return {"message": message}
 
 
 # ============================================================
@@ -1302,47 +1405,6 @@ def activate_account(
     }
 
 
-# ============================================================
-# KIỂM TRA RESET TOKEN
-# ============================================================
-
-def validate_reset_token(
-    db: Session,
-    token: str,
-):
-    token_hash = hashlib.sha256(
-        token.encode()
-    ).hexdigest()
-
-    reset_token = (
-        db.query(TokenMatKhau)
-        .filter(
-            TokenMatKhau.Token == token_hash,
-            TokenMatKhau.DaSuDung == False,
-        )
-        .first()
-    )
-
-    if not reset_token:
-        raise HTTPException(
-            status_code=400,
-            detail="Token không hợp lệ",
-        )
-
-    if reset_token.ThoiGianHetHan < datetime.now():
-
-        reset_token.DaSuDung = True
-
-        db.commit()
-
-        raise HTTPException(
-            status_code=400,
-            detail="Token đã hết hạn",
-        )
-
-    return reset_token
-
-
 # =========================================================
 # KIỂM TRA TOKEN RESET PASSWORD
 # =========================================================
@@ -1418,7 +1480,7 @@ def reset_password(
         request.new_password
     )
 
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     user.BatBuocDoiMatKhau = False
@@ -1475,6 +1537,11 @@ def update_user(
             )
 
         user.Email = email
+    # ============================================================
+    # CẬP NHẬT HỌ TÊN
+    # ============================================================
+    if request.ho_ten is not None:
+        user.HoTen = request.ho_ten.strip()
 
     # Cập nhật họ tên
     if request.ho_ten:
@@ -1487,6 +1554,17 @@ def update_user(
             if request.so_dien_thoai
             else None
         )
+        if phone and phone_exists(
+            db,
+            phone,
+            exclude_user_id=user_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+        user.SoDienThoai = phone
 
         if phone and phone_exists(
             db,
@@ -1660,7 +1738,7 @@ def lock_user(
     user.LyDoKhoa = request.ly_do_khoa.strip()
 
     now = datetime.now()
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     try:
@@ -1707,7 +1785,7 @@ def unlock_user(
 
     user.SoLanDangNhapSai = 0
     now = datetime.now()
-    user.TokenValidAfter = now
+    user.TokenValidAfter = utc_now()
     user.NgayCapNhat = now
 
     try:

@@ -341,7 +341,7 @@ def get_users(
     users = (
         query
         .order_by(
-            NguoiDung.NguoiDungId
+            NguoiDung.NguoiDungId.desc()
         )
         .offset(offset)
         .limit(limit)
