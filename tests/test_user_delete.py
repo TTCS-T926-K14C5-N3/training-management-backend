@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -7,11 +7,19 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models.diem import Diem
+from app.models.diem_danh_buoi_hoc import DiemDanhBuoiHoc
+from app.models.admissions import Lead, LeadConversion
 from app.models.lop_hoc import LopHoc
-from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.lop_hoc_hoc_vien import (
+    LopHocHocVien,
+    LopHocHocVienThaoTac,
+)
+from app.models.lich_hoc import LichHoc
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.phong_hoc import PhongHoc
+from app.models.program_subject import BuoiHoc
 from app.models.vai_tro import VaiTro
 from app.services.auth_service import delete_user
 
@@ -146,3 +154,89 @@ def test_delete_user_with_grades_is_blocked_and_preserves_history(db):
     assert "dữ liệu điểm" in error.value.detail
     assert db.get(NguoiDung, user.NguoiDungId) is not None
     assert db.query(Diem).count() == 1
+
+
+def test_delete_user_with_attendance_and_academic_history_is_explained(db):
+    student = add_user(db, 1, "student@example.com")
+    teacher = add_user(db, 2, "teacher@example.com")
+    room = PhongHoc(
+        MaPhong="A101",
+        TenPhong="Phòng A101",
+        SucChua=30,
+    )
+    subject = MonHoc(
+        MaMonHoc="CS101",
+        TenMonHoc="Lập trình",
+    )
+    class_record = LopHoc(
+        MaLop="CS101-01",
+        TenLop="Lớp Lập trình",
+        NamHoc="2026-2027",
+        GiangVienId=teacher.NguoiDungId,
+        NgayTao=datetime.now(),
+    )
+    db.add_all([room, subject, class_record])
+    db.flush()
+    schedule = LichHoc(
+        LopHocId=class_record.LopHocId,
+        MonHocId=subject.MonHocId,
+        NgayHoc=date.today(),
+        GioBatDau=time(9),
+        GioKetThuc=time(10),
+        PhongHocId=room.PhongHocId,
+        GiangVienId=teacher.NguoiDungId,
+        TrangThai="Đã lên lịch",
+        NgayTao=datetime.now(),
+        NguoiTaoId=teacher.NguoiDungId,
+        NgayCapNhat=datetime.now(),
+        NguoiCapNhatId=teacher.NguoiDungId,
+    )
+    lead = Lead(
+        HoTen=student.HoTen,
+        SoDienThoai="0900000000",
+        Nguon="Kiểm thử",
+        TrangThai="Đã chuyển đổi",
+        NgayTao=datetime.now(),
+        NgayCapNhat=datetime.now(),
+        NguoiTaoId=teacher.NguoiDungId,
+    )
+    db.add_all([schedule, lead])
+    db.flush()
+    db.add_all(
+        [
+            DiemDanhBuoiHoc(
+                LichHocId=schedule.LichHocId,
+                HocVienId=student.NguoiDungId,
+                TrangThai="Có mặt",
+                NguoiCapNhatId=teacher.NguoiDungId,
+                NgayCapNhat=datetime.now(),
+            ),
+            LopHocHocVienThaoTac(
+                LopHocId=class_record.LopHocId,
+                HocVienId=student.NguoiDungId,
+                LoaiThaoTac="Ghi danh",
+                NgayHieuLuc=date.today(),
+                LyDo="Ghi danh kiểm thử",
+                NguoiThucHienId=teacher.NguoiDungId,
+                NgayTao=datetime.now(),
+            ),
+            LeadConversion(
+                LeadId=lead.LeadId,
+                NguoiDungId=student.NguoiDungId,
+                MaHocVien="HV-000001",
+                NgayNhapHoc=datetime.now(),
+                NguoiChuyenDoiId=teacher.NguoiDungId,
+            ),
+        ]
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        delete_user(db, student.NguoiDungId)
+
+    assert error.value.status_code == 409
+    assert "1 điểm danh" in error.value.detail
+    assert "1 lịch sử thao tác lớp học" in error.value.detail
+    assert "1 hồ sơ chuyển đổi tuyển sinh" in error.value.detail
+    assert db.get(NguoiDung, student.NguoiDungId) is not None
+    assert db.query(DiemDanhBuoiHoc).count() == 1

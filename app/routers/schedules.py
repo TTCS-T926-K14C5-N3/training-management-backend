@@ -21,7 +21,6 @@ from app.core.security import get_current_user, require_permission
 from app.database import SessionLocal, get_db
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lich_hoc_thong_bao import LichHocThongBao
-from app.models.diem_danh import DiemDanh
 from app.models.diem_danh_buoi_hoc import (
     DiemDanhBuoiHoc,
     DiemDanhBuoiHocLichSu,
@@ -36,7 +35,6 @@ from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
-from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.program_subject import BuoiHoc, ChuongTrinhMonHoc
 from app.models.nguoi_dung import NguoiDung
@@ -58,6 +56,7 @@ from app.services.academic_service import (
     accessible_classes,
     can_access_class,
     ensure_active_instructor,
+    has_schedule_wide_scope,
     user_role_ids,
 )
 from app.services.schedule_notifications import (
@@ -204,22 +203,13 @@ def _attendance_summary(db: Session, schedule: LichHoc) -> str | None:
     roster_ids = [student.NguoiDungId for student in roster]
     recorded_ids = {
         student_id
-        for (student_id,) in db.query(DiemDanh.HocVienId)
-        .filter(
-            DiemDanh.LichHocId == schedule.LichHocId,
-            DiemDanh.HocVienId.in_(roster_ids),
-        )
-        .all()
-    }
-    recorded_ids.update(
-        student_id
         for (student_id,) in db.query(DiemDanhBuoiHoc.HocVienId)
         .filter(
             DiemDanhBuoiHoc.LichHocId == schedule.LichHocId,
             DiemDanhBuoiHoc.HocVienId.in_(roster_ids),
         )
         .all()
-    )
+    }
     recorded_count = len(recorded_ids)
     if recorded_count == 0:
         return "Chưa điểm danh"
@@ -347,6 +337,17 @@ def _accessible_schedule_query(
             )
         )
         query = query.filter(enrollment_exists, ~enrollment_ended)
+    elif (
+        role_ids.intersection(TEACHING_ROLE_IDS)
+        and not has_schedule_wide_scope(
+            db,
+            current_user.NguoiDungId,
+            role_ids,
+        )
+    ):
+        query = query.filter(
+            LichHoc.GiangVienId == current_user.NguoiDungId
+        )
     return query
 
 
@@ -379,21 +380,6 @@ def _validate_room(db: Session, room_id: int) -> None:
         )
 
 
-def _instructor_roles(db: Session, class_id: int, subject_id: int) -> dict[int, str]:
-    return {
-        instructor_id: role
-        for instructor_id, role in db.query(
-            LopHocMonHocGiangVien.GiangVienId,
-            LopHocMonHocGiangVien.VaiTro,
-        )
-        .filter(
-            LopHocMonHocGiangVien.LopHocId == class_id,
-            LopHocMonHocGiangVien.MonHocId == subject_id,
-        )
-        .all()
-    }
-
-
 def _online_room_key(class_record: LopHoc | None) -> str | None:
     if (
         class_record is None
@@ -424,12 +410,8 @@ def _find_conflicts(
         db.query(LopHoc).filter(LopHoc.LopHocId == request.lop_hoc_id).first()
     )
     request_online_room = _online_room_key(request_class)
-    request_roles = _instructor_roles(db, request.lop_hoc_id, request.mon_hoc_id)
-    request_instructors = set(request_roles) | {request.giang_vien_id}
     for existing in overlaps:
         labels = []
-        existing_roles = _instructor_roles(db, existing.LopHocId, existing.MonHocId)
-        existing_instructors = set(existing_roles) | {existing.GiangVienId}
         class_record = (
             db.query(LopHoc)
             .filter(LopHoc.LopHocId == existing.LopHocId)
@@ -439,20 +421,20 @@ def _find_conflicts(
             request_online_room is not None
             and request_online_room == _online_room_key(class_record)
         )
-        for instructor_id in sorted(request_instructors & existing_instructors):
+        if existing.LopHocId == request.lop_hoc_id:
+            labels.append({"loai": "lopHoc"})
+        if request.giang_vien_id == existing.GiangVienId:
             teacher = (
                 db.query(NguoiDung)
-                .filter(NguoiDung.NguoiDungId == instructor_id)
+                .filter(NguoiDung.NguoiDungId == request.giang_vien_id)
                 .first()
             )
-            teacher_conflict = {
-                "loai": "giangVien",
-                "ten": teacher.HoTen if teacher else None,
-            }
-            role = existing_roles.get(instructor_id) or request_roles.get(instructor_id)
-            if role:
-                teacher_conflict["vaiTro"] = role
-            labels.append(teacher_conflict)
+            labels.append(
+                {
+                    "loai": "giangVien",
+                    "ten": teacher.HoTen if teacher else None,
+                }
+            )
         if existing.PhongHocId == request.phong_hoc_id:
             room = (
                 db.query(PhongHoc)
@@ -739,11 +721,6 @@ def _validate_buoi_hoc(
 
 def _ensure_schedule_writable(db: Session, schedule: LichHoc) -> None:
     has_attendance = (
-        db.query(DiemDanh.DiemDanhId)
-        .filter(DiemDanh.LichHocId == schedule.LichHocId)
-        .first()
-        is not None
-    ) or (
         db.query(DiemDanhBuoiHoc.DiemDanhBuoiHocId)
         .filter(DiemDanhBuoiHoc.LichHocId == schedule.LichHocId)
         .first()
@@ -768,10 +745,6 @@ def _ensure_schedule_writable(db: Session, schedule: LichHoc) -> None:
 
 def _ensure_no_attendance(db: Session, schedule: LichHoc) -> None:
     has_attendance = (
-        db.query(DiemDanh.DiemDanhId)
-        .filter(DiemDanh.LichHocId == schedule.LichHocId)
-        .first()
-    ) or (
         db.query(DiemDanhBuoiHoc.DiemDanhBuoiHocId)
         .filter(DiemDanhBuoiHoc.LichHocId == schedule.LichHocId)
         .first()
@@ -1524,6 +1497,8 @@ def update_schedule(
         recipient_ids.update(
             {previous_teacher_id, schedule.GiangVienId}
         )
+        if class_record.GiangVienId is not None:
+            recipient_ids.add(class_record.GiangVienId)
         notification_event_id = queue_schedule_notifications(
             db,
             schedule_id=schedule.LichHocId,
@@ -1609,6 +1584,8 @@ def cancel_schedule(
         for student in _attendance_roster(db, schedule)
     }
     recipient_ids.add(schedule.GiangVienId)
+    if class_record.GiangVienId is not None:
+        recipient_ids.add(class_record.GiangVienId)
     now = business_now_naive()
     schedule.TrangThai = CANCELLED
     schedule.LyDoHuy = request.ly_do
@@ -1678,20 +1655,14 @@ def retry_schedule_notifications(
     return process_schedule_notifications(db, retry_failed=True)
 
 
-def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
+def _attendance_payload(
+    db: Session,
+    schedule: LichHoc,
+    current_user: NguoiDung,
+) -> dict:
     roster = _attendance_roster(db, schedule)
     student_ids = [student.NguoiDungId for student in roster]
     attendance_rows = (
-        db.query(DiemDanh)
-        .filter(
-            DiemDanh.LichHocId == schedule.LichHocId,
-            DiemDanh.HocVienId.in_(student_ids),
-        )
-        .all()
-        if student_ids
-        else []
-    )
-    legacy_attendance = (
         db.query(DiemDanhBuoiHoc)
         .filter(
             DiemDanhBuoiHoc.LichHocId == schedule.LichHocId,
@@ -1702,9 +1673,7 @@ def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
         else []
     )
     attendance_by_student = {item.HocVienId: item for item in attendance_rows}
-    legacy_by_student = {item.HocVienId: item for item in legacy_attendance}
-    actor_ids = {item.NguoiDiemDanhId for item in attendance_rows}
-    actor_ids.update(item.NguoiCapNhatId for item in legacy_attendance)
+    actor_ids = {item.NguoiCapNhatId for item in attendance_rows}
     actors = (
         {
             user.NguoiDungId: user.HoTen
@@ -1715,21 +1684,28 @@ def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
         if actor_ids
         else {}
     )
+    now = business_now_naive()
+    start_at = datetime.combine(schedule.NgayHoc, schedule.GioBatDau)
+    end_at = datetime.combine(schedule.NgayHoc, schedule.GioKetThuc)
+    is_training_manager = bool(
+        user_role_ids(db, current_user.NguoiDungId).intersection({7, 8})
+    )
     return {
         "lichHocId": schedule.LichHocId,
         "maBuoiHoc": f"BH-{schedule.LichHocId:06d}",
         "ngayHoc": schedule.NgayHoc.isoformat(),
+        "coTheCapNhat": (
+            schedule.TrangThai == SCHEDULED
+            and now >= start_at
+            and (now < end_at or is_training_manager)
+        ),
         "records": [
             {
                 "hocVienId": student.NguoiDungId,
                 "trangThai": (
                     attendance_by_student[student.NguoiDungId].TrangThai
                     if student.NguoiDungId in attendance_by_student
-                    else (
-                        legacy_by_student[student.NguoiDungId].TrangThai
-                        if student.NguoiDungId in legacy_by_student
-                        else None
-                    )
+                    else None
                 ),
             }
             for student in roster
@@ -1742,11 +1718,7 @@ def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
                 "trangThai": (
                     attendance_by_student[student.NguoiDungId].TrangThai
                     if student.NguoiDungId in attendance_by_student
-                    else (
-                        legacy_by_student[student.NguoiDungId].TrangThai
-                        if student.NguoiDungId in legacy_by_student
-                        else None
-                    )
+                    else None
                 ),
                 "ghiChu": (
                     attendance_by_student[student.NguoiDungId].GhiChu
@@ -1755,25 +1727,15 @@ def _attendance_payload(db: Session, schedule: LichHoc) -> dict:
                 ),
                 "nguoiDiemDanh": (
                     actors.get(
-                        attendance_by_student[student.NguoiDungId].NguoiDiemDanhId
+                        attendance_by_student[student.NguoiDungId].NguoiCapNhatId
                     )
                     if student.NguoiDungId in attendance_by_student
-                    else (
-                        actors.get(
-                            legacy_by_student[student.NguoiDungId].NguoiCapNhatId
-                        )
-                        if student.NguoiDungId in legacy_by_student
-                        else None
-                    )
+                    else None
                 ),
                 "ngayCapNhat": (
                     attendance_by_student[student.NguoiDungId].NgayCapNhat.isoformat()
                     if student.NguoiDungId in attendance_by_student
-                    else (
-                        legacy_by_student[student.NguoiDungId].NgayCapNhat.isoformat()
-                        if student.NguoiDungId in legacy_by_student
-                        else None
-                    )
+                    else None
                 ),
             }
             for student in roster
@@ -1814,7 +1776,7 @@ def get_schedule_attendance(
     schedule = _get_schedule_or_404(db, schedule_id)
     _ensure_attendance_scope(db, schedule, current_user)
     if STUDENT_ROLE_ID in user_role_ids(db, current_user.NguoiDungId):
-        payload = _attendance_payload(db, schedule)
+        payload = _attendance_payload(db, schedule, current_user)
         payload["records"] = [
             record
             for record in payload["records"]
@@ -1826,7 +1788,7 @@ def get_schedule_attendance(
             if student["hocVienId"] == current_user.NguoiDungId
         ]
         return payload
-    return _attendance_payload(db, schedule)
+    return _attendance_payload(db, schedule, current_user)
 
 
 @router.put(
@@ -1942,7 +1904,7 @@ def update_schedule_attendance(
             db,
             "Không thể lưu điểm danh do dữ liệu bị trùng hoặc thay đổi đồng thời.",
         )
-        return _attendance_payload(db, schedule)
+        return _attendance_payload(db, schedule, current_user)
 
     if schedule.TrangThai != SCHEDULED:
         raise HTTPException(
@@ -1982,10 +1944,10 @@ def update_schedule_attendance(
         )
 
     existing_rows = (
-        db.query(DiemDanh)
+        db.query(DiemDanhBuoiHoc)
         .filter(
-            DiemDanh.LichHocId == schedule.LichHocId,
-            DiemDanh.HocVienId.in_(requested_ids),
+            DiemDanhBuoiHoc.LichHocId == schedule.LichHocId,
+            DiemDanhBuoiHoc.HocVienId.in_(requested_ids),
         )
         .all()
     )
@@ -1997,16 +1959,16 @@ def update_schedule_attendance(
         if old_status == entry.trang_thai and old_note == entry.ghi_chu:
             continue
         if attendance is None:
-            attendance = DiemDanh(
+            attendance = DiemDanhBuoiHoc(
                 LichHocId=schedule.LichHocId,
                 HocVienId=entry.hoc_vien_id,
-                NguoiDiemDanhId=current_user.NguoiDungId,
+                NguoiCapNhatId=current_user.NguoiDungId,
                 NgayCapNhat=now,
             )
             db.add(attendance)
         attendance.TrangThai = entry.trang_thai
         attendance.GhiChu = entry.ghi_chu
-        attendance.NguoiDiemDanhId = current_user.NguoiDungId
+        attendance.NguoiCapNhatId = current_user.NguoiDungId
         attendance.NgayCapNhat = now
         db.add(
             AttendanceAudit(
@@ -2024,7 +1986,7 @@ def update_schedule_attendance(
         )
 
     _commit(db, "Không thể lưu điểm danh cho buổi học.")
-    return _attendance_payload(db, schedule)
+    return _attendance_payload(db, schedule, current_user)
 
 
 @router.get(

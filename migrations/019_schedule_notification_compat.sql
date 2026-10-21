@@ -35,25 +35,35 @@ BEGIN TRY
         ALTER TABLE dbo.LichHoc_ThongBao ADD ThoiDiemGui DATETIME2 NULL;
     IF COL_LENGTH(N'dbo.LichHoc_ThongBao', N'LoiGui') IS NULL
         ALTER TABLE dbo.LichHoc_ThongBao ADD LoiGui NVARCHAR(2000) NULL;
+    IF COL_LENGTH(N'dbo.LichHoc_ThongBao', N'TieuDe') IS NOT NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.LichHoc_ThongBao
+            ALTER COLUMN TieuDe NVARCHAR(200) NULL;';
+    IF COL_LENGTH(N'dbo.LichHoc_ThongBao', N'ThoiDiem') IS NOT NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.LichHoc_ThongBao
+            ALTER COLUMN ThoiDiem DATETIME2 NULL;';
 
-    UPDATE dbo.LichHoc_ThongBao
-    SET SuKienId = COALESCE(SuKienId, CONVERT(NVARCHAR(36), NEWID())),
-        LoaiSuKien = COALESCE(LoaiSuKien, N'Thay đổi lịch'),
-        DuLieuCu = COALESCE(DuLieuCu, N'{}'),
-        DuLieuMoi = COALESCE(DuLieuMoi, N'{}'),
-        TrangThai = COALESCE(TrangThai, N'Đã gửi'),
-        SoLanGui = COALESCE(SoLanGui, 0);
+    EXEC sys.sp_executesql N'
+        UPDATE dbo.LichHoc_ThongBao
+        SET SuKienId = COALESCE(SuKienId, CONVERT(NVARCHAR(36), NEWID())),
+            LoaiSuKien = COALESCE(LoaiSuKien, N''Thay đổi lịch''),
+            DuLieuCu = COALESCE(DuLieuCu, N''{}''),
+            DuLieuMoi = COALESCE(DuLieuMoi, N''{}''),
+            TrangThai = COALESCE(TrangThai, N''Đã gửi''),
+            SoLanGui = COALESCE(SoLanGui, 0);';
 
     IF COL_LENGTH(N'dbo.LichHoc_ThongBao', N'ThoiDiem') IS NOT NULL
         EXEC sys.sp_executesql N'
             UPDATE dbo.LichHoc_ThongBao
             SET ThoiDiemPhatSinh = COALESCE(ThoiDiemPhatSinh, ThoiDiem);';
     ELSE
-        UPDATE dbo.LichHoc_ThongBao
-        SET ThoiDiemPhatSinh = COALESCE(
-            ThoiDiemPhatSinh,
-            SYSUTCDATETIME()
-        );
+        EXEC sys.sp_executesql N'
+            UPDATE dbo.LichHoc_ThongBao
+            SET ThoiDiemPhatSinh = COALESCE(
+                ThoiDiemPhatSinh,
+                SYSUTCDATETIME()
+            );';
 
     ALTER TABLE dbo.LichHoc_ThongBao
         ALTER COLUMN SuKienId NVARCHAR(36) NOT NULL;

@@ -287,7 +287,7 @@ class ClassStudentActionWrite(BaseModel):
         alias="loaiThaoTac"
     )
     ngay_hieu_luc: date = Field(alias="ngayHieuLuc")
-    ly_do: str = Field(alias="lyDo", min_length=1, max_length=1000)
+    ly_do: str = Field(alias="lyDo", min_length=5, max_length=1000)
     lop_hoc_dich_id: int | None = Field(
         default=None,
         alias="lopHocDichId",
@@ -302,8 +302,8 @@ class ClassStudentActionWrite(BaseModel):
     @field_validator("ly_do")
     @classmethod
     def validate_action_reason(cls, value: str) -> str:
-        if not value:
-            raise ValueError("Vui lòng nhập lý do xử lý học viên.")
+        if len(value) < 5:
+            raise ValueError("Lý do xử lý học viên cần ít nhất 5 ký tự.")
         return value
 
     @model_validator(mode="after")

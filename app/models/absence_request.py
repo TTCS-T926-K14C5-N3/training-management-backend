@@ -52,7 +52,7 @@ class AbsenceRequest(Base):
 
 
 class AttendanceAudit(Base):
-    __tablename__ = "DiemDanh_LichSu"
+    __tablename__ = "DiemDanh_BuoiHoc_XinPhep_LichSu"
 
     AuditId = Column(Integer, primary_key=True, autoincrement=True)
     LichHocId = Column(
@@ -66,8 +66,8 @@ class AttendanceAudit(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=False,
     )
-    TrangThaiCu = Column(Unicode(20), nullable=True)
-    TrangThaiMoi = Column(Unicode(20), nullable=False)
+    TrangThaiCu = Column(Unicode(30), nullable=True)
+    TrangThaiMoi = Column(Unicode(30), nullable=False)
     GhiChu = Column(Unicode(1000), nullable=True)
     NguoiThucHienId = Column(
         Integer,

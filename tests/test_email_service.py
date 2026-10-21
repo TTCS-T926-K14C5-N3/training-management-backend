@@ -40,3 +40,31 @@ def test_activation_and_reset_emails_include_admin_contact(monkeypatch):
         body = message.get_content()
         assert "Số điện thoại: 0912345678" in body
         assert "Email: lyachai2k@gmail.com" in body
+
+
+def test_absence_approval_email_includes_session_and_decision(monkeypatch):
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    monkeypatch.setattr(email_service, "SMTP_USERNAME", "sender@example.com")
+    monkeypatch.setattr(email_service, "SMTP_PASSWORD", "smtp-password")
+    monkeypatch.setattr(email_service.smtplib, "SMTP", MagicMock(return_value=smtp))
+
+    email_service.send_absence_request_approved_email(
+        "student@example.com",
+        "Học viên kiểm thử",
+        "CLS-101",
+        "Môn học thử",
+        "2026-10-23",
+        "09:00",
+        "10:00",
+        "Đã xác minh",
+    )
+
+    message = smtp.send_message.call_args.args[0]
+    assert message["To"] == "student@example.com"
+    assert "đã được duyệt" in message["Subject"]
+    body = message.get_content()
+    assert "CLS-101" in body
+    assert "Môn học thử" in body
+    assert "2026-10-23, 09:00–10:00" in body
+    assert "Đã xác minh" in body

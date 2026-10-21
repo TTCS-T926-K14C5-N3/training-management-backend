@@ -1,16 +1,17 @@
 import json
 import re
 from io import BytesIO
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_permission
 from app.database import get_db
 from app.models.attendance import (
     AbsenceRequest,
@@ -20,9 +21,10 @@ from app.models.attendance import (
     AttendanceRecord,
 )
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
+from app.models.diem_danh_buoi_hoc import DiemDanhBuoiHoc
 from app.models.lich_hoc import LichHoc
 from app.models.lop_hoc import LopHoc
-from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.lop_hoc_hoc_vien import LopHocHocVien, LopHocHocVienThaoTac
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.routers.attendance_sessions import (
@@ -30,6 +32,7 @@ from app.routers.attendance_sessions import (
     decide_absence_request as decide_session_absence_request,
 )
 from app.schemas.attendance import AbsenceRequestDecision
+from app.services.business_time import business_now, business_now_naive
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 VALID_STATUSES = {"present", "late", "excused_absence", "unexcused_absence"}
@@ -695,6 +698,233 @@ def export_attendance(
     return Response(content=output.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get(
+    "/classes/{class_id}/export-matrix",
+    dependencies=[Depends(require_permission("ATTENDANCE_VIEW"))],
+)
+def export_attendance_matrix(
+    class_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    _ensure_teacher_or_manager(db, current_user, class_record)
+    now = business_now_naive()
+    schedules = (
+        db.query(LichHoc)
+        .filter(
+            LichHoc.LopHocId == class_id,
+            LichHoc.TrangThai == "Đã lên lịch",
+            or_(
+                LichHoc.NgayHoc < now.date(),
+                and_(
+                    LichHoc.NgayHoc == now.date(),
+                    LichHoc.GioBatDau <= now.time(),
+                ),
+            ),
+        )
+        .order_by(LichHoc.NgayHoc, LichHoc.GioBatDau, LichHoc.LichHocId)
+        .all()
+    )
+    enrollments = (
+        db.query(LopHocHocVien, NguoiDung)
+        .join(NguoiDung, NguoiDung.NguoiDungId == LopHocHocVien.HocVienId)
+        .filter(LopHocHocVien.LopHocId == class_id)
+        .order_by(NguoiDung.HoTen, NguoiDung.NguoiDungId)
+        .all()
+    )
+    students = {student.NguoiDungId: student for _, student in enrollments}
+    enrollment_by_student = {
+        enrollment.HocVienId: enrollment for enrollment, _ in enrollments
+    }
+    actions = (
+        db.query(
+            LopHocHocVienThaoTac.HocVienId,
+            LopHocHocVienThaoTac.NgayHieuLuc,
+        )
+        .filter(LopHocHocVienThaoTac.LopHocId == class_id)
+        .all()
+    )
+    ended_dates: dict[int, list[date]] = {}
+    for student_id, effective_date in actions:
+        ended_dates.setdefault(student_id, []).append(effective_date)
+    attendance_rows = (
+        db.query(
+            DiemDanhBuoiHoc.LichHocId,
+            DiemDanhBuoiHoc.HocVienId,
+            DiemDanhBuoiHoc.TrangThai,
+        )
+        .join(LichHoc, LichHoc.LichHocId == DiemDanhBuoiHoc.LichHocId)
+        .filter(
+            LichHoc.LopHocId == class_id,
+            LichHoc.TrangThai == "Đã lên lịch",
+            LichHoc.LichHocId.in_([schedule.LichHocId for schedule in schedules]),
+        )
+        .all()
+        if schedules
+        else []
+    )
+    attendance = {
+        (schedule_id, student_id): status_value
+        for schedule_id, student_id, status_value in attendance_rows
+    }
+    status_labels = {
+        "Có mặt": "Có mặt",
+        "Đi muộn": "Đi muộn",
+        "Vắng có phép": "Vắng có phép",
+        "Vắng không phép": "Vắng không phép",
+    }
+    status_fills = {
+        "Có mặt": PatternFill("solid", fgColor="DCFCE7"),
+        "Đi muộn": PatternFill("solid", fgColor="FEF3C7"),
+        "Vắng có phép": PatternFill("solid", fgColor="DBEAFE"),
+        "Vắng không phép": PatternFill("solid", fgColor="FEE2E2"),
+        "Chưa điểm danh": PatternFill("solid", fgColor="E2E8F0"),
+        "—": PatternFill("solid", fgColor="F8FAFC"),
+    }
+    workbook = Workbook()
+    matrix_sheet = workbook.active
+    matrix_sheet.title = "Ma trận chuyên cần"
+    headers = ["Mã học viên", "Họ tên", "Email"]
+    headers.extend(
+        f"BH-{schedule.LichHocId:06d}\n"
+        f"{schedule.NgayHoc.isoformat()} "
+        f"{schedule.GioBatDau.strftime('%H:%M')}-"
+        f"{schedule.GioKetThuc.strftime('%H:%M')}"
+        for schedule in schedules
+    )
+    headers.extend(
+        [
+            "Tổng buổi",
+            "Tổng buổi vắng",
+            "Có mặt",
+            "Đi muộn",
+            "Vắng có phép",
+            "Vắng không phép",
+            "Chưa điểm danh",
+            "Tỷ lệ chuyên cần (%)",
+        ]
+    )
+    matrix_sheet.append(headers)
+    totals = {
+        "Có mặt": 0,
+        "Đi muộn": 0,
+        "Vắng có phép": 0,
+        "Vắng không phép": 0,
+        "Chưa điểm danh": 0,
+    }
+    student_rows = []
+    for student_id, student in students.items():
+        row = [student_id, student.HoTen, student.Email or ""]
+        counts = {label: 0 for label in totals}
+        total_sessions = 0
+        for schedule in schedules:
+            enrollment = enrollment_by_student[student_id]
+            enrolled_by_date = (
+                enrollment.NgayThamGia
+                < datetime.combine(
+                    schedule.NgayHoc + timedelta(days=1),
+                    datetime.min.time(),
+                )
+            )
+            has_ended = any(
+                effective_date <= schedule.NgayHoc
+                for effective_date in ended_dates.get(student_id, [])
+            )
+            if not enrolled_by_date or has_ended:
+                row.append("—")
+                continue
+            total_sessions += 1
+            status_label = status_labels.get(
+                attendance.get((schedule.LichHocId, student_id)),
+                "Chưa điểm danh",
+            )
+            row.append(status_label)
+            counts[status_label] += 1
+            totals[status_label] += 1
+        attendance_rate = (
+            round(
+                (counts["Có mặt"] + counts["Đi muộn"])
+                * 100
+                / total_sessions,
+                1,
+            )
+            if total_sessions
+            else 0
+        )
+        row.extend(
+            [
+                total_sessions,
+                counts["Vắng có phép"] + counts["Vắng không phép"],
+                counts["Có mặt"],
+                counts["Đi muộn"],
+                counts["Vắng có phép"],
+                counts["Vắng không phép"],
+                counts["Chưa điểm danh"],
+                attendance_rate,
+            ]
+        )
+        student_rows.append((attendance_rate, student.HoTen.casefold(), row))
+
+    for _, _, row in sorted(student_rows, key=lambda item: (item[0], item[1])):
+        matrix_sheet.append(row)
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    for cell in matrix_sheet[1]:
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    matrix_sheet.freeze_panes = "D2"
+    matrix_sheet.auto_filter.ref = matrix_sheet.dimensions
+    matrix_sheet.column_dimensions["A"].width = 15
+    matrix_sheet.column_dimensions["B"].width = 26
+    matrix_sheet.column_dimensions["C"].width = 32
+    for column_index in range(4, matrix_sheet.max_column + 1):
+        matrix_sheet.column_dimensions[
+            matrix_sheet.cell(row=1, column=column_index).column_letter
+        ].width = 22 if column_index <= 3 + len(schedules) else 20
+    matrix_sheet.row_dimensions[1].height = 42
+    attendance_columns_end = 3 + len(schedules)
+    for row_index in range(2, matrix_sheet.max_row + 1):
+        for column_index in range(4, attendance_columns_end + 1):
+            cell = matrix_sheet.cell(row=row_index, column=column_index)
+            cell.fill = status_fills.get(cell.value, status_fills["—"])
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        matrix_sheet.cell(row=row_index, column=attendance_columns_end + 8).number_format = '0.0"%"'
+
+    summary_sheet = workbook.create_sheet("Tổng hợp")
+    summary_sheet.append(["Lớp", class_record.MaLop, class_record.TenLop])
+    summary_sheet.append(["Ngày xuất", business_now().date().isoformat()])
+    summary_sheet.append(["Số buổi đã lên lịch", len(schedules)])
+    summary_sheet.append(["Tổng học viên", len(students)])
+    summary_sheet.append(["Tổng lượt có mặt", totals["Có mặt"]])
+    summary_sheet.append(["Tổng lượt đi muộn", totals["Đi muộn"]])
+    summary_sheet.append(["Tổng lượt vắng có phép", totals["Vắng có phép"]])
+    summary_sheet.append(["Tổng lượt vắng không phép", totals["Vắng không phép"]])
+    summary_sheet.append(["Tổng lượt chưa điểm danh", totals["Chưa điểm danh"]])
+    summary_sheet.append(
+        [
+            "Tổng lượt vắng",
+            totals["Vắng có phép"] + totals["Vắng không phép"],
+        ]
+    )
+    summary_sheet.column_dimensions["A"].width = 30
+    summary_sheet.column_dimensions["B"].width = 22
+    summary_sheet.column_dimensions["C"].width = 30
+    for cell in summary_sheet[1]:
+        cell.font = Font(bold=True)
+
+    output = BytesIO()
+    workbook.save(output)
+    safe_code = re.sub(r"[^A-Za-z0-9_-]", "_", class_record.MaLop)
+    filename = f"{safe_code}-chuyen-can-{business_now().date().isoformat()}.xlsx"
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def decide_absence_request(

@@ -8,17 +8,26 @@ import jwt
 from fastapi import HTTPException
 from pwdlib import PasswordHash
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
 
+from app.models.admissions import LeadConversion
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.revoked_token import RevokedToken
 from app.models.diem import Diem
+from app.models.diem_danh_buoi_hoc import (
+    DiemDanhBuoiHoc,
+    DiemDanhBuoiHocLichSu,
+)
 from app.models.lop_hoc import LopHoc
-from app.models.lop_hoc_hoc_vien import LopHocHocVien
+from app.models.lop_hoc_hoc_vien import (
+    LopHocHocVien,
+    LopHocHocVienThaoTac,
+)
 from app.models.token_mat_khau import TokenMatKhau
 from app.models.token_kich_hoat import TokenKichHoat
 from app.models.vai_tro import VaiTro
@@ -1634,6 +1643,47 @@ def delete_user(
             ),
         )
 
+    protected_history = (
+        (
+            "điểm danh",
+            db.query(DiemDanhBuoiHoc)
+            .filter(DiemDanhBuoiHoc.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "lịch sử điểm danh",
+            db.query(DiemDanhBuoiHocLichSu)
+            .filter(DiemDanhBuoiHocLichSu.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "lịch sử thao tác lớp học",
+            db.query(LopHocHocVienThaoTac)
+            .filter(LopHocHocVienThaoTac.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "hồ sơ chuyển đổi tuyển sinh",
+            db.query(LeadConversion)
+            .filter(LeadConversion.NguoiDungId == user_id)
+            .count(),
+        ),
+    )
+    retained_history = [
+        f"{count} {label}"
+        for label, count in protected_history
+        if count
+    ]
+    if retained_history:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì hồ sơ đã có dữ liệu lịch sử "
+                f"({', '.join(retained_history)}). Hãy khóa tài khoản để "
+                "giữ lại lịch sử đào tạo."
+            ),
+        )
+
     email = user.Email
     ho_ten = user.HoTen
 
@@ -1699,13 +1749,23 @@ def delete_user(
 
         db.commit()
 
-    except Exception as exc:
+    except IntegrityError as exc:
         db.rollback()
-
-        print(
-            f"[DELETE USER] Lỗi xóa tài khoản "
-            f"{user_id}: {exc}"
+        logger.warning(
+            "Cannot delete user %s because related records still reference it: %s",
+            user_id,
+            exc,
         )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì vẫn còn dữ liệu khác đang liên "
+                "kết với tài khoản. Hãy khóa tài khoản để giữ lại lịch sử."
+            ),
+        ) from exc
+    except Exception:
+        db.rollback()
+        logger.exception("[DELETE USER] Lỗi xóa tài khoản %s", user_id)
 
         raise HTTPException(
             status_code=500,

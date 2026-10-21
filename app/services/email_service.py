@@ -127,3 +127,36 @@ Vui lòng đăng nhập hệ thống để xem thông tin lịch học.
 """
     )
     _send_email(message, "Không thể gửi email thông báo lịch học")
+
+
+def send_absence_request_approved_email(
+    recipient_email: str,
+    ho_ten: str,
+    class_label: str,
+    subject_name: str,
+    session_date: str,
+    start_time: str,
+    end_time: str,
+    decision_reason: str,
+) -> None:
+    message = EmailMessage()
+    message["Subject"] = "Đơn xin phép vắng đã được duyệt"
+    message["From"] = SMTP_FROM
+    message["To"] = recipient_email
+    message.set_content(
+        f"""Xin chào {ho_ten},
+
+Đơn xin phép vắng của bạn đã được giảng viên duyệt.
+
+Lớp: {class_label}
+Môn học: {subject_name}
+Thời gian: {session_date}, {start_time}–{end_time}
+Lý do xử lý: {decision_reason}
+
+Vui lòng đăng nhập hệ thống để theo dõi chi tiết đơn xin phép.
+
+Trân trọng,
+Hệ thống quản lý đào tạo
+"""
+    )
+    _send_email(message, "Không thể gửi email kết quả đơn xin phép")

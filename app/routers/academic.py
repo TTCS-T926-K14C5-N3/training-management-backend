@@ -43,7 +43,6 @@ from app.schemas.academic import (
     GradeWrite,
     RoomCreate,
     RoomWrite,
-    StudentEnrollmentActionWrite,
     StudentProfileWrite,
     StudentProfileUpdate,
     SubjectCreate,
@@ -761,6 +760,11 @@ def _student_enrollment_status(
     actions: list[StudentEnrollmentAction],
     as_of: date,
 ) -> tuple[str, date | None]:
+    def effective_date(action: StudentEnrollmentAction) -> date:
+        if isinstance(action.NgayHieuLuc, datetime):
+            return action.NgayHieuLuc.date()
+        return action.NgayHieuLuc
+
     relevant_actions = [
         action for action in actions if action.LopHocId == class_record.LopHocId
     ]
@@ -771,38 +775,38 @@ def _student_enrollment_status(
         and action.LopHocDichId == class_record.LopHocId
     ]
     future_incoming = [
-        action for action in incoming_transfers if action.NgayHieuLuc > as_of
+        action for action in incoming_transfers if effective_date(action) > as_of
     ]
     if future_incoming:
-        action = min(future_incoming, key=lambda item: item.NgayHieuLuc)
-        return "Sắp chuyển lớp", action.NgayHieuLuc
+        action = min(future_incoming, key=effective_date)
+        return "Sắp chuyển lớp", effective_date(action)
 
     effective_actions = [
-        action for action in relevant_actions if action.NgayHieuLuc <= as_of
+        action for action in relevant_actions if effective_date(action) <= as_of
     ]
     if effective_actions:
         action = max(
             effective_actions,
-            key=lambda item: (item.NgayHieuLuc, item.ActionId),
+            key=lambda item: (effective_date(item), item.ActionId),
         )
         status_by_action = {
             "BaoLuu": "Bảo lưu",
             "ChuyenLop": "Đã chuyển lớp",
             "ThoiHoc": "Thôi học",
         }
-        return status_by_action[action.LoaiThaoTac], action.NgayHieuLuc
+        return status_by_action[action.LoaiThaoTac], effective_date(action)
 
     future_actions = [
-        action for action in relevant_actions if action.NgayHieuLuc > as_of
+        action for action in relevant_actions if effective_date(action) > as_of
     ]
     if future_actions:
-        action = min(future_actions, key=lambda item: item.NgayHieuLuc)
+        action = min(future_actions, key=effective_date)
         status_by_action = {
             "BaoLuu": "Sắp bảo lưu",
             "ChuyenLop": "Sắp chuyển lớp",
             "ThoiHoc": "Sắp thôi học",
         }
-        return status_by_action[action.LoaiThaoTac], action.NgayHieuLuc
+        return status_by_action[action.LoaiThaoTac], effective_date(action)
 
     if class_record.TrangThai in {"Chuẩn bị", "Đang hoạt động", "Đang học"}:
         return "Đang học", None
@@ -1350,7 +1354,7 @@ def enroll_students(
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_permission("CLASS_UPDATE"))],
 )
-def create_student_class_action(
+def create_student_enrollment_action(
     class_id: int,
     student_id: int,
     request: ClassStudentActionWrite,
@@ -1365,6 +1369,45 @@ def create_student_class_action(
         )
 
     source_class = _get_class_or_404(db, class_id)
+    latest_action = (
+        db.query(LopHocHocVienThaoTac)
+        .filter(
+            LopHocHocVienThaoTac.LopHocId == class_id,
+            LopHocHocVienThaoTac.HocVienId == student_id,
+        )
+        .order_by(
+            LopHocHocVienThaoTac.NgayHieuLuc.desc(),
+            LopHocHocVienThaoTac.ThaoTacId.desc(),
+        )
+        .first()
+    )
+    if latest_action is not None:
+        action_date = latest_action.NgayHieuLuc
+        if isinstance(action_date, datetime):
+            action_date = action_date.date()
+        if (
+            latest_action.LoaiThaoTac == request.loai_thao_tac
+            and action_date == request.ngay_hieu_luc
+            and latest_action.LyDo == request.ly_do
+            and latest_action.LopHocDichId == request.lop_hoc_dich_id
+        ):
+            return {
+                "actionId": latest_action.ThaoTacId,
+                "loaiThaoTac": latest_action.LoaiThaoTac,
+                "ngayHieuLuc": action_date.isoformat(),
+                "lopHocId": class_id,
+                "lopHocDichId": latest_action.LopHocDichId,
+                "trangThai": {
+                    "BaoLuu": "Bảo lưu",
+                    "ChuyenLop": "Chuyển lớp",
+                    "ThoiHoc": "Thôi học",
+                }[latest_action.LoaiThaoTac],
+            }
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Học viên đã có quyết định xử lý khác trong lớp này.",
+        )
+
     if source_class.TrangThai not in ACTIVE_CLASS_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1385,7 +1428,7 @@ def create_student_class_action(
             detail="Học viên không còn trong lớp này.",
         )
     effective_at = datetime.combine(request.ngay_hieu_luc, datetime.min.time())
-    if effective_at < enrollment.NgayThamGia:
+    if request.ngay_hieu_luc < enrollment.NgayThamGia.date():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Ngày hiệu lực không thể trước ngày học viên vào lớp.",
@@ -1467,7 +1510,7 @@ def create_student_class_action(
         LopHocId=class_id,
         HocVienId=student_id,
         LoaiThaoTac=request.loai_thao_tac,
-        NgayHieuLuc=effective_at,
+        NgayHieuLuc=request.ngay_hieu_luc,
         LopHocDichId=destination.LopHocId if destination else None,
         LyDo=request.ly_do,
         NguoiThucHienId=current_user.NguoiDungId,
@@ -1478,7 +1521,7 @@ def create_student_class_action(
     return {
         "actionId": action.ThaoTacId,
         "loaiThaoTac": action.LoaiThaoTac,
-        "ngayHieuLuc": action.NgayHieuLuc.date().isoformat(),
+        "ngayHieuLuc": request.ngay_hieu_luc.isoformat(),
         "lopHocId": class_id,
         "lopHocDichId": action.LopHocDichId,
         "trangThai": enrollment.TrangThaiGhiDanh,
@@ -1629,7 +1672,7 @@ def get_student_academic_profile(
             {
                 "actionId": item.ThaoTacId,
                 "loaiThaoTac": item.LoaiThaoTac,
-                "ngayHieuLuc": item.NgayHieuLuc.date().isoformat(),
+                "ngayHieuLuc": item.NgayHieuLuc.isoformat(),
                 "lyDo": item.LyDo,
                 "maLop": action_classes.get(item.LopHocId, ""),
                 "maLopDich": action_classes.get(item.LopHocDichId),
@@ -3287,161 +3330,6 @@ def update_student_profile(
     student.GhiChuHoSo = request.ghi_chu
     _commit(db, "Email đã được sử dụng bởi tài khoản khác.")
     return {"message": "Đã cập nhật hồ sơ học viên."}
-
-
-@router.post(
-    "/classes/{class_id}/students/{student_id}/actions",
-    status_code=status.HTTP_201_CREATED,
-)
-def create_student_enrollment_action(
-    class_id: int,
-    student_id: int,
-    request: StudentEnrollmentActionWrite,
-    current_user: NguoiDung = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    _ensure_permission_or_admin(db, current_user, "CLASS_UPDATE")
-    source_class = _get_class_or_404(db, class_id)
-    _ensure_class_scope(db, current_user, source_class)
-    student = (
-        db.query(NguoiDung)
-        .join(
-            NguoiDungVaiTro,
-            NguoiDungVaiTro.NguoiDungId == NguoiDung.NguoiDungId,
-        )
-        .filter(
-            NguoiDung.NguoiDungId == student_id,
-            NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID,
-        )
-        .with_for_update()
-        .first()
-    )
-    if student is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Không tìm thấy học viên.",
-        )
-    enrollment = (
-        db.query(LopHocHocVien)
-        .filter(
-            LopHocHocVien.LopHocId == class_id,
-            LopHocHocVien.HocVienId == student_id,
-        )
-        .with_for_update()
-        .first()
-    )
-    if enrollment is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Học viên không được ghi danh trong lớp này.",
-        )
-
-    today = business_now().date()
-    if request.ngay_hieu_luc < today:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Ngày hiệu lực không được nằm trong quá khứ.",
-        )
-    if request.ngay_hieu_luc < enrollment.NgayThamGia.date():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Ngày hiệu lực không được trước ngày ghi danh.",
-        )
-    latest_action = (
-        db.query(StudentEnrollmentAction)
-        .filter(
-            StudentEnrollmentAction.HocVienId == student_id,
-            StudentEnrollmentAction.LopHocId == class_id,
-        )
-        .order_by(
-            StudentEnrollmentAction.NgayHieuLuc.desc(),
-            StudentEnrollmentAction.ActionId.desc(),
-        )
-        .first()
-    )
-    if latest_action is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Học viên đã có trạng thái kết thúc hoặc bảo lưu trong lớp này.",
-        )
-
-    target_class = None
-    if request.loai_thao_tac == "ChuyenLop":
-        target_class = _get_class_or_404(db, request.lop_hoc_dich_id)
-        _ensure_class_scope(db, current_user, target_class)
-        if target_class.LopHocId == class_id:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Lớp đích phải khác lớp hiện tại.",
-            )
-        if target_class.TrangThai not in {
-            "Chuẩn bị",
-            "Đang hoạt động",
-            "Đang học",
-        }:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Không thể chuyển học viên vào lớp đã ngừng hoạt động.",
-            )
-        duplicate_enrollment = (
-            db.query(LopHocHocVien)
-            .filter(
-                LopHocHocVien.LopHocId == target_class.LopHocId,
-                LopHocHocVien.HocVienId == student_id,
-            )
-            .with_for_update()
-            .first()
-        )
-        if duplicate_enrollment is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Học viên đã được ghi danh trong lớp đích.",
-            )
-        target_size = (
-            db.query(LopHocHocVien)
-            .filter(LopHocHocVien.LopHocId == target_class.LopHocId)
-            .count()
-        )
-        if target_size >= target_class.SiSoToiDa:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Lớp đích đã đạt sĩ số tối đa.",
-            )
-
-    action = StudentEnrollmentAction(
-        HocVienId=student_id,
-        LopHocId=class_id,
-        LopHocDichId=target_class.LopHocId if target_class else None,
-        LoaiThaoTac=request.loai_thao_tac,
-        NgayHieuLuc=request.ngay_hieu_luc,
-        LyDo=request.ly_do,
-        NguoiThucHienId=current_user.NguoiDungId,
-        NgayTao=business_now_naive(),
-    )
-    db.add(action)
-    if target_class is not None:
-        db.add(
-            LopHocHocVien(
-                LopHocId=target_class.LopHocId,
-                HocVienId=student_id,
-                NgayThamGia=datetime.combine(
-                    request.ngay_hieu_luc,
-                    datetime.min.time(),
-                ),
-                NguoiGhiDanhId=current_user.NguoiDungId,
-            )
-        )
-    _commit(db, "Không thể ghi nhận thao tác học viên do dữ liệu đã thay đổi.")
-    return {
-        "actionId": action.ActionId,
-        "loaiThaoTac": action.LoaiThaoTac,
-        "ngayHieuLuc": action.NgayHieuLuc.isoformat(),
-        "lyDo": action.LyDo,
-        "maLop": source_class.MaLop,
-        "maLopDich": target_class.MaLop if target_class else None,
-        "nguoiThucHien": current_user.HoTen,
-        "ngayTao": action.NgayTao.isoformat(),
-    }
 
 
 @router.get(
