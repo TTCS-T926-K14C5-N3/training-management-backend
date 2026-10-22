@@ -208,6 +208,12 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     thông báo đã đọc khi học viên mở theo dõi đơn.
     Điểm danh theo lớp/ngày và đơn xin vắng theo lớp tiếp tục dùng các endpoint
     `/attendance/classes/...` và `/attendance/absence-requests`.
+    Ngưỡng vắng không phép được cấu hình theo chương trình qua
+    `GET /attendance/thresholds` và `PUT /attendance/thresholds/{program_id}`;
+    mặc định là 20%. Tỷ lệ được tính từ điểm danh theo buổi và theo ngày, không
+    đếm trùng cùng học viên/lớp/ngày khi cả hai luồng có dữ liệu. Khi vượt ngưỡng,
+    học viên được gắn cờ trong danh sách lớp và hồ sơ; học viên, giảng viên phụ
+    trách và quản lý đào tạo nhận thông báo trong hệ thống.
     Nút xuất ma trận chuyên cần trong trang quản lý điểm tạo Excel theo lớp,
     gồm trạng thái từng buổi được tô màu, tổng số buổi vắng và tỷ lệ chuyên cần;
     học viên được sắp xếp từ tỷ lệ thấp lên cao để nhận diện trường hợp cần hỗ trợ.

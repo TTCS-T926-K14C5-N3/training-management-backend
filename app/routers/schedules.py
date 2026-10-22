@@ -63,6 +63,11 @@ from app.services.schedule_notifications import (
     process_schedule_notifications,
     queue_schedule_notifications,
 )
+from app.services.attendance_thresholds import (
+    absence_metrics_for_student,
+    notify_threshold_activation,
+    threshold_for_program,
+)
 from app.services.business_time import business_now_naive
 
 
@@ -1216,7 +1221,11 @@ def list_schedules(
         )
     return [
         _schedule_payload(db, item)
-        for item in query.order_by(LichHoc.NgayHoc, LichHoc.GioBatDau).all()
+        for item in query.order_by(
+            LichHoc.NgayHoc.desc(),
+            LichHoc.GioBatDau.desc(),
+            LichHoc.LichHocId.desc(),
+        ).all()
     ]
 
 
@@ -1699,6 +1708,11 @@ def _attendance_payload(
             and now >= start_at
             and (now < end_at or is_training_manager)
         ),
+        "canLyDoDieuChinhBatBuoc": (
+            schedule.TrangThai == SCHEDULED
+            and now >= end_at
+            and is_training_manager
+        ),
         "records": [
             {
                 "hocVienId": student.NguoiDungId,
@@ -1839,6 +1853,20 @@ def update_schedule_attendance(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Danh sách có học viên không thuộc lớp tại ngày diễn ra buổi học.",
             )
+        class_record = db.query(LopHoc).filter(
+            LopHoc.LopHocId == schedule.LopHocId
+        ).first()
+        program_id = class_record.ChuongTrinhId if class_record else None
+        before_rates = (
+            {
+                student_id: absence_metrics_for_student(
+                    db, student_id, program_id
+                )[2]
+                for student_id in requested_ids
+            }
+            if program_id is not None
+            else {}
+        )
         for entry in request.records:
             attendance = (
                 db.query(DiemDanhBuoiHoc)
@@ -1880,10 +1908,10 @@ def update_schedule_attendance(
                 )
             else:
                 changed = attendance.TrangThai != entry.trang_thai
-                if changed and not request.ly_do:
+                if changed and now >= end_at and not request.ly_do:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        detail="Cần nhập lý do khi sửa điểm danh đã lưu.",
+                        detail="Cần nhập lý do khi điều chỉnh điểm danh của buổi học đã kết thúc.",
                     )
                 if changed:
                     db.add(
@@ -1900,6 +1928,16 @@ def update_schedule_attendance(
                 attendance.TrangThai = entry.trang_thai
                 attendance.NgayCapNhat = now
                 attendance.NguoiCapNhatId = current_user.NguoiDungId
+        if program_id is not None:
+            threshold = threshold_for_program(db, program_id)
+            db.flush()
+            for student_id, before_rate in before_rates.items():
+                notify_threshold_activation(
+                    db,
+                    student_id,
+                    program_id,
+                    was_above_threshold=before_rate >= threshold,
+                )
         _commit(
             db,
             "Không thể lưu điểm danh do dữ liệu bị trùng hoặc thay đổi đồng thời.",
@@ -1942,6 +1980,20 @@ def update_schedule_attendance(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Danh sách có học viên không thuộc lớp tại ngày diễn ra buổi học.",
         )
+    class_record = db.query(LopHoc).filter(
+        LopHoc.LopHocId == schedule.LopHocId
+    ).first()
+    program_id = class_record.ChuongTrinhId if class_record else None
+    before_rates = (
+        {
+            student_id: absence_metrics_for_student(
+                db, student_id, program_id
+            )[2]
+            for student_id in requested_ids
+        }
+        if program_id is not None
+        else {}
+    )
 
     existing_rows = (
         db.query(DiemDanhBuoiHoc)
@@ -1984,6 +2036,17 @@ def update_schedule_attendance(
                 ThoiDiem=now,
             )
         )
+
+    if program_id is not None:
+        threshold = threshold_for_program(db, program_id)
+        db.flush()
+        for student_id, before_rate in before_rates.items():
+            notify_threshold_activation(
+                db,
+                student_id,
+                program_id,
+                was_above_threshold=before_rate >= threshold,
+            )
 
     _commit(db, "Không thể lưu điểm danh cho buổi học.")
     return _attendance_payload(db, schedule, current_user)

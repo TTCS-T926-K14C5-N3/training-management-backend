@@ -87,6 +87,7 @@ def ensure_enrolled(db: Session, class_id: int, student_id: int) -> None:
         .filter(
             LopHocHocVien.LopHocId == class_id,
             LopHocHocVien.HocVienId == student_id,
+            LopHocHocVien.TrangThaiGhiDanh == "Đang học",
             LopHocHocVien.NgayThamGia <= now,
             (LopHocHocVien.NgayKetThuc.is_(None))
             | (LopHocHocVien.NgayKetThuc > now),
@@ -119,7 +120,7 @@ async def save_uploads(files: list[UploadFile]) -> list[dict]:
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="Tệp đính kèm cần có tên hợp lệ.",
                 )
-            stored_name = f"{uuid4()}.bin"
+            stored_name = str(uuid4())
             path = UPLOAD_ROOT / stored_name
             size = 0
             with path.open("wb") as destination:

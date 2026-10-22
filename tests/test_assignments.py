@@ -1,10 +1,14 @@
+import asyncio
+import json
+from io import BytesIO
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.dialects import mssql
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
@@ -25,11 +29,24 @@ from app.models.program_subject import BuoiHoc
 from app.models.vai_tro import VaiTro
 from app.routers.assignments import (
     assignment_roster,
+    assignment_options,
+    create_assignment,
+    _teacher_assignments_query,
+    list_my_assignments,
+    list_my_submission_history,
+    list_student_submission_history,
+    list_teacher_assignments,
     list_assignment_notifications,
     publish_assignment,
 )
 from app.schemas.assignment import AssignmentWrite, RepositoryUrl
-from app.services.assignment_service import MAX_UPLOAD_BYTES, ensure_upload_size, local_now
+from app.services.assignment_service import (
+    MAX_UPLOAD_BYTES,
+    ensure_enrolled,
+    ensure_upload_size,
+    local_now,
+    save_uploads,
+)
 
 
 @pytest.fixture
@@ -201,8 +218,84 @@ def test_upload_size_limit_rejects_over_twenty_mebibytes():
     assert error.value.status_code == 413
 
 
+def test_saved_upload_name_fits_database_column(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.services.assignment_service.UPLOAD_ROOT", tmp_path)
+    uploaded_file = UploadFile(
+        filename="BÀI TẬP.docx",
+        file=BytesIO(b"assignment"),
+    )
+
+    stored = asyncio.run(save_uploads([uploaded_file]))
+
+    assert len(stored[0]["stored_name"]) == 36
+    assert (tmp_path / stored[0]["stored_name"]).read_bytes() == b"assignment"
+
+
+def test_create_assignment_rejects_past_deadline_before_saving_files(assignment_context, monkeypatch):
+    db, teacher, _ = assignment_context
+
+    async def fail_if_uploads_are_saved(_files):
+        pytest.fail("Uploads must not be saved for an invalid deadline.")
+
+    monkeypatch.setattr("app.routers.assignments.save_uploads", fail_if_uploads_are_saved)
+    payload = {
+        "lopHocId": 4,
+        "monHocId": 8,
+        "lichHocId": 12,
+        "tieuDe": "Bài tập mới",
+        "moTa": "Mô tả bài tập",
+        "hanNop": (local_now() - timedelta(minutes=1)).isoformat(),
+        "diemToiDa": 10,
+    }
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(create_assignment(json.dumps(payload), [], db, teacher))
+
+    assert error.value.status_code == 422
+    assert db.query(Assignment).count() == 1
+
+
+def test_create_assignment_saves_future_deadline_as_draft(assignment_context, monkeypatch):
+    db, teacher, _ = assignment_context
+
+    async def no_uploads(_files):
+        return []
+
+    monkeypatch.setattr("app.routers.assignments.save_uploads", no_uploads)
+    payload = {
+        "lopHocId": 4,
+        "monHocId": 8,
+        "lichHocId": 12,
+        "tieuDe": "Bài tập mới",
+        "moTa": "Mô tả bài tập",
+        "hanNop": (local_now() + timedelta(days=2)).isoformat(),
+        "diemToiDa": 10,
+    }
+
+    result = asyncio.run(create_assignment(json.dumps(payload), [], db, teacher))
+
+    assert result["trangThai"] == "Draft"
+    assert result["hanNop"] > local_now().isoformat()
+
+
 def test_publishing_notifies_active_students_and_notifications_are_private(assignment_context):
     db, teacher, student = assignment_context
+    inactive_student = NguoiDung(
+        NguoiDungId=21,
+        HoTen="Paused student",
+        Email="paused@example.org",
+        MatKhauHash="hash",
+        TrangThai="HoatDong",
+    )
+    db.add(inactive_student)
+    db.add(LopHocHocVien(
+        LopHocId=4,
+        HocVienId=21,
+        NgayThamGia=local_now() - timedelta(days=1),
+        TrangThaiGhiDanh="Bảo lưu",
+    ))
+    db.commit()
+
     publish_assignment(1, db, teacher)
 
     notices = list_assignment_notifications(db, student)
@@ -211,6 +304,174 @@ def test_publishing_notifies_active_students_and_notifications_are_private(assig
     assert notices[0]["type"] == "published"
     assert notices[0]["assignmentId"] == 1
     assert db.query(AssignmentNotification).count() == 1
+
+
+def test_assignment_options_loads_assigned_class_subject_and_lessons(assignment_context):
+    db, teacher, _ = assignment_context
+    db.refresh(teacher)
+
+    statement_count = []
+    engine = db.get_bind()
+
+    def count_statement(*_args):
+        statement_count.append(1)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        options = assignment_options(db, teacher)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert len(options) == 1
+    assert options[0]["lopHocId"] == 4
+    assert options[0]["subjects"][0]["monHocId"] == 8
+    assert options[0]["subjects"][0]["lessons"][0]["lichHocId"] == 12
+    assert len(statement_count) <= 4
+
+
+def test_teacher_assignment_list_returns_assignment_payload(assignment_context):
+    db, teacher, _ = assignment_context
+    template = db.query(Assignment).filter(Assignment.AssignmentId == 1).one()
+    db.add_all([
+        Assignment(
+            AssignmentId=assignment_id,
+            LopHocId=template.LopHocId,
+            MonHocId=template.MonHocId,
+            LichHocId=template.LichHocId,
+            GiangVienId=template.GiangVienId,
+            TieuDe=f"Task {assignment_id}",
+            MoTa=template.MoTa,
+            HanNop=template.HanNop,
+            DiemToiDa=template.DiemToiDa,
+            ChoNopMuon=template.ChoNopMuon,
+            TrangThai=template.TrangThai,
+            NgayTao=template.NgayTao,
+            NgayCapNhat=template.NgayCapNhat,
+        )
+        for assignment_id in range(2, 22)
+    ])
+    db.commit()
+    statement_count = []
+    engine = db.get_bind()
+
+    def count_statement(*_args):
+        statement_count.append(1)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+
+    try:
+        assignments = list_teacher_assignments(db, teacher)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert len(assignments) == 21
+    assert assignments[0]["assignmentId"] == 1
+    assert assignments[0]["tenLop"] == "Assignment class"
+    assert assignments[0]["tenMonHoc"] == "Assignments"
+    assert assignments[0]["attachments"] == []
+    assert len(statement_count) <= 10
+
+
+def test_teacher_assignment_query_uses_sql_server_compatible_assignment_scope(assignment_context):
+    db, teacher, _ = assignment_context
+    query = _teacher_assignments_query(db, teacher)
+    assert query is not None
+    sql = str(query.statement.compile(dialect=mssql.dialect()))
+
+    assert "EXISTS (SELECT" in sql
+    assert "[LopHoc_MonHoc_GiangVien].[MonHocId] = [Assignment].[MonHocId]" in sql
+    assert ") IN (" not in sql
+
+
+def test_paused_student_is_excluded_from_assignments_and_roster(assignment_context):
+    db, teacher, student = assignment_context
+    enrollment = db.query(LopHocHocVien).filter(
+        LopHocHocVien.HocVienId == student.NguoiDungId
+    ).one()
+    enrollment.TrangThaiGhiDanh = "Bảo lưu"
+    assignment = db.query(Assignment).filter(Assignment.AssignmentId == 1).one()
+    assignment.TrangThai = "Published"
+
+    with pytest.raises(HTTPException) as error:
+        ensure_enrolled(db, 4, student.NguoiDungId)
+
+    assert error.value.status_code == 403
+    assert list_my_assignments(db, student) == []
+    assert assignment_roster(1, "all", db, teacher)["totalStudents"] == 0
+
+
+def test_student_can_view_all_submission_versions_in_order(assignment_context):
+    db, _, student = assignment_context
+    assignment = db.query(Assignment).filter(Assignment.AssignmentId == 1).one()
+    assignment.TrangThai = "Published"
+    submitted_at = local_now()
+    db.add_all([
+        AssignmentSubmission(
+            AssignmentId=1,
+            HocVienId=student.NguoiDungId,
+            VersionNumber=version,
+            RepositoryUrl=f"https://github.com/student/project-v{version}",
+            SubmittedAt=submitted_at + timedelta(minutes=version),
+            SubmissionStatus="Submitted",
+        )
+        for version in (1, 2, 3)
+    ])
+    db.commit()
+
+    history = list_my_submission_history(1, db, student)
+
+    assert [item["version"] for item in history] == [1, 2, 3]
+    assert [item["repositoryUrl"] for item in history] == [
+        "https://github.com/student/project-v1",
+        "https://github.com/student/project-v2",
+        "https://github.com/student/project-v3",
+    ]
+    assert all(item["attachments"] == [] for item in history)
+
+
+def test_assigned_teacher_can_view_student_submission_history(assignment_context):
+    db, teacher, student = assignment_context
+    assignment = db.query(Assignment).filter(Assignment.AssignmentId == 1).one()
+    assignment.TrangThai = "Published"
+    submitted_at = local_now()
+    db.add_all([
+        AssignmentSubmission(
+            AssignmentId=1,
+            HocVienId=student.NguoiDungId,
+            VersionNumber=version,
+            RepositoryUrl=f"https://github.com/student/project-v{version}",
+            SubmittedAt=submitted_at + timedelta(minutes=version),
+            SubmissionStatus="Submitted",
+        )
+        for version in (1, 2, 3)
+    ])
+    db.commit()
+
+    history = list_student_submission_history(1, student.NguoiDungId, db, teacher)
+
+    assert [item["version"] for item in history] == [1, 2, 3]
+    assert [item["submissionId"] for item in history] == sorted(
+        item["submissionId"] for item in history
+    )
+
+
+def test_unassigned_teacher_cannot_view_submission_history(assignment_context):
+    db, _, student = assignment_context
+    other_teacher = NguoiDung(
+        NguoiDungId=4,
+        HoTen="Other Teacher",
+        Email="other-teacher@example.org",
+        MatKhauHash="hash",
+        TrangThai="HoatDong",
+    )
+    db.add(other_teacher)
+    db.add(NguoiDungVaiTro(NguoiDungId=4, VaiTroId=3, NgayGan=datetime.now()))
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        list_student_submission_history(1, student.NguoiDungId, db, other_teacher)
+
+    assert error.value.status_code == 403
 
 
 def test_assignment_roster_can_filter_ungraded_submissions(assignment_context):

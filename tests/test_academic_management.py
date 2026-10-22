@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
+from app.models.attendance import AbsenceThreshold, AttendanceRecord
 from app.models.diem import Diem
 from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
@@ -733,6 +734,78 @@ def test_student_profile_returns_real_enrollment_history_and_updates(db: Session
     assert len(profile["lopHocs"]) == 1
     assert updated["message"] == "Đã cập nhật hồ sơ học viên."
     assert db.get(NguoiDung, student.NguoiDungId).TrinhDoDauVao == "B2"
+
+
+def test_class_roster_and_student_profile_show_absence_threshold_flags(db: Session):
+    teacher, student, _second_student, _subject, class_data = setup_academic_class(db)
+    manager = add_user(db, 70, 7, "Quản lý đào tạo")
+    program = ChuongTrinhDaoTao(
+        ChuongTrinhId=40,
+        MaChuongTrinh="PRG-40",
+        TenChuongTrinh="Chương trình kiểm thử",
+        TongThoiLuong=20,
+        HocPhiChuan=0,
+        NgayTao=datetime.now(),
+    )
+    db.add(program)
+    db.flush()
+    class_record = db.get(LopHoc, class_data["lopHocId"])
+    class_record.ChuongTrinhId = program.ChuongTrinhId
+    db.add(
+        AbsenceThreshold(
+            ChuongTrinhId=program.ChuongTrinhId,
+            TiLeToiDa=20,
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    db.add_all(
+        [
+            AttendanceRecord(
+                LopHocId=class_record.LopHocId,
+                HocVienId=student.NguoiDungId,
+                NgayHoc=date.today() - timedelta(days=2),
+                TrangThai="unexcused_absence",
+                NguoiCapNhatId=teacher.NguoiDungId,
+                NgayCapNhat=datetime.now(),
+            ),
+            AttendanceRecord(
+                LopHocId=class_record.LopHocId,
+                HocVienId=student.NguoiDungId,
+                NgayHoc=date.today() - timedelta(days=1),
+                TrangThai="present",
+                NguoiCapNhatId=teacher.NguoiDungId,
+                NgayCapNhat=datetime.now(),
+            ),
+        ]
+    )
+    db.commit()
+
+    class_payload = _class_payload(db, class_record)
+    flagged_roster_student = next(
+        item
+        for item in class_payload["hocViens"]
+        if item["nguoiDungId"] == student.NguoiDungId
+    )
+    profile = get_student_profile(
+        student.NguoiDungId,
+        current_user=manager,
+        db=db,
+    )
+
+    assert flagged_roster_student["canhBaoVang"] is True
+    assert flagged_roster_student["tiLeVang"] == 50
+    assert flagged_roster_student["nguongVang"] == 20
+    assert profile["canhBaoVangs"] == [
+        {
+            "programId": program.ChuongTrinhId,
+            "programCode": program.MaChuongTrinh,
+            "programName": program.TenChuongTrinh,
+            "soBuoiVang": 1,
+            "tongBuoiDiemDanh": 2,
+            "tiLeVang": 50,
+            "nguongVang": 20,
+        }
+    ]
 
 
 def test_student_status_api_requires_user_view_permission(db: Session):

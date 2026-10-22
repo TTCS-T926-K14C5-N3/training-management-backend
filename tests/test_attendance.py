@@ -30,13 +30,20 @@ from app.routers.attendance import (
     decide_absence_request,
     export_attendance,
     export_attendance_matrix,
+    get_my_attendance_history,
     get_attendance_matrix,
+    get_attendance_grade_matrix,
+    list_attendance_classes,
     mark_all_present,
     save_attendance,
     submit_absence_request,
     ThresholdInput,
     update_threshold,
     router as attendance_router,
+)
+from app.services.attendance_thresholds import (
+    absence_metrics_for_student,
+    notify_threshold_activation,
 )
 from app.main import app
 
@@ -218,6 +225,19 @@ def test_attendance_matrix_export_contains_session_columns_and_student_totals(
     )
     db.commit()
 
+    grade_matrix = get_attendance_grade_matrix(cls.LopHocId, teacher, db)
+    assert [item["studentId"] for item in grade_matrix["students"]] == [
+        student_b.NguoiDungId,
+        student_a.NguoiDungId,
+    ]
+    assert grade_matrix["students"][0]["attendanceRate"] == 0
+    assert grade_matrix["students"][0]["attendance"] == [
+        "Vắng không phép",
+        "Chưa điểm danh",
+    ]
+    assert grade_matrix["students"][1]["attendanceRate"] == 100
+    assert len(grade_matrix["sessions"]) == 2
+
     response = export_attendance_matrix(cls.LopHocId, teacher, db)
     workbook = load_workbook(BytesIO(response.body))
     matrix = workbook["Ma trận chuyên cần"]
@@ -266,6 +286,240 @@ def test_threshold_crossing_flags_and_notifies_teacher_and_manager(db):
     }
     matrix = get_attendance_matrix(cls.LopHocId, date.today(), teacher, db)
     assert matrix["aboveThreshold"] is True
+    flagged_student = next(
+        row for row in matrix["students"] if row["studentId"] == student.NguoiDungId
+    )
+    assert flagged_student["aboveThreshold"] is True
+    assert flagged_student["absencePercent"] == 100
+    assert flagged_student["absenceThreshold"] == 20
+
+
+def test_session_attendance_counts_toward_program_threshold_without_double_counting_day(db):
+    teacher, student, _, _, cls = classroom(db)
+    day = date.today() - timedelta(days=1)
+    db.add(
+        AttendanceRecord(
+            LopHocId=cls.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayHoc=day,
+            TrangThai="present",
+            NguoiCapNhatId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    schedules = [
+        LichHoc(
+            LopHocId=cls.LopHocId,
+            MonHocId=1,
+            NgayHoc=day,
+            GioBatDau=datetime.strptime("08:00", "%H:%M").time(),
+            GioKetThuc=datetime.strptime("10:00", "%H:%M").time(),
+            PhongHocId=1,
+            GiangVienId=teacher.NguoiDungId,
+            TrangThai="Đã lên lịch",
+            NgayTao=datetime.now(),
+            NguoiTaoId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+            NguoiCapNhatId=teacher.NguoiDungId,
+        ),
+        LichHoc(
+            LopHocId=cls.LopHocId,
+            MonHocId=1,
+            NgayHoc=day,
+            GioBatDau=datetime.strptime("10:00", "%H:%M").time(),
+            GioKetThuc=datetime.strptime("12:00", "%H:%M").time(),
+            PhongHocId=1,
+            GiangVienId=teacher.NguoiDungId,
+            TrangThai="Đã lên lịch",
+            NgayTao=datetime.now(),
+            NguoiTaoId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+            NguoiCapNhatId=teacher.NguoiDungId,
+        ),
+    ]
+    db.add_all(schedules)
+    db.flush()
+    db.add_all(
+        [
+            DiemDanhBuoiHoc(
+                LichHocId=schedules[0].LichHocId,
+                HocVienId=student.NguoiDungId,
+                TrangThai="Vắng không phép",
+                NgayCapNhat=datetime.now(),
+                NguoiCapNhatId=teacher.NguoiDungId,
+            ),
+            DiemDanhBuoiHoc(
+                LichHocId=schedules[1].LichHocId,
+                HocVienId=student.NguoiDungId,
+                TrangThai="Có mặt",
+                NgayCapNhat=datetime.now(),
+                NguoiCapNhatId=teacher.NguoiDungId,
+            ),
+        ]
+    )
+    db.flush()
+
+    assert absence_metrics_for_student(
+        db, student.NguoiDungId, cls.ChuongTrinhId
+    ) == (1, 2, 50)
+    assert notify_threshold_activation(
+        db,
+        student.NguoiDungId,
+        cls.ChuongTrinhId,
+        was_above_threshold=False,
+    )
+    notices = db.query(AttendanceNotification).filter(
+        AttendanceNotification.HocVienId == student.NguoiDungId,
+        AttendanceNotification.Loai == "absence_threshold",
+    ).all()
+    assert {notice.NguoiNhanId for notice in notices} == {
+        teacher.NguoiDungId,
+        student.NguoiDungId,
+        30,
+    }
+    history = get_my_attendance_history(student, db)
+    assert history["warning"]["absencePercent"] == 50
+
+
+def test_student_attendance_history_summarizes_sessions_and_near_threshold(
+    db,
+    monkeypatch,
+):
+    teacher, student, _, _, class_record = classroom(db)
+    now = datetime.combine(date.today(), datetime.max.time())
+    monkeypatch.setattr("app.routers.attendance.business_now_naive", lambda: now)
+    enrollment = db.query(LopHocHocVien).filter(
+        LopHocHocVien.LopHocId == class_record.LopHocId,
+        LopHocHocVien.HocVienId == student.NguoiDungId,
+    ).one()
+    enrollment.NgayThamGia = datetime.combine(
+        date.today() - timedelta(days=20),
+        datetime.min.time(),
+    )
+    schedules = []
+    for days_ago in range(1, 7):
+        schedule = LichHoc(
+            LopHocId=class_record.LopHocId,
+            MonHocId=1,
+            NgayHoc=date.today() - timedelta(days=days_ago),
+            GioBatDau=datetime.strptime("08:00", "%H:%M").time(),
+            GioKetThuc=datetime.strptime("09:00", "%H:%M").time(),
+            PhongHocId=1,
+            GiangVienId=teacher.NguoiDungId,
+            TrangThai="Đã lên lịch",
+            NgayTao=datetime.now(),
+            NguoiTaoId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+            NguoiCapNhatId=teacher.NguoiDungId,
+        )
+        schedules.append(schedule)
+    db.add_all(schedules)
+    db.flush()
+    db.add_all(
+        [
+            DiemDanhBuoiHoc(
+                LichHocId=schedule.LichHocId,
+                HocVienId=student.NguoiDungId,
+                TrangThai=(
+                    "Vắng không phép"
+                    if index == 0
+                    else "Có mặt"
+                ),
+                NgayCapNhat=datetime.now(),
+                NguoiCapNhatId=teacher.NguoiDungId,
+            )
+            for index, schedule in enumerate(schedules)
+        ]
+    )
+    db.commit()
+
+    history = get_my_attendance_history(student, db)
+
+    assert len(history["records"]) == 6
+    assert history["records"][0]["scheduleCode"] == (
+        f"BH-{schedules[0].LichHocId:06d}"
+    )
+    assert history["records"][0]["status"] == "Vắng không phép"
+    summary = history["attendanceSummaries"][0]
+    assert summary["attendancePercent"] == 83.3
+    assert summary["absencePercent"] == 16.7
+    assert summary["threshold"] == 20
+    assert summary["remainingAbsences"] == 0
+    assert summary["nearThreshold"] is True
+    assert summary["thresholdReached"] is False
+
+
+def test_student_attendance_history_warns_when_threshold_is_reached(db):
+    teacher, student, _, _, class_record = classroom(db)
+    db.add(
+        AttendanceRecord(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayHoc=date.today(),
+            TrangThai="unexcused_absence",
+            NguoiCapNhatId=teacher.NguoiDungId,
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    db.commit()
+
+    assert db.query(AttendanceRecord).filter(
+        AttendanceRecord.HocVienId == student.NguoiDungId,
+        AttendanceRecord.LopHocId == class_record.LopHocId,
+    ).count() == 1
+    history = get_my_attendance_history(student, db)
+
+    assert history["warning"]["classId"] == class_record.LopHocId
+    assert history["warning"]["absencePercent"] == 100
+    assert history["attendanceSummaries"][0]["thresholdReached"] is True
+    assert history["attendanceSummaries"][0]["nearThreshold"] is False
+
+
+def test_student_grade_matrix_only_lists_their_enrolled_classes_and_attendance(db):
+    _, student, other_student, _, class_record = classroom(db)
+    unrelated_class = LopHoc(
+        LopHocId=51,
+        MaLop="ATT-51",
+        TenLop="Unrelated class",
+        NamHoc="2026-2027",
+        ChuongTrinhId=class_record.ChuongTrinhId,
+        NgayTao=datetime.now(),
+    )
+    db.add(unrelated_class)
+    db.add(
+        LopHocHocVien(
+            LopHocId=unrelated_class.LopHocId,
+            HocVienId=other_student.NguoiDungId,
+            NgayThamGia=datetime.now(),
+        )
+    )
+    db.add(
+        LopHocHocVien(
+            LopHocId=unrelated_class.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayThamGia=datetime.now() - timedelta(days=10),
+            TrangThaiGhiDanh="Thôi học",
+            NgayKetThuc=datetime.now() - timedelta(days=1),
+        )
+    )
+    db.commit()
+
+    classes = list_attendance_classes(student, db)
+    assert [item["classId"] for item in classes] == [class_record.LopHocId]
+
+    matrix = get_attendance_grade_matrix(class_record.LopHocId, student, db)
+    assert [item["studentId"] for item in matrix["students"]] == [
+        student.NguoiDungId,
+    ]
+
+    with pytest.raises(HTTPException) as error:
+        get_attendance_grade_matrix(unrelated_class.LopHocId, student, db)
+    assert error.value.status_code == 403
+
+    response = export_attendance_matrix(class_record.LopHocId, student, db)
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    assert workbook["Ma trận chuyên cần"].max_row == 2
+    assert workbook["Ma trận chuyên cần"]["A2"].value == student.NguoiDungId
 
 
 def test_only_manager_can_edit_past_attendance(db):

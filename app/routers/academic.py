@@ -78,6 +78,11 @@ from app.services.academic_service import (
     user_role_ids,
 )
 from app.services.business_time import business_now, business_now_naive
+from app.services.attendance_thresholds import (
+    absence_metrics_by_student,
+    absence_metrics_for_student,
+    threshold_for_program,
+)
 
 
 router = APIRouter(prefix="/academic", tags=["Academic management"])
@@ -234,6 +239,16 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
         .filter(NguoiDung.NguoiDungId.in_(enrollment_user_ids))
         .all()
     } if enrollment_user_ids else {}
+    attendance_metrics = (
+        absence_metrics_by_student(
+            db,
+            lop_hoc.ChuongTrinhId,
+            (student.NguoiDungId for student in students),
+        )
+        if lop_hoc.ChuongTrinhId is not None
+        else {}
+    )
+    absence_threshold = threshold_for_program(db, lop_hoc.ChuongTrinhId)
     teaching_rows = (
         db.query(LopHocMonHocGiangVien)
         .filter(LopHocMonHocGiangVien.LopHocId == lop_hoc.LopHocId)
@@ -264,6 +279,27 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
                     "vaiTro": assignment.VaiTro,
                 }
             )
+    def _student_roster_payload(student: NguoiDung) -> dict:
+        absent, total, rate = attendance_metrics.get(
+            student.NguoiDungId, (0, 0, 0.0)
+        )
+        return {
+            "nguoiDungId": student.NguoiDungId,
+            "hoTen": student.HoTen,
+            "email": student.Email,
+            "ngayGhiDanh": enrollment_by_student[
+                student.NguoiDungId
+            ].NgayThamGia,
+            "nguoiGhiDanh": enrollment_users.get(
+                enrollment_by_student[student.NguoiDungId].NguoiGhiDanhId
+            ),
+            "soBuoiVang": absent,
+            "tongBuoiDiemDanh": total,
+            "tiLeVang": round(rate, 1),
+            "nguongVang": absence_threshold,
+            "canhBaoVang": total > 0 and rate >= absence_threshold,
+        }
+
     return {
         "lopHocId": lop_hoc.LopHocId,
         "maLop": lop_hoc.MaLop,
@@ -300,18 +336,7 @@ def _class_payload(db: Session, lop_hoc: LopHoc) -> dict:
             for assignment in assignments
         ],
         "hocVienIds": [student.NguoiDungId for student in students],
-        "hocViens": [
-            {
-                "nguoiDungId": student.NguoiDungId,
-                "hoTen": student.HoTen,
-                "email": student.Email,
-                "ngayGhiDanh": enrollment_by_student[student.NguoiDungId].NgayThamGia,
-                "nguoiGhiDanh": enrollment_users.get(
-                    enrollment_by_student[student.NguoiDungId].NguoiGhiDanhId
-                ),
-            }
-            for student in students
-        ],
+        "hocViens": [_student_roster_payload(student) for student in students],
         "monHocIds": [subject.MonHocId for subject in subjects],
         "monHocs": [
             {
@@ -3226,6 +3251,37 @@ def get_student_profile(
         Diem.HocKy.desc(),
         Diem.DiemId,
     ).all()
+    student_program_ids = {
+        lop_hoc.ChuongTrinhId
+        for _, lop_hoc in classes
+        if lop_hoc.ChuongTrinhId is not None
+    }
+    programs = (
+        db.query(ChuongTrinhDaoTao)
+        .filter(ChuongTrinhDaoTao.ChuongTrinhId.in_(student_program_ids))
+        .order_by(ChuongTrinhDaoTao.TenChuongTrinh)
+        .all()
+        if student_program_ids
+        else []
+    )
+    absence_warnings = []
+    for item in programs:
+        absent, total, rate = absence_metrics_for_student(
+            db, student_id, item.ChuongTrinhId
+        )
+        threshold = threshold_for_program(db, item.ChuongTrinhId)
+        if total and rate >= threshold:
+            absence_warnings.append(
+                {
+                    "programId": item.ChuongTrinhId,
+                    "programCode": item.MaChuongTrinh,
+                    "programName": item.TenChuongTrinh,
+                    "soBuoiVang": absent,
+                    "tongBuoiDiemDanh": total,
+                    "tiLeVang": round(rate, 1),
+                    "nguongVang": threshold,
+                }
+            )
     return {
         "hocVien": {
             "nguoiDungId": student.NguoiDungId,
@@ -3275,6 +3331,7 @@ def get_student_profile(
             }
             for enrollment, lop_hoc in classes
         ],
+        "canhBaoVangs": absence_warnings,
         "thaoTacs": [
             {
                 "actionId": action.ActionId,

@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from io import BytesIO
 from datetime import date, datetime, timedelta
@@ -33,6 +34,12 @@ from app.routers.attendance_sessions import (
 )
 from app.schemas.attendance import AbsenceRequestDecision
 from app.services.business_time import business_now, business_now_naive
+from app.services.attendance_thresholds import (
+    absence_metrics_by_student,
+    absence_metrics_for_student,
+    notify_threshold_activation,
+    threshold_for_program as _threshold,
+)
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 VALID_STATUSES = {"present", "late", "excused_absence", "unexcused_absence"}
@@ -105,6 +112,22 @@ def _ensure_teacher_or_manager(db: Session, user: NguoiDung, class_record: LopHo
         raise HTTPException(status_code=403, detail="You cannot manage attendance for this class")
 
 
+def _ensure_student_enrollment(
+    db: Session, user: NguoiDung, class_id: int
+) -> None:
+    enrollment = db.query(LopHocHocVien.LopHocId).filter(
+        LopHocHocVien.LopHocId == class_id,
+        LopHocHocVien.HocVienId == user.NguoiDungId,
+        LopHocHocVien.TrangThaiGhiDanh == "Đang học",
+        LopHocHocVien.NgayKetThuc.is_(None),
+    ).first()
+    if not _is_student(db, user) or enrollment is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Bạn không có tên trong danh sách học viên đang học của lớp này.",
+        )
+
+
 def _ensure_edit_date(attendance_date: date, manager: bool) -> None:
     if attendance_date > date.today():
         raise HTTPException(status_code=400, detail="Attendance can only be recorded for today or earlier")
@@ -125,48 +148,16 @@ def _audit(db: Session, kind: str, entity_id: int, action: str, old, new, reason
     ))
 
 
-def _threshold(db: Session, program_id: int | None) -> int:
-    if program_id is None:
-        return 20
-    row = db.query(AbsenceThreshold).filter(AbsenceThreshold.ChuongTrinhId == program_id).first()
-    return row.TiLeToiDa if row else 20
-
-
-def _absence_rate(db: Session, student_id: int, program_id: int) -> tuple[int, int, float]:
-    rows = db.query(AttendanceRecord.TrangThai).join(
-        LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
-    ).filter(
-        AttendanceRecord.HocVienId == student_id,
-        LopHoc.ChuongTrinhId == program_id,
-    ).all()
-    total = len(rows)
-    absent = sum(1 for row in rows if row[0] == "unexcused_absence")
-    return absent, total, (absent * 100 / total if total else 0)
-
-
 def _notify_threshold_crossing(db: Session, class_record: LopHoc, student: NguoiDung, before_rate: float) -> None:
     program_id = class_record.ChuongTrinhId
     if program_id is None:
         return
-    absent, total, after_rate = _absence_rate(db, student.NguoiDungId, program_id)
-    limit = _threshold(db, program_id)
-    if total == 0 or before_rate >= limit or after_rate < limit:
-        return
-    recipients = {class_record.GiangVienId} if class_record.GiangVienId else set()
-    recipients.add(student.NguoiDungId)
-    recipients.update(row[0] for row in db.query(NguoiDungVaiTro.NguoiDungId).filter(
-        NguoiDungVaiTro.VaiTroId.in_(MANAGER_ROLES)
-    ).all())
-    for recipient in recipients:
-        db.add(AttendanceNotification(
-            NguoiNhanId=recipient,
-            HocVienId=student.NguoiDungId,
-            ChuongTrinhId=program_id,
-            Loai="absence_threshold",
-            TieuDe="Absence threshold reached",
-            NoiDung=f"{student.HoTen} has {absent}/{total} unexcused absences ({after_rate:.1f}%), reaching the {limit}% limit.",
-            ThoiDiem=datetime.now(),
-        ))
+    notify_threshold_activation(
+        db,
+        student.NguoiDungId,
+        program_id,
+        was_above_threshold=before_rate >= _threshold(db, program_id),
+    )
 
 
 def _upsert_record(db: Session, class_record: LopHoc, student_id: int, attendance_date: date,
@@ -189,7 +180,9 @@ def _upsert_record(db: Session, class_record: LopHoc, student_id: int, attendanc
         raise HTTPException(status_code=404, detail="Student not found")
     before_rate = 0.0
     if class_record.ChuongTrinhId is not None:
-        before_rate = _absence_rate(db, student_id, class_record.ChuongTrinhId)[2]
+        before_rate = absence_metrics_for_student(
+            db, student_id, class_record.ChuongTrinhId
+        )[2]
     record = db.query(AttendanceRecord).filter(
         AttendanceRecord.LopHocId == class_record.LopHocId,
         AttendanceRecord.HocVienId == student_id,
@@ -240,13 +233,17 @@ def list_attendance_classes(
 ):
     roles = _role_ids(db, current_user)
     query = db.query(LopHoc)
-    if not roles & MANAGER_ROLES:
+    if _is_student(db, current_user):
+        enrolled = db.query(LopHocHocVien.LopHocId).filter(
+            LopHocHocVien.HocVienId == current_user.NguoiDungId,
+            LopHocHocVien.TrangThaiGhiDanh == "Đang học",
+            LopHocHocVien.NgayKetThuc.is_(None),
+        )
+        query = query.filter(LopHoc.LopHocId.in_(enrolled))
+    elif not roles & MANAGER_ROLES:
         if roles & TEACHER_ROLES:
             taught = db.query(LichHoc.LopHocId).filter(LichHoc.GiangVienId == current_user.NguoiDungId)
             query = query.filter(or_(LopHoc.GiangVienId == current_user.NguoiDungId, LopHoc.LopHocId.in_(taught)))
-        elif 2 in roles:
-            enrolled = db.query(LopHocHocVien.LopHocId).filter(LopHocHocVien.HocVienId == current_user.NguoiDungId)
-            query = query.filter(LopHoc.LopHocId.in_(enrolled))
         else:
             raise HTTPException(status_code=403, detail="Attendance access is not allowed")
     return [_class_payload(db, record) for record in query.order_by(LopHoc.MaLop).all()]
@@ -297,12 +294,33 @@ def get_attendance_matrix(
     threshold = _threshold(db, class_record.ChuongTrinhId)
     flagged_students = []
     if class_record.ChuongTrinhId is not None:
+        metrics = absence_metrics_by_student(
+            db,
+            class_record.ChuongTrinhId,
+            (student.NguoiDungId for student in roster),
+        )
         for student in roster:
-            total_absent, total_marked, rate = _absence_rate(db, student.NguoiDungId, class_record.ChuongTrinhId)
+            total_absent, total_marked, rate = metrics.get(
+                student.NguoiDungId, (0, 0, 0.0)
+            )
             if total_marked and rate >= threshold:
                 flagged_students.append({"studentId": student.NguoiDungId, "studentName": student.HoTen,
                                          "absencePercent": round(rate, 1), "unexcused": total_absent,
                                          "total": total_marked})
+    flagged_by_student = {
+        item["studentId"]: item for item in flagged_students
+    }
+    for row in rows:
+        absent, total, rate = (
+            metrics.get(row["studentId"], (0, 0, 0.0))
+            if class_record.ChuongTrinhId is not None
+            else (0, 0, 0.0)
+        )
+        row["absencePercent"] = round(rate, 1)
+        row["unexcusedAbsences"] = absent
+        row["totalMarked"] = total
+        row["absenceThreshold"] = threshold
+        row["aboveThreshold"] = row["studentId"] in flagged_by_student
     return {
         **_class_payload(db, class_record),
         "date": day.isoformat(),
@@ -528,25 +546,228 @@ def get_my_attendance_history(
 ):
     if not _is_student(db, current_user):
         raise HTTPException(status_code=403, detail="This endpoint is for students")
-    rows = db.query(AttendanceRecord, LopHoc).join(
+    daily_rows = db.query(AttendanceRecord, LopHoc).join(
         LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
     ).filter(AttendanceRecord.HocVienId == current_user.NguoiDungId).order_by(
         AttendanceRecord.NgayHoc.desc()
     ).all()
-    history = [{
-        "classId": cls.LopHocId, "classCode": cls.MaLop, "className": cls.TenLop,
-        "date": record.NgayHoc.isoformat(), "status": record.TrangThai,
-        "reason": record.GhiChu,
-    } for record, cls in rows]
-    warning = None
-    program_ids = {cls.ChuongTrinhId for _, cls in rows if cls.ChuongTrinhId is not None}
-    for program_id in program_ids:
-        absent, total, rate = _absence_rate(db, current_user.NguoiDungId, program_id)
-        limit = _threshold(db, program_id)
-        if total and rate >= limit:
-            warning = {"programId": program_id, "absencePercent": round(rate, 1), "threshold": limit,
-                       "message": f"Your unexcused absence rate is {rate:.1f}% (limit {limit}%)."}
-            break
+    daily_by_class_date = {
+        (class_record.LopHocId, record.NgayHoc): record
+        for record, class_record in daily_rows
+    }
+    daily_status_labels = {
+        "present": "Có mặt",
+        "late": "Đi muộn",
+        "excused_absence": "Vắng có phép",
+        "unexcused_absence": "Vắng không phép",
+    }
+    session_status_labels = {
+        "Có mặt": "Có mặt",
+        "Đi muộn": "Đi muộn",
+        "Vắng có phép": "Vắng có phép",
+        "Vắng không phép": "Vắng không phép",
+    }
+    now = business_now_naive()
+    schedule_rows = (
+        db.query(LichHoc, LopHoc, LopHocHocVien)
+        .join(LopHoc, LopHoc.LopHocId == LichHoc.LopHocId)
+        .join(LopHocHocVien, LopHocHocVien.LopHocId == LopHoc.LopHocId)
+        .filter(
+            LopHocHocVien.HocVienId == current_user.NguoiDungId,
+            LopHocHocVien.NgayThamGia
+            < datetime.combine(now.date() + timedelta(days=1), datetime.min.time()),
+            LichHoc.TrangThai == "Đã lên lịch",
+            or_(
+                LichHoc.NgayHoc < now.date(),
+                and_(
+                    LichHoc.NgayHoc == now.date(),
+                    LichHoc.GioBatDau <= now.time(),
+                ),
+            ),
+        )
+        .order_by(LichHoc.NgayHoc.desc(), LichHoc.GioBatDau.desc())
+        .all()
+    )
+    ended_dates: dict[int, list[date]] = {}
+    for class_id, effective_date in db.query(
+        LopHocHocVienThaoTac.LopHocId,
+        LopHocHocVienThaoTac.NgayHieuLuc,
+    ).filter(
+        LopHocHocVienThaoTac.HocVienId == current_user.NguoiDungId
+    ).all():
+        ended_dates.setdefault(class_id, []).append(effective_date)
+    eligible_schedules = [
+        (schedule, class_record)
+        for schedule, class_record, enrollment in schedule_rows
+        if enrollment.NgayThamGia
+        < datetime.combine(
+            schedule.NgayHoc + timedelta(days=1),
+            datetime.min.time(),
+        )
+        and (
+            enrollment.NgayKetThuc is None
+            or enrollment.NgayKetThuc
+            > datetime.combine(schedule.NgayHoc, datetime.min.time())
+        )
+        and not any(
+            effective_date <= schedule.NgayHoc
+            for effective_date in ended_dates.get(class_record.LopHocId, [])
+        )
+    ]
+    schedule_ids = [schedule.LichHocId for schedule, _ in eligible_schedules]
+    session_attendance = {
+        (item.LichHocId, item.HocVienId): item
+        for item in db.query(DiemDanhBuoiHoc).filter(
+            DiemDanhBuoiHoc.HocVienId == current_user.NguoiDungId,
+            DiemDanhBuoiHoc.LichHocId.in_(schedule_ids),
+        ).all()
+    } if schedule_ids else {}
+    recorded_sessions_by_class_date: set[tuple[int, date]] = set()
+    for schedule, class_record in eligible_schedules:
+        key = (class_record.LopHocId, schedule.NgayHoc)
+        if (schedule.LichHocId, current_user.NguoiDungId) in session_attendance:
+            recorded_sessions_by_class_date.add(key)
+
+    history = []
+    summaries: dict[int, dict] = {}
+    for record, class_record in daily_rows:
+        key = (class_record.LopHocId, record.NgayHoc)
+        if key in recorded_sessions_by_class_date:
+            continue
+        history.append({
+            "classId": class_record.LopHocId,
+            "classCode": class_record.MaLop,
+            "className": class_record.TenLop,
+            "programId": class_record.ChuongTrinhId,
+            "date": record.NgayHoc.isoformat(),
+            "startTime": None,
+            "endTime": None,
+            "scheduleCode": None,
+            "status": daily_status_labels.get(record.TrangThai, record.TrangThai),
+            "reason": record.GhiChu,
+        })
+    for schedule, class_record in eligible_schedules:
+        key = (class_record.LopHocId, schedule.NgayHoc)
+        if key in daily_by_class_date and key not in recorded_sessions_by_class_date:
+            continue
+        attendance = session_attendance.get(
+            (schedule.LichHocId, current_user.NguoiDungId)
+        )
+        history.append({
+            "classId": class_record.LopHocId,
+            "classCode": class_record.MaLop,
+            "className": class_record.TenLop,
+            "programId": class_record.ChuongTrinhId,
+            "date": schedule.NgayHoc.isoformat(),
+            "startTime": schedule.GioBatDau.strftime("%H:%M"),
+            "endTime": schedule.GioKetThuc.strftime("%H:%M"),
+            "scheduleCode": f"BH-{schedule.LichHocId:06d}",
+            "status": session_status_labels.get(
+                attendance.TrangThai, attendance.TrangThai
+            )
+            if attendance
+            else "Chưa điểm danh",
+            "reason": attendance.GhiChu if attendance else None,
+        })
+    history.sort(
+        key=lambda item: (
+            item["date"],
+            item["startTime"] or "",
+            item["classId"],
+        ),
+        reverse=True,
+    )
+    for item in history:
+        summary = summaries.setdefault(
+            item["classId"],
+            {
+                "classId": item["classId"],
+                "classCode": item["classCode"],
+                "className": item["className"],
+                "programId": item["programId"],
+                "present": 0,
+                "late": 0,
+                "excusedAbsences": 0,
+                "unexcusedAbsences": 0,
+                "unmarked": 0,
+                "totalMarked": 0,
+            },
+        )
+        status_value = item["status"]
+        status_counts = {
+            "Có mặt": "present",
+            "Đi muộn": "late",
+            "Vắng có phép": "excusedAbsences",
+            "Vắng không phép": "unexcusedAbsences",
+            "Chưa điểm danh": "unmarked",
+        }
+        count_key = status_counts.get(status_value)
+        if count_key:
+            summary[count_key] += 1
+        if status_value != "Chưa điểm danh":
+            summary["totalMarked"] += 1
+    attendance_summaries = []
+    for summary in summaries.values():
+        total = summary["totalMarked"]
+        absent = summary["unexcusedAbsences"]
+        threshold = _threshold(db, summary["programId"])
+        absence_percent = absent * 100 / total if total else 0
+        threshold_reached = total > 0 and absence_percent >= threshold
+        if total == 0:
+            remaining_absences = None
+        elif threshold_reached or threshold <= 0:
+            remaining_absences = 0
+        elif threshold >= 100 and absent < total:
+            remaining_absences = None
+        else:
+            absences_until_threshold = math.ceil(
+                (threshold * total / 100 - absent) / (1 - threshold / 100)
+            )
+            remaining_absences = max(0, absences_until_threshold - 1)
+        summary.update({
+            "totalSessions": total + summary["unmarked"],
+            "absencePercent": round(absence_percent, 1),
+            "attendancePercent": round(
+                (summary["present"] + summary["late"])
+                * 100
+                / (total + summary["unmarked"]),
+                1,
+            )
+            if total + summary["unmarked"]
+            else 0,
+            "threshold": threshold,
+            "thresholdReached": threshold_reached,
+            "remainingAbsences": remaining_absences,
+            "nearThreshold": (
+                not threshold_reached
+                and remaining_absences is not None
+                and remaining_absences <= 1
+            ),
+        })
+        attendance_summaries.append(summary)
+    attendance_summaries.sort(key=lambda item: item["classCode"])
+    warning_summary = next(
+        (item for item in attendance_summaries if item["thresholdReached"]),
+        None,
+    )
+    warning = (
+        {
+            "programId": warning_summary["programId"],
+            "classId": warning_summary["classId"],
+            "absencePercent": warning_summary["absencePercent"],
+            "threshold": warning_summary["threshold"],
+            "message": (
+                f"Tỷ lệ vắng không phép của bạn ở lớp "
+                f"{warning_summary['classCode']} là "
+                f"{warning_summary['absencePercent']:.1f}% "
+                f"({warning_summary['unexcusedAbsences']}/"
+                f"{warning_summary['totalMarked']}), đạt ngưỡng "
+                f"{warning_summary['threshold']}%."
+            ),
+        }
+        if warning_summary
+        else None
+    )
     requests = list_absence_requests(None, current_user, db)
     notifications = db.query(AttendanceNotification).filter(
         AttendanceNotification.NguoiNhanId == current_user.NguoiDungId
@@ -554,7 +775,13 @@ def get_my_attendance_history(
     notices = [{"id": item.ThongBaoId, "type": item.Loai, "title": item.TieuDe,
                 "message": item.NoiDung, "at": item.ThoiDiem.isoformat(), "read": item.DaDoc is not None}
                for item in notifications]
-    return {"records": history, "requests": requests, "warning": warning, "notifications": notices}
+    return {
+        "records": history,
+        "requests": requests,
+        "warning": warning,
+        "attendanceSummaries": attendance_summaries,
+        "notifications": notices,
+    }
 
 
 @router.get("/notifications")
@@ -591,7 +818,8 @@ def update_threshold(
     if db.query(ChuongTrinhDaoTao).filter(ChuongTrinhDaoTao.ChuongTrinhId == program_id).first() is None:
         raise HTTPException(status_code=404, detail="Program not found")
     row = db.query(AbsenceThreshold).filter(AbsenceThreshold.ChuongTrinhId == program_id).first()
-    old = {"percentage": row.TiLeToiDa} if row else {"percentage": 20}
+    old_threshold = row.TiLeToiDa if row else 20
+    old = {"percentage": old_threshold}
     if row is None:
         row = AbsenceThreshold(ChuongTrinhId=program_id)
         db.add(row)
@@ -601,51 +829,15 @@ def update_threshold(
     _audit(db, "threshold", program_id, "updated", old, {"percentage": payload.percentage}, None,
            current_user.NguoiDungId)
     db.flush()
-    manager_ids = {row[0] for row in db.query(NguoiDungVaiTro.NguoiDungId).filter(
-        NguoiDungVaiTro.VaiTroId.in_(MANAGER_ROLES)
-    ).all()}
-    teacher_ids = {row[0] for row in db.query(LopHoc.GiangVienId).filter(
-        LopHoc.ChuongTrinhId == program_id, LopHoc.GiangVienId.isnot(None)
-    ).all()}
-    student_ids = {row[0] for row in db.query(AttendanceRecord.HocVienId).join(
-        LopHoc, LopHoc.LopHocId == AttendanceRecord.LopHocId
-    ).filter(LopHoc.ChuongTrinhId == program_id).distinct().all()}
-    for student_id in student_ids:
-        absent, total, rate = _absence_rate(db, student_id, program_id)
-        if not total or rate < payload.percentage:
-            continue
-        student = db.query(NguoiDung).filter(NguoiDung.NguoiDungId == student_id).first()
-        for recipient_id in manager_ids | teacher_ids:
-            already_notified = db.query(AttendanceNotification.ThongBaoId).filter(
-                AttendanceNotification.NguoiNhanId == recipient_id,
-                AttendanceNotification.HocVienId == student_id,
-                AttendanceNotification.ChuongTrinhId == program_id,
-                AttendanceNotification.Loai == "absence_threshold",
-            ).first()
-            if already_notified:
-                continue
-            db.add(AttendanceNotification(
-                NguoiNhanId=recipient_id, HocVienId=student_id, ChuongTrinhId=program_id,
-                Loai="absence_threshold", TieuDe="Absence threshold reached",
-                NoiDung=f"{student.HoTen if student else 'Student'} has {absent}/{total} unexcused absences ({rate:.1f}%), reaching the {payload.percentage}% limit.",
-                ThoiDiem=datetime.now(),
-            ))
-        already_notified_student = db.query(AttendanceNotification.ThongBaoId).filter(
-            AttendanceNotification.NguoiNhanId == student_id,
-            AttendanceNotification.HocVienId == student_id,
-            AttendanceNotification.ChuongTrinhId == program_id,
-            AttendanceNotification.Loai == "absence_threshold",
-        ).first()
-        if not already_notified_student:
-            db.add(AttendanceNotification(
-                NguoiNhanId=student_id,
-                HocVienId=student_id,
-                ChuongTrinhId=program_id,
-                Loai="absence_threshold",
-                TieuDe="Cảnh báo tỷ lệ vắng",
-                NoiDung=f"Tỷ lệ vắng không phép của bạn là {rate:.1f}% ({absent}/{total}), đạt ngưỡng {payload.percentage}%.",
-                ThoiDiem=datetime.now(),
-            ))
+    for student_id, (_absent, _total, rate) in absence_metrics_by_student(
+        db, program_id
+    ).items():
+        notify_threshold_activation(
+            db,
+            student_id,
+            program_id,
+            was_above_threshold=rate >= old_threshold,
+        )
     db.commit()
     return {"programId": program_id, "percentage": row.TiLeToiDa}
 
@@ -701,16 +893,20 @@ def export_attendance(
 
 
 @router.get(
-    "/classes/{class_id}/export-matrix",
+    "/classes/{class_id}/grade-matrix",
     dependencies=[Depends(require_permission("ATTENDANCE_VIEW"))],
 )
-def export_attendance_matrix(
+def get_attendance_grade_matrix(
     class_id: int,
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     class_record = _class_or_404(db, class_id)
-    _ensure_teacher_or_manager(db, current_user, class_record)
+    student_mode = _is_student(db, current_user)
+    if student_mode:
+        _ensure_student_enrollment(db, current_user, class_id)
+    else:
+        _ensure_teacher_or_manager(db, current_user, class_record)
     now = business_now_naive()
     schedules = (
         db.query(LichHoc)
@@ -728,13 +924,176 @@ def export_attendance_matrix(
         .order_by(LichHoc.NgayHoc, LichHoc.GioBatDau, LichHoc.LichHocId)
         .all()
     )
-    enrollments = (
+    enrollment_query = (
         db.query(LopHocHocVien, NguoiDung)
         .join(NguoiDung, NguoiDung.NguoiDungId == LopHocHocVien.HocVienId)
         .filter(LopHocHocVien.LopHocId == class_id)
-        .order_by(NguoiDung.HoTen, NguoiDung.NguoiDungId)
+    )
+    if student_mode:
+        enrollment_query = enrollment_query.filter(
+            LopHocHocVien.HocVienId == current_user.NguoiDungId,
+            LopHocHocVien.TrangThaiGhiDanh == "Đang học",
+            LopHocHocVien.NgayKetThuc.is_(None),
+        )
+    enrollments = enrollment_query.order_by(
+        NguoiDung.HoTen, NguoiDung.NguoiDungId
+    ).all()
+    enrollment_by_student = {
+        enrollment.HocVienId: enrollment for enrollment, _ in enrollments
+    }
+    ended_dates: dict[int, list[date]] = {}
+    for student_id, effective_date in db.query(
+        LopHocHocVienThaoTac.HocVienId,
+        LopHocHocVienThaoTac.NgayHieuLuc,
+    ).filter(LopHocHocVienThaoTac.LopHocId == class_id).all():
+        ended_dates.setdefault(student_id, []).append(effective_date)
+    attendance = {
+        (schedule_id, student_id): status_value
+        for schedule_id, student_id, status_value in (
+            db.query(
+                DiemDanhBuoiHoc.LichHocId,
+                DiemDanhBuoiHoc.HocVienId,
+                DiemDanhBuoiHoc.TrangThai,
+            )
+            .join(LichHoc, LichHoc.LichHocId == DiemDanhBuoiHoc.LichHocId)
+            .filter(
+                LichHoc.LopHocId == class_id,
+                LichHoc.TrangThai == "Đã lên lịch",
+                LichHoc.LichHocId.in_(
+                    [schedule.LichHocId for schedule in schedules]
+                ),
+            )
+            .all()
+            if schedules
+            else []
+        )
+    }
+    status_labels = {
+        "Có mặt": "Có mặt",
+        "Đi muộn": "Đi muộn",
+        "Vắng có phép": "Vắng có phép",
+        "Vắng không phép": "Vắng không phép",
+    }
+    status_values = (
+        "Có mặt",
+        "Đi muộn",
+        "Vắng có phép",
+        "Vắng không phép",
+        "Chưa điểm danh",
+    )
+    totals = {label: 0 for label in status_values}
+    students = []
+    for enrollment, student in enrollments:
+        counts = {label: 0 for label in status_values}
+        session_statuses = []
+        total_sessions = 0
+        for schedule in schedules:
+            enrolled_by_date = enrollment.NgayThamGia < datetime.combine(
+                schedule.NgayHoc + timedelta(days=1),
+                datetime.min.time(),
+            )
+            has_ended = any(
+                effective_date <= schedule.NgayHoc
+                for effective_date in ended_dates.get(student.NguoiDungId, [])
+            )
+            if not enrolled_by_date or has_ended:
+                session_statuses.append("—")
+                continue
+            status_label = status_labels.get(
+                attendance.get((schedule.LichHocId, student.NguoiDungId)),
+                "Chưa điểm danh",
+            )
+            session_statuses.append(status_label)
+            counts[status_label] += 1
+            totals[status_label] += 1
+            total_sessions += 1
+        students.append(
+            {
+                "studentId": student.NguoiDungId,
+                "studentName": student.HoTen,
+                "email": student.Email or "",
+                "attendance": session_statuses,
+                "totalSessions": total_sessions,
+                "totalAbsences": counts["Vắng có phép"] + counts["Vắng không phép"],
+                "present": counts["Có mặt"],
+                "late": counts["Đi muộn"],
+                "excusedAbsences": counts["Vắng có phép"],
+                "unexcusedAbsences": counts["Vắng không phép"],
+                "unmarked": counts["Chưa điểm danh"],
+                "attendanceRate": round(
+                    (counts["Có mặt"] + counts["Đi muộn"]) * 100 / total_sessions,
+                    1,
+                )
+                if total_sessions
+                else 0,
+            }
+        )
+    students.sort(
+        key=lambda item: (item["attendanceRate"], item["studentName"].casefold())
+    )
+    return {
+        "classId": class_record.LopHocId,
+        "classCode": class_record.MaLop,
+        "className": class_record.TenLop,
+        "sessions": [
+            {
+                "scheduleId": schedule.LichHocId,
+                "scheduleCode": f"BH-{schedule.LichHocId:06d}",
+                "date": schedule.NgayHoc.isoformat(),
+                "startTime": schedule.GioBatDau.strftime("%H:%M"),
+                "endTime": schedule.GioKetThuc.strftime("%H:%M"),
+            }
+            for schedule in schedules
+        ],
+        "students": students,
+        "totals": totals,
+    }
+
+
+@router.get(
+    "/classes/{class_id}/export-matrix",
+    dependencies=[Depends(require_permission("ATTENDANCE_VIEW"))],
+)
+def export_attendance_matrix(
+    class_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    class_record = _class_or_404(db, class_id)
+    student_mode = _is_student(db, current_user)
+    if student_mode:
+        _ensure_student_enrollment(db, current_user, class_id)
+    else:
+        _ensure_teacher_or_manager(db, current_user, class_record)
+    now = business_now_naive()
+    schedules = (
+        db.query(LichHoc)
+        .filter(
+            LichHoc.LopHocId == class_id,
+            LichHoc.TrangThai == "Đã lên lịch",
+            or_(
+                LichHoc.NgayHoc < now.date(),
+                and_(
+                    LichHoc.NgayHoc == now.date(),
+                    LichHoc.GioBatDau <= now.time(),
+                ),
+            ),
+        )
+        .order_by(LichHoc.NgayHoc, LichHoc.GioBatDau, LichHoc.LichHocId)
         .all()
     )
+    enrollment_query = (
+        db.query(LopHocHocVien, NguoiDung)
+        .join(NguoiDung, NguoiDung.NguoiDungId == LopHocHocVien.HocVienId)
+        .filter(LopHocHocVien.LopHocId == class_id)
+    )
+    if student_mode:
+        enrollment_query = enrollment_query.filter(
+            LopHocHocVien.HocVienId == current_user.NguoiDungId
+        )
+    enrollments = enrollment_query.order_by(
+        NguoiDung.HoTen, NguoiDung.NguoiDungId
+    ).all()
     students = {student.NguoiDungId: student for _, student in enrollments}
     enrollment_by_student = {
         enrollment.HocVienId: enrollment for enrollment, _ in enrollments

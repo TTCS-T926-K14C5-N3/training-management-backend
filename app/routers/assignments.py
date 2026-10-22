@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
+from sqlalchemy import exists, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,7 +29,17 @@ from app.models.lop_hoc_mon_hoc import LopHocMonHoc
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
 from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
-from app.services.academic_service import accessible_classes, user_role_ids
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
+from app.models.vai_tro import VaiTro
+from app.services.academic_service import (
+    ACTIVE_CLASS_STATUSES,
+    ADMIN_ROLE_ID,
+    ADMIN_ROLE_NAMES,
+    INSTRUCTOR_ROLE_ID,
+    TEACHING_ROLE_IDS,
+    TRAINING_MANAGER_ROLE_ID,
+    user_role_ids,
+)
 from app.services.assignment_service import (
     UPLOAD_ROOT,
     can_teach_subject,
@@ -110,16 +121,65 @@ def _submission_payload(db: Session, submission: AssignmentSubmission | None) ->
     }
 
 
-def _assignment_payload(db: Session, assignment: Assignment, student_id: int | None = None) -> dict:
-    class_record = db.query(LopHoc).filter(LopHoc.LopHocId == assignment.LopHocId).first()
-    subject = db.query(MonHoc).filter(MonHoc.MonHocId == assignment.MonHocId).first()
-    lesson = db.query(LichHoc).filter(LichHoc.LichHocId == assignment.LichHocId).first()
-    attachments = (
+def _assignment_related_data(db: Session, assignments: list[Assignment]) -> dict:
+    if not assignments:
+        return {"classes": {}, "subjects": {}, "lessons": {}, "attachments": {}}
+    assignment_ids = [item.AssignmentId for item in assignments]
+    related_rows = (
+        db.query(LopHoc, MonHoc, LichHoc)
+        .select_from(Assignment)
+        .join(MonHoc, MonHoc.MonHocId == Assignment.MonHocId)
+        .join(LopHoc, LopHoc.LopHocId == Assignment.LopHocId)
+        .outerjoin(LichHoc, LichHoc.LichHocId == Assignment.LichHocId)
+        .filter(Assignment.AssignmentId.in_(assignment_ids))
+        .all()
+    )
+    classes = {}
+    subjects = {}
+    lessons = {}
+    for class_record, subject, lesson in related_rows:
+        classes[class_record.LopHocId] = class_record
+        subjects[subject.MonHocId] = subject
+        if lesson is not None:
+            lessons[lesson.LichHocId] = lesson
+    attachment_rows = (
         db.query(AssignmentAttachment)
-        .filter(AssignmentAttachment.AssignmentId == assignment.AssignmentId)
+        .filter(AssignmentAttachment.AssignmentId.in_(assignment_ids))
         .order_by(AssignmentAttachment.AttachmentId)
         .all()
     )
+    attachments = {}
+    for row in attachment_rows:
+        attachments.setdefault(row.AssignmentId, []).append(row)
+    return {
+        "classes": classes,
+        "subjects": subjects,
+        "lessons": lessons,
+        "attachments": attachments,
+    }
+
+
+def _assignment_payload(
+    db: Session,
+    assignment: Assignment,
+    student_id: int | None = None,
+    related_data: dict | None = None,
+) -> dict:
+    if related_data is None:
+        class_record = db.query(LopHoc).filter(LopHoc.LopHocId == assignment.LopHocId).first()
+        subject = db.query(MonHoc).filter(MonHoc.MonHocId == assignment.MonHocId).first()
+        lesson = db.query(LichHoc).filter(LichHoc.LichHocId == assignment.LichHocId).first()
+        attachments = (
+            db.query(AssignmentAttachment)
+            .filter(AssignmentAttachment.AssignmentId == assignment.AssignmentId)
+            .order_by(AssignmentAttachment.AttachmentId)
+            .all()
+        )
+    else:
+        class_record = related_data["classes"].get(assignment.LopHocId)
+        subject = related_data["subjects"].get(assignment.MonHocId)
+        lesson = related_data["lessons"].get(assignment.LichHocId)
+        attachments = related_data["attachments"].get(assignment.AssignmentId, [])
     payload = {
         "assignmentId": assignment.AssignmentId,
         "lopHocId": assignment.LopHocId,
@@ -196,29 +256,97 @@ def assignment_options(
     db: Session = Depends(get_db),
     user: NguoiDung = Depends(get_current_user),
 ):
-    classes = accessible_classes(db, user)
+    user_roles = (
+        db.query(NguoiDungVaiTro.VaiTroId, VaiTro.TenVaiTro)
+        .join(VaiTro, VaiTro.VaiTroId == NguoiDungVaiTro.VaiTroId)
+        .filter(NguoiDungVaiTro.NguoiDungId == user.NguoiDungId)
+        .all()
+    )
+    roles = {role_id for role_id, _ in user_roles}
+    unrestricted = TRAINING_MANAGER_ROLE_ID in roles or any(
+        role_id == ADMIN_ROLE_ID or role_name.strip().casefold() in ADMIN_ROLE_NAMES
+        for role_id, role_name in user_roles
+    )
+    if not unrestricted and not roles.intersection(TEACHING_ROLE_IDS):
+        return []
+
+    classes_query = db.query(LopHoc).filter(
+        LopHoc.TrangThai.in_(ACTIVE_CLASS_STATUSES)
+    )
+    if not unrestricted:
+        teaching_classes = db.query(
+            LopHocMonHocGiangVien.LopHocId
+        ).filter(LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId)
+        if INSTRUCTOR_ROLE_ID in roles:
+            classes_query = classes_query.filter(
+                or_(
+                    LopHoc.GiangVienId == user.NguoiDungId,
+                    LopHoc.LopHocId.in_(teaching_classes),
+                )
+            )
+        else:
+            classes_query = classes_query.filter(
+                LopHoc.LopHocId.in_(teaching_classes)
+            )
+    classes = classes_query.order_by(LopHoc.MaLop).all()
+    if not classes:
+        return []
+    class_by_id = {item.LopHocId: item for item in classes}
+    class_ids = set(class_by_id)
+    subjects_query = (
+        db.query(LopHocMonHoc.LopHocId, MonHoc)
+        .join(MonHoc, MonHoc.MonHocId == LopHocMonHoc.MonHocId)
+        .join(LopHoc, LopHoc.LopHocId == LopHocMonHoc.LopHocId)
+        .filter(LopHocMonHoc.LopHocId.in_(class_ids))
+    )
+    if not unrestricted:
+        subjects_query = (
+            subjects_query
+            .outerjoin(
+                LopHocMonHocGiangVien,
+                (LopHocMonHocGiangVien.LopHocId == LopHocMonHoc.LopHocId)
+                & (LopHocMonHocGiangVien.MonHocId == LopHocMonHoc.MonHocId)
+                & (LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId),
+            )
+            .filter(
+                or_(
+                    LopHoc.GiangVienId == user.NguoiDungId,
+                    LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId,
+                )
+            )
+        )
+    subject_assignments = subjects_query.order_by(MonHoc.TenMonHoc).all()
+    allowed_subject_assignments = [
+        (class_id, subject) for class_id, subject in subject_assignments
+    ]
+    lessons_by_class_subject = {}
+    lesson_rows = (
+        db.query(LichHoc)
+        .filter(
+            LichHoc.LopHocId.in_(class_ids),
+            LichHoc.TrangThai != "Đã hủy",
+        )
+        .order_by(LichHoc.NgayHoc.desc(), LichHoc.GioBatDau.desc())
+        .all()
+    )
+    allowed_pairs = {
+        (class_id, subject.MonHocId)
+        for class_id, subject in allowed_subject_assignments
+    }
+    for lesson in lesson_rows:
+        pair = (lesson.LopHocId, lesson.MonHocId)
+        if pair in allowed_pairs:
+            lessons_by_class_subject.setdefault(pair, []).append(lesson)
+    subjects_by_class = {}
+    for class_id, subject in allowed_subject_assignments:
+        subjects_by_class.setdefault(class_id, []).append(subject)
     options = []
     for class_record in classes:
-        subject_rows = (
-            db.query(MonHoc)
-            .join(LopHocMonHoc, LopHocMonHoc.MonHocId == MonHoc.MonHocId)
-            .filter(LopHocMonHoc.LopHocId == class_record.LopHocId)
-            .order_by(MonHoc.TenMonHoc)
-            .all()
-        )
         subjects = []
-        for subject in subject_rows:
-            if not can_teach_subject(db, user, class_record.LopHocId, subject.MonHocId):
-                continue
-            lessons = (
-                db.query(LichHoc)
-                .filter(
-                    LichHoc.LopHocId == class_record.LopHocId,
-                    LichHoc.MonHocId == subject.MonHocId,
-                    LichHoc.TrangThai != "Đã hủy",
-                )
-                .order_by(LichHoc.NgayHoc.desc(), LichHoc.GioBatDau.desc())
-                .all()
+        for subject in subjects_by_class.get(class_record.LopHocId, []):
+            lessons = lessons_by_class_subject.get(
+                (class_record.LopHocId, subject.MonHocId),
+                [],
             )
             subjects.append({
                 "monHocId": subject.MonHocId,
@@ -237,6 +365,42 @@ def assignment_options(
     return options
 
 
+def _teacher_assignments_query(db: Session, user: NguoiDung):
+    user_roles = (
+        db.query(NguoiDungVaiTro.VaiTroId, VaiTro.TenVaiTro)
+        .join(VaiTro, VaiTro.VaiTroId == NguoiDungVaiTro.VaiTroId)
+        .filter(NguoiDungVaiTro.NguoiDungId == user.NguoiDungId)
+        .all()
+    )
+    roles = {role_id for role_id, _ in user_roles}
+    unrestricted = TRAINING_MANAGER_ROLE_ID in roles or any(
+        role_id == ADMIN_ROLE_ID or role_name.strip().casefold() in ADMIN_ROLE_NAMES
+        for role_id, role_name in user_roles
+    )
+    assignments_query = db.query(Assignment)
+    if not unrestricted:
+        if not roles.intersection(TEACHING_ROLE_IDS):
+            return None
+        assignment_scope = exists().where(
+            LopHocMonHocGiangVien.LopHocId == Assignment.LopHocId,
+            LopHocMonHocGiangVien.MonHocId == Assignment.MonHocId,
+            LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId,
+        )
+        if INSTRUCTOR_ROLE_ID in roles:
+            assignments_query = assignments_query.join(
+                LopHoc,
+                LopHoc.LopHocId == Assignment.LopHocId,
+            ).filter(
+                or_(
+                    LopHoc.GiangVienId == user.NguoiDungId,
+                    assignment_scope,
+                )
+            )
+        else:
+            assignments_query = assignments_query.filter(assignment_scope)
+    return assignments_query.order_by(Assignment.NgayTao.desc())
+
+
 @router.get("/mine", dependencies=[Depends(require_permission(ASSIGNMENT_VIEW))])
 def list_my_assignments(
     db: Session = Depends(get_db),
@@ -246,6 +410,7 @@ def list_my_assignments(
     now = local_now()
     class_ids = [row[0] for row in db.query(LopHocHocVien.LopHocId).filter(
         LopHocHocVien.HocVienId == user.NguoiDungId,
+        LopHocHocVien.TrangThaiGhiDanh == "Đang học",
         LopHocHocVien.NgayThamGia <= now,
         (LopHocHocVien.NgayKetThuc.is_(None)) | (LopHocHocVien.NgayKetThuc > now),
     ).all()]
@@ -290,16 +455,62 @@ def list_assignment_notifications(
     ]
 
 
+@router.get("/{assignment_id}/submissions/history", dependencies=[Depends(require_permission(ASSIGNMENT_SUBMIT))])
+def list_my_submission_history(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    user: NguoiDung = Depends(get_current_user),
+):
+    _require_student(user, db)
+    assignment = _get_assignment(db, assignment_id)
+    ensure_enrolled(db, assignment.LopHocId, user.NguoiDungId)
+    submissions = (
+        db.query(AssignmentSubmission)
+        .filter(
+            AssignmentSubmission.AssignmentId == assignment_id,
+            AssignmentSubmission.HocVienId == user.NguoiDungId,
+        )
+        .order_by(AssignmentSubmission.VersionNumber.asc())
+        .all()
+    )
+    return [_submission_payload(db, submission) for submission in submissions]
+
+
+@router.get("/{assignment_id}/students/{student_id}/submissions/history", dependencies=[Depends(require_permission(ASSIGNMENT_GRADE))])
+def list_student_submission_history(
+    assignment_id: int,
+    student_id: int,
+    db: Session = Depends(get_db),
+    user: NguoiDung = Depends(get_current_user),
+):
+    assignment = _get_assignment(db, assignment_id)
+    ensure_assignment_teacher(db, user, assignment)
+    ensure_enrolled(db, assignment.LopHocId, student_id)
+    submissions = (
+        db.query(AssignmentSubmission)
+        .filter(
+            AssignmentSubmission.AssignmentId == assignment_id,
+            AssignmentSubmission.HocVienId == student_id,
+        )
+        .order_by(AssignmentSubmission.VersionNumber.asc())
+        .all()
+    )
+    return [_submission_payload(db, submission) for submission in submissions]
+
+
 @router.get("/teacher", dependencies=[Depends(require_permission(ASSIGNMENT_VIEW))])
 def list_teacher_assignments(
     db: Session = Depends(get_db),
     user: NguoiDung = Depends(get_current_user),
 ):
-    assignments = db.query(Assignment).order_by(Assignment.NgayTao.desc()).all()
+    assignments_query = _teacher_assignments_query(db, user)
+    if assignments_query is None:
+        return []
+    visible_assignments = assignments_query.all()
+    related_data = _assignment_related_data(db, visible_assignments)
     return [
-        _assignment_payload(db, item)
-        for item in assignments
-        if can_teach_subject(db, user, item.LopHocId, item.MonHocId)
+        _assignment_payload(db, item, related_data=related_data)
+        for item in visible_assignments
     ]
 
 
@@ -317,8 +528,11 @@ async def create_assignment(
     if not can_teach_subject(db, user, body.lop_hoc_id, body.mon_hoc_id):
         raise HTTPException(status_code=403, detail="Bạn không được phân công môn học này.")
     ensure_lesson_matches(db, body.lop_hoc_id, body.mon_hoc_id, body.lich_hoc_id)
-    stored = await save_uploads(files)
     now = local_now()
+    deadline = to_local_naive(body.han_nop)
+    if deadline <= now:
+        raise HTTPException(status_code=422, detail="Hạn nộp phải ở thời điểm tương lai.")
+    stored = await save_uploads(files)
     assignment = Assignment(
         LopHocId=body.lop_hoc_id,
         MonHocId=body.mon_hoc_id,
@@ -326,7 +540,7 @@ async def create_assignment(
         GiangVienId=user.NguoiDungId,
         TieuDe=body.tieu_de,
         MoTa=body.mo_ta,
-        HanNop=to_local_naive(body.han_nop),
+        HanNop=deadline,
         DiemToiDa=body.diem_toi_da,
         ChoNopMuon=body.cho_nop_muon,
         TrangThai="Draft",
@@ -373,6 +587,7 @@ def publish_assignment(
         for row in db.query(LopHocHocVien.HocVienId)
         .filter(
             LopHocHocVien.LopHocId == assignment.LopHocId,
+            LopHocHocVien.TrangThaiGhiDanh == "Đang học",
             LopHocHocVien.NgayThamGia <= now,
             (LopHocHocVien.NgayKetThuc.is_(None))
             | (LopHocHocVien.NgayKetThuc > now),
@@ -409,6 +624,7 @@ def assignment_roster(
         .join(LopHocHocVien, LopHocHocVien.HocVienId == NguoiDung.NguoiDungId)
         .filter(
             LopHocHocVien.LopHocId == assignment.LopHocId,
+            LopHocHocVien.TrangThaiGhiDanh == "Đang học",
             LopHocHocVien.NgayThamGia <= local_now(),
             (LopHocHocVien.NgayKetThuc.is_(None))
             | (LopHocHocVien.NgayKetThuc > local_now()),
@@ -661,11 +877,3 @@ def download_attachment(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Tệp không còn tồn tại trên máy chủ.")
     return FileResponse(path, filename=original_name)
-
-
-
-
-
-
-
-
