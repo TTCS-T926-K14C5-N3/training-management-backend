@@ -1164,11 +1164,11 @@ def list_schedules(
             detail="Ngày bắt đầu lọc không được sau ngày kết thúc.",
         )
     query = _accessible_schedule_query(db, current_user)
-    if exclude_completed:
+    if exclude_completed and status_filter is None:
         now = business_now_naive()
         query = query.filter(
+            LichHoc.TrangThai == SCHEDULED,
             or_(
-                LichHoc.TrangThai != SCHEDULED,
                 LichHoc.NgayHoc > now.date(),
                 and_(
                     LichHoc.NgayHoc == now.date(),

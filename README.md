@@ -49,6 +49,8 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_seed_sprint3
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\009_student_profiles.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\010_class_schedules.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_require_schedule_room.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\011_schedule_lesson_link.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_schedule_attendance.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\012_student_enrollment_actions.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_sprint3_class_enrichment.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\013_session_attendance.sql
@@ -57,6 +59,7 @@ sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\016_assignments.
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_attendance.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\017_student_schedule_view.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\018_sprint4_attendance_completion.sql
+sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\018_sprint_4_5_completion.sql
 sqlcmd -f 65001 -S <DB_SERVER> -d <DB_NAME> -E -b -i migrations\020_session_absence_requests.sql
 ```
 
@@ -75,13 +78,17 @@ Học viên cũng được xem lịch trong phạm vi các lớp đã ghi danh.
 `013_sprint3_class_enrichment.sql` cập nhật loại phòng cho luồng lớp học;
 `016_assignments.sql` tạo các bảng bài tập/bài nộp/chấm điểm và quyền bài tập;
 `017_attendance.sql` tạo bảng điểm danh, đơn xin vắng, lịch sử, ngưỡng vắng
-và thông báo. Chạy các migration này trước khi sử dụng các màn hình tương ứng.
+và thông báo. `011_schedule_lesson_link.sql` liên kết buổi học với bài học trong
+chương trình; `012_schedule_attendance.sql` tạo bảng điểm danh theo buổi học.
+`018_sprint_4_5_completion.sql` bổ sung trạng thái ghi danh, ghi chú/lịch sử
+điểm danh theo buổi và thông báo bài tập. Chạy các migration này trước khi sử
+dụng các màn hình tương ứng.
 Học viên, giảng viên và trợ giảng mặc định
 được xem lịch trong phạm vi lớp được phép truy cập; quản lý đào tạo và quản trị
 viên có quyền tạo, cập nhật và hủy buổi học. Chạy migration
 `017_student_schedule_view.sql` để cấp quyền xem lịch cho vai trò học viên trên
 cơ sở dữ liệu hiện có. Migration `018_sprint4_attendance_completion.sql` bổ sung
-liên kết buổi học với lịch, đơn xin phép vắng, nhật ký/thông báo điểm danh và
+liên kết bài học cho lịch, đơn xin phép vắng, nhật ký/thông báo điểm danh và
 chuẩn hóa trạng thái điểm danh.
 `020_session_absence_requests.sql` bổ sung các bảng lưu đơn xin phép theo buổi
 học, nhật ký cập nhật điểm danh khi duyệt đơn và thông báo kết quả; migration

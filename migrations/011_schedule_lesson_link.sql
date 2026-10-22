@@ -4,13 +4,17 @@ BEGIN TRY
 
     IF COL_LENGTH(N'dbo.LichHoc', N'BuoiHocId') IS NULL
     BEGIN
-        ALTER TABLE dbo.LichHoc ADD BuoiHocId INT NULL;
-        ALTER TABLE dbo.LichHoc
-            ADD CONSTRAINT FK_LichHoc_BuoiHoc
-            FOREIGN KEY (BuoiHocId) REFERENCES dbo.BuoiHoc(BuoiHocId);
-        CREATE UNIQUE INDEX UX_LichHoc_LopHoc_BuoiHoc_DaLenLich
-            ON dbo.LichHoc(LopHocId, BuoiHocId)
-            WHERE BuoiHocId IS NOT NULL AND TrangThai = N'Đã lên lịch';
+        EXEC sys.sp_executesql
+            N'ALTER TABLE dbo.LichHoc ADD BuoiHocId INT NULL;';
+        EXEC sys.sp_executesql
+            N'ALTER TABLE dbo.LichHoc
+                ADD CONSTRAINT FK_LichHoc_BuoiHoc
+                FOREIGN KEY (BuoiHocId) REFERENCES dbo.BuoiHoc(BuoiHocId);';
+        EXEC sys.sp_executesql
+            N'CREATE UNIQUE INDEX UX_LichHoc_LopHoc_BuoiHoc_DaLenLich
+                ON dbo.LichHoc(LopHocId, BuoiHocId)
+                WHERE BuoiHocId IS NOT NULL
+                  AND TrangThai = N''Đã lên lịch'';';
     END;
 
     COMMIT TRANSACTION;

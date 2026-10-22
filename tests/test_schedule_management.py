@@ -2234,6 +2234,23 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
         for days_ago in (1, 2)
     ]
     db.add_all(completed_rows)
+    cancelled_row = LichHoc(
+        LopHocId=class_record.LopHocId,
+        MonHocId=subject.MonHocId,
+        NgayHoc=now.date() + timedelta(days=1),
+        GioBatDau=time(9),
+        GioKetThuc=time(10),
+        PhongHocId=room.PhongHocId,
+        GiangVienId=teacher.NguoiDungId,
+        TrangThai="Đã hủy",
+        NgayTao=now,
+        NguoiTaoId=teacher.NguoiDungId,
+        NgayCapNhat=now,
+        NguoiCapNhatId=teacher.NguoiDungId,
+        NgayHuy=now,
+        NguoiHuyId=teacher.NguoiDungId,
+    )
+    db.add(cancelled_row)
     db.commit()
 
     current_schedules = list_schedules(
@@ -2250,6 +2267,14 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
         current_user=teacher,
         db=db,
     )
+    cancelled_archive = list_schedules(
+        None,
+        None,
+        "Đã hủy",
+        teacher,
+        db,
+        exclude_completed=True,
+    )
     second_page = list_completed_schedules(
         page=2,
         page_size=1,
@@ -2264,6 +2289,9 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
     assert len(first_page["items"]) == len(second_page["items"]) == 1
     assert first_page["items"][0]["trangThai"] == "Đã diễn ra"
     assert first_page["items"][0]["lichHocId"] != second_page["items"][0]["lichHocId"]
+    assert [item["lichHocId"] for item in cancelled_archive] == [
+        cancelled_row.LichHocId
+    ]
 
 
 def test_student_completed_history_includes_past_assigned_inactive_classes(
