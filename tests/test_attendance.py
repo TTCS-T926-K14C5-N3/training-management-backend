@@ -32,6 +32,7 @@ from app.routers.attendance import (
     update_threshold,
     router as attendance_router,
 )
+from app.main import app
 
 
 @pytest.fixture
@@ -173,3 +174,8 @@ def test_attendance_routes_cover_workflows():
     assert "/attendance/my-history" in paths
     assert "/attendance/classes/{class_id}/export" in paths
     assert "/attendance/notifications" in paths
+
+    app_paths = set(app.openapi()["paths"])
+    assert "/attendance/absence-requests" in app_paths
+    assert "/attendance/sessions/absence-requests" in app_paths
+    assert "/attendance/sessions/absence-requests/with-evidence" in app_paths

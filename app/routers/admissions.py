@@ -158,7 +158,7 @@ def _status_history_payload(db: Session, lead_id: int) -> list[dict]:
     history = (
         db.query(LeadStatusHistory)
         .filter(LeadStatusHistory.LeadId == lead_id)
-        .order_by(LeadStatusHistory.ThoiDiem, LeadStatusHistory.LichSuId)
+        .order_by(LeadStatusHistory.ThoiDiem.desc(), LeadStatusHistory.LichSuId.desc())
         .all()
     )
     user_ids = {entry.NguoiThucHienId for entry in history}
@@ -286,10 +286,28 @@ def _get_visible_lead(
         )
         .first()
     )
-    if ADMISSIONS_ROLE_ID not in roles or assigned is None:
+    if ADMISSIONS_ROLE_ID not in roles:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Không tìm thấy khách hàng tiềm năng.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền truy cập khách hàng tiềm năng này.",
+        )
+    if assigned is None:
+        was_previously_assigned = (
+            db.query(LeadAssignmentHistory.PhanCongId)
+            .filter(
+                LeadAssignmentHistory.LeadId == lead_id,
+            )
+            .first()
+            is not None
+        )
+        if was_previously_assigned:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Không tìm thấy khách hàng tiềm năng.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn chưa được phân công phụ trách khách hàng tiềm năng này.",
         )
     return lead
 
@@ -438,11 +456,22 @@ def public_program_options(db: Session = Depends(get_db)):
 )
 def submit_public_lead(
     request: PublicLeadCreate,
-    http_request: Request,
+    http_request: Request = None,
     db: Session = Depends(get_db),
 ):
+    # A populated honeypot receives the normal response but is never persisted.
+    if request.website:
+        return {
+            "message": THANK_YOU_MESSAGE,
+            "responseTimeAssurance": "Trong vòng 1 ngày làm việc.",
+        }
+
     now = monotonic_time.monotonic()
-    client_ip = http_request.client.host if http_request.client else "unknown"
+    client_ip = (
+        http_request.client.host
+        if http_request is not None and http_request.client
+        else "unknown"
+    )
     recent = [
         submitted_at
         for submitted_at in _public_submissions.get(client_ip, [])
@@ -457,12 +486,6 @@ def submit_public_lead(
     recent.append(now)
     _public_submissions[client_ip] = recent
 
-    # A populated honeypot receives the normal response but is never persisted.
-    if request.website:
-        return {
-            "message": THANK_YOU_MESSAGE,
-            "responseTimeAssurance": "Trong vòng 1 ngày làm việc.",
-        }
     lead = _create_lead(
         db,
         name=request.ho_ten,
@@ -529,7 +552,10 @@ def list_leads(
     current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
     unassigned: bool = False,
+    lead_status: str | None = None,
 ):
+    if not isinstance(status_filter, str):
+        status_filter = lead_status
     roles = user_role_ids(db, current_user.NguoiDungId)
     is_manager = (
         user_is_admin(db, current_user.NguoiDungId)
@@ -1119,3 +1145,15 @@ def replace_lead_assignments(
         "consultantIds": sorted(desired_ids),
         "assignmentHistory": get_lead_assignments(lead_id, current_user, db),
     }
+
+
+def _active_assignment_filter():
+    return LeadAssignmentHistory.DangPhanCong == True
+
+
+def create_public_lead(request: PublicLeadCreate, db: Session):
+    return submit_public_lead(request, db=db)
+
+
+assign_lead = replace_lead_assignments
+create_interaction = create_lead_interaction

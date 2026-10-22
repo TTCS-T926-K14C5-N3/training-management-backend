@@ -1,13 +1,13 @@
-from sqlalchemy import false
+from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
 
 from app.models.diem import Diem
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
+from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
-from app.models.mon_hoc import MonHoc
 from app.models.vai_tro import VaiTro
 
 
@@ -15,6 +15,7 @@ ADMIN_ROLE_ID = 8
 TRAINING_MANAGER_ROLE_ID = 7
 INSTRUCTOR_ROLE_ID = 3
 ASSISTANT_ROLE_ID = 4
+TEACHING_ASSISTANT_ROLE_ID = ASSISTANT_ROLE_ID
 TEACHING_ROLE_IDS = {INSTRUCTOR_ROLE_ID, ASSISTANT_ROLE_ID}
 STUDENT_ROLE_ID = 2
 ADMIN_ROLE_NAMES = {
@@ -22,9 +23,6 @@ ADMIN_ROLE_NAMES = {
     "quản trị hệ thống",
     "quản trị viên hệ thống",
 }
-
-# Exact status strings persisted by the user writers (auth_service,
-# user_import_service) and guarded by the CK_NguoiDung_TrangThai constraint.
 ACTIVE_USER_STATUS = "HoatDong"
 LOCKED_USER_STATUS = "BiKhoa"
 ACTIVE_CLASS_STATUSES = {"Chuẩn bị", "Đang học", "Đang hoạt động"}
@@ -47,10 +45,29 @@ def user_is_admin(db: Session, user_id: int) -> bool:
         .all()
     )
     return any(
-        role_id == ADMIN_ROLE_ID
-        or role_name.strip().casefold() in ADMIN_ROLE_NAMES
+        role_id == ADMIN_ROLE_ID or role_name.strip().casefold() in ADMIN_ROLE_NAMES
         for role_id, role_name in roles
     )
+
+
+def has_schedule_wide_scope(
+    db: Session,
+    user_id: int,
+    role_ids: set[int],
+) -> bool:
+    if TRAINING_MANAGER_ROLE_ID in role_ids or user_is_admin(db, user_id):
+        return True
+    role_names = (
+        name.strip().casefold()
+        for (name,) in db.query(VaiTro.TenVaiTro)
+        .join(
+            NguoiDungVaiTro,
+            NguoiDungVaiTro.VaiTroId == VaiTro.VaiTroId,
+        )
+        .filter(NguoiDungVaiTro.NguoiDungId == user_id)
+        .all()
+    )
+    return any(name in ADMIN_ROLE_NAMES for name in role_names)
 
 
 def accessible_classes(
@@ -64,21 +81,26 @@ def accessible_classes(
     if not include_inactive:
         query = query.filter(LopHoc.TrangThai.in_(ACTIVE_CLASS_STATUSES))
 
-    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
+    if has_schedule_wide_scope(db, user.NguoiDungId, roles):
         return query.order_by(LopHoc.MaLop).all()
+
     if roles.intersection(TEACHING_ROLE_IDS):
-        assigned_subject_class_ids = (
-            db.query(LopHocMonHocGiangVien.LopHocId)
-            .filter(LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId)
+        teaching_classes = db.query(
+            LopHocMonHocGiangVien.LopHocId
+        ).filter(
+            LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId
         )
-        return (
-            query.filter(
-                (LopHoc.GiangVienId == user.NguoiDungId)
-                | LopHoc.LopHocId.in_(assigned_subject_class_ids)
+        if INSTRUCTOR_ROLE_ID in roles:
+            query = query.filter(
+                or_(
+                    LopHoc.GiangVienId == user.NguoiDungId,
+                    LopHoc.LopHocId.in_(teaching_classes),
+                )
             )
-            .order_by(LopHoc.MaLop)
-            .all()
-        )
+        else:
+            query = query.filter(LopHoc.LopHocId.in_(teaching_classes))
+        return query.order_by(LopHoc.MaLop).all()
+
     if STUDENT_ROLE_ID in roles:
         return (
             query.join(
@@ -98,10 +120,12 @@ def can_access_class(
     lop_hoc: LopHoc,
 ) -> bool:
     roles = user_role_ids(db, user.NguoiDungId)
-    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
+    if has_schedule_wide_scope(db, user.NguoiDungId, roles):
+        return True
+    if INSTRUCTOR_ROLE_ID in roles and lop_hoc.GiangVienId == user.NguoiDungId:
         return True
     if roles.intersection(TEACHING_ROLE_IDS):
-        return lop_hoc.GiangVienId == user.NguoiDungId or (
+        return (
             db.query(LopHocMonHocGiangVien)
             .filter(
                 LopHocMonHocGiangVien.LopHocId == lop_hoc.LopHocId,
@@ -127,7 +151,7 @@ def accessible_grades_query(db: Session, user: NguoiDung):
     roles = user_role_ids(db, user.NguoiDungId)
     query = db.query(Diem)
 
-    if user_is_admin(db, user.NguoiDungId) or TRAINING_MANAGER_ROLE_ID in roles:
+    if has_schedule_wide_scope(db, user.NguoiDungId, roles):
         return query
     if roles.intersection(TEACHING_ROLE_IDS):
         assigned_class_ids = db.query(LopHoc.LopHocId).filter(
@@ -205,8 +229,14 @@ def ensure_active_teaching_role(
         .first()
     )
     if teacher is None or required_role_id not in user_role_ids(db, user_id):
-        role_name = "giảng viên chính" if required_role_id == INSTRUCTOR_ROLE_ID else "trợ giảng"
-        raise ValueError(f"Tài khoản không có vai trò {role_name} hoặc chưa hoạt động.")
+        role_name = (
+            "giảng viên chính"
+            if required_role_id == INSTRUCTOR_ROLE_ID
+            else "trợ giảng"
+        )
+        raise ValueError(
+            f"Tài khoản không có vai trò {role_name} hoặc chưa hoạt động."
+        )
     return teacher
 
 
@@ -233,33 +263,21 @@ def ensure_active_subjects(db: Session, subject_ids: list[int]) -> list[MonHoc]:
 def build_prerequisite_map(
     items: list[tuple[int, int | None]],
 ) -> dict[int, int]:
-    """Kiểm tra quan hệ môn tiên quyết của một chương trình.
-
-    `items` là danh sách (mon_hoc_id, mon_tien_quyet_id) của chương trình.
-    Trả về map mon_hoc_id -> mon_tien_quyet_id cho các môn có tiên quyết.
-
-    Raise ValueError khi:
-    - môn học là tiên quyết của chính nó
-    - môn tiên quyết không thuộc cùng chương trình
-    - quan hệ tiên quyết tạo vòng lặp
-    """
-
+    """Validate prerequisite references and return the subject-to-prerequisite map."""
     requested_subject_ids = {mon_hoc_id for mon_hoc_id, _ in items}
-
-    for mon_hoc_id, mon_tien_quyet_id in items:
-        if mon_tien_quyet_id is None:
+    for mon_hoc_id, prerequisite_id in items:
+        if prerequisite_id is None:
             continue
-        if mon_tien_quyet_id == mon_hoc_id:
+        if prerequisite_id == mon_hoc_id:
             raise ValueError("Môn học không thể là tiên quyết của chính nó.")
-        if mon_tien_quyet_id not in requested_subject_ids:
+        if prerequisite_id not in requested_subject_ids:
             raise ValueError("Môn tiên quyết phải thuộc cùng chương trình.")
 
     prerequisite_by_subject = {
-        mon_hoc_id: mon_tien_quyet_id
-        for mon_hoc_id, mon_tien_quyet_id in items
-        if mon_tien_quyet_id is not None
+        mon_hoc_id: prerequisite_id
+        for mon_hoc_id, prerequisite_id in items
+        if prerequisite_id is not None
     }
-
     for subject_id in requested_subject_ids:
         seen = set()
         cursor = subject_id
@@ -268,5 +286,4 @@ def build_prerequisite_map(
             if cursor in seen or cursor == subject_id:
                 raise ValueError("Quan hệ môn tiên quyết không được tạo vòng lặp.")
             seen.add(cursor)
-
     return prerequisite_by_subject
