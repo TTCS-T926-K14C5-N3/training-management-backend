@@ -279,7 +279,7 @@ def test_lead_workflow_assignment_scope_history_and_interactions(db: Session):
     assert visible[0]["nguoiPhuTrach"][0]["nguoiDungId"] == consultant.NguoiDungId
     assert visible[0]["lichSuTrangThai"][0]["trangThaiMoi"] == "Đã liên hệ"
     assert visible[0]["tuongTacs"][0]["noiDung"] == "Đã trao đổi thông tin"
-    assert db.query(AdmissionsLeadStatusHistory).count() == 1
+    assert db.query(AdmissionsLeadStatusHistory).count() == 2
     assert db.query(AdmissionsLeadInteraction).count() == 1
 
 

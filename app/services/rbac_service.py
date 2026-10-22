@@ -9,7 +9,7 @@ from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 
 ROLE_NAMES = {
     1: ("Khách", "Người dùng chưa đăng nhập."),
-    2: ("Sinh viên", "Người học trong hệ thống."),
+    2: ("Học viên", "Người học trong hệ thống."),
     3: ("Giảng viên", "Phụ trách giảng dạy và nhập điểm."),
     4: ("Trợ giảng", "Hỗ trợ hoạt động giảng dạy."),
     5: ("Tuyển sinh", "Quản lý công tác tuyển sinh."),
@@ -25,6 +25,11 @@ PERMISSION_CATALOG = (
     ("USER_LOCK", "Khóa người dùng", "Khóa tài khoản người dùng."),
     ("USER_UNLOCK", "Mở khóa người dùng", "Mở khóa tài khoản người dùng."),
     ("USER_DELETE", "Xóa người dùng", "Xóa tài khoản người dùng."),
+    (
+        "STUDENT_PROFILE_UPDATE",
+        "Sửa hồ sơ học viên",
+        "Cập nhật thông tin cá nhân và ghi chú hồ sơ học viên.",
+    ),
     ("ROLE_VIEW", "Xem vai trò và quyền", "Xem cấu hình vai trò và quyền."),
     ("ROLE_UPDATE", "Cấu hình vai trò và quyền", "Gán quyền cho vai trò và vai trò cho người dùng."),
     ("ROLE_DELETE", "Thu hồi vai trò", "Thu hồi vai trò khỏi người dùng."),
@@ -42,11 +47,6 @@ PERMISSION_CATALOG = (
     ("CLASS_CREATE", "Tạo lớp học", "Tạo lớp học."),
     ("CLASS_UPDATE", "Sửa lớp học", "Cập nhật lớp học."),
     ("CLASS_DELETE", "Xóa lớp học", "Xóa lớp học."),
-    (
-        "STUDENT_PROFILE_UPDATE",
-        "Sửa hồ sơ học viên",
-        "Cập nhật thông tin hồ sơ học viên.",
-    ),
     ("QUAN_LY_LOP", "Truy cập quản lý lớp", "Truy cập khu vực quản lý lớp."),
     ("SCHEDULE_MANAGE", "Quản lý thời khóa biểu", "Tạo và cập nhật các buổi học."),
     ("SCHEDULE_VIEW", "Xem lịch học", "Xem buổi học và lịch sử thay đổi."),
@@ -59,6 +59,10 @@ PERMISSION_CATALOG = (
     ),
     ("ATTENDANCE_VIEW", "Xem điểm danh", "Xem danh sách điểm danh buổi học."),
     ("ATTENDANCE_UPDATE", "Cập nhật điểm danh", "Ghi nhận hoặc sửa điểm danh."),
+    ("ASSIGNMENT_VIEW", "Xem bài tập", "Xem bài tập và trạng thái nộp bài."),
+    ("ASSIGNMENT_CREATE", "Quản lý bài tập", "Tạo và giao bài tập cho lớp."),
+    ("ASSIGNMENT_SUBMIT", "Nộp bài tập", "Nộp và cập nhật bài làm."),
+    ("ASSIGNMENT_GRADE", "Chấm bài tập", "Xem danh sách bài nộp và chấm bài."),
     ("CURRICULUM_VIEW", "Xem danh mục đào tạo", "Xem môn học và cấu trúc chương trình."),
     ("CURRICULUM_CREATE", "Tạo danh mục đào tạo", "Tạo môn học trong danh mục đào tạo."),
     ("CURRICULUM_UPDATE", "Sửa danh mục đào tạo", "Sửa môn học và cấu trúc chương trình."),
@@ -72,7 +76,14 @@ PERMISSION_CATALOG = (
 
 DEFAULT_ROLE_PERMISSIONS = {
     1: (),
-    2: ("GRADE_VIEW", "TUITION_VIEW", "SCHEDULE_VIEW", "ATTENDANCE_VIEW"),
+    2: (
+        "GRADE_VIEW",
+        "TUITION_VIEW",
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_SUBMIT",
+    ),
     3: (
         "GRADE_VIEW",
         "GRADE_CREATE",
@@ -80,10 +91,21 @@ DEFAULT_ROLE_PERMISSIONS = {
         "QUAN_LY_DIEM",
         "CLASS_VIEW",
         "SCHEDULE_VIEW",
+        "CURRICULUM_VIEW",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
         "ATTENDANCE_VIEW",
         "ATTENDANCE_UPDATE",
     ),
-    4: ("SCHEDULE_VIEW", "ATTENDANCE_VIEW", "ATTENDANCE_UPDATE"),
+    4: (
+        "SCHEDULE_VIEW",
+        "ATTENDANCE_VIEW",
+        "ATTENDANCE_UPDATE",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
+    ),
     5: (
         "USER_VIEW",
         "USER_CREATE",
@@ -95,6 +117,7 @@ DEFAULT_ROLE_PERMISSIONS = {
     6: ("TUITION_VIEW", "TUITION_CREATE", "TUITION_UPDATE", "QUAN_LY_HOC_PHI"),
     7: (
         "USER_VIEW",
+        "STUDENT_PROFILE_UPDATE",
         "ROLE_VIEW",
         "GRADE_VIEW",
         "TUITION_VIEW",
@@ -103,14 +126,16 @@ DEFAULT_ROLE_PERMISSIONS = {
         "CLASS_UPDATE",
         "CLASS_DELETE",
         "QUAN_LY_LOP",
-        "STUDENT_PROFILE_UPDATE",
-        "SCHEDULE_MANAGE",
         "SCHEDULE_VIEW",
         "SCHEDULE_CREATE",
         "SCHEDULE_UPDATE",
-        "SCHEDULE_OVERRIDE",
         "ATTENDANCE_VIEW",
+        "SCHEDULE_MANAGE",
+        "SCHEDULE_OVERRIDE",
         "ATTENDANCE_UPDATE",
+        "ASSIGNMENT_VIEW",
+        "ASSIGNMENT_CREATE",
+        "ASSIGNMENT_GRADE",
         "CURRICULUM_VIEW",
         "CURRICULUM_CREATE",
         "CURRICULUM_UPDATE",
@@ -120,6 +145,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "LEAD_UPDATE",
         "LEAD_DELETE",
         "LEAD_ASSIGN",
+        "ASSIGNMENT_SUBMIT",
     ),
     8: tuple(code for code, _name, _description in PERMISSION_CATALOG),
 }
@@ -128,8 +154,8 @@ DEFAULT_ROLE_PERMISSIONS = {
 def initialize_role_permissions(db: Session) -> None:
     """Create the eight system roles and permission catalog if they are absent."""
     existing_roles = {
-        role_id
-        for (role_id,) in db.query(VaiTro.VaiTroId)
+        role.VaiTroId: role
+        for role in db.query(VaiTro)
         .filter(VaiTro.VaiTroId.between(1, 8))
         .all()
     }
@@ -156,6 +182,11 @@ def initialize_role_permissions(db: Session) -> None:
                 )
         finally:
             db.execute(text("SET IDENTITY_INSERT dbo.VaiTro OFF"))
+
+    for role_id, (name, description) in ROLE_NAMES.items():
+        role = existing_roles.get(role_id)
+        if role is not None:
+            role.TenVaiTro = name
 
     permissions_by_code = {
         permission.MaQuyen: permission
@@ -263,26 +294,35 @@ def replace_role_permissions(
         .filter(Quyen.MaQuyen.in_(requested_codes))
         .all()
     }
+    missing_codes = requested_codes - set(permissions)
+    if missing_codes:
+        raise ValueError(
+            f"Quyền chưa được khởi tạo: {', '.join(sorted(missing_codes))}."
+        )
+
     current_links = (
         db.query(VaiTroQuyen)
         .filter(VaiTroQuyen.VaiTroId == role_id)
         .all()
     )
-    for link in current_links:
-        db.delete(link)
 
-    for code in sorted(requested_codes):
-        permission = permissions.get(code)
-        if permission is None:
-            raise ValueError(f"Quyền {code} chưa được khởi tạo.")
-        db.add(
-            VaiTroQuyen(
-                VaiTroId=role_id,
-                QuyenId=permission.QuyenId,
+    try:
+        for link in current_links:
+            db.delete(link)
+
+        for code in sorted(requested_codes):
+            db.add(
+                VaiTroQuyen(
+                    VaiTroId=role_id,
+                    QuyenId=permissions[code].QuyenId,
+                )
             )
-        )
 
-    db.commit()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     return [
         {
             "quyenId": permissions[code].QuyenId,

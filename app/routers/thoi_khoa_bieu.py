@@ -89,7 +89,7 @@ def generate_thoi_khoa_bieu(
     current_date = request.ngay_bat_dau
     buoi_da_sinh = 0
     danh_sach_buoi_hoc = []
-    
+
     # Tập hợp các ngày nghỉ dạng set để tra cứu nhanh
     ngay_nghi_set = set(request.danh_sach_ngay_nghi or [])
 
@@ -98,7 +98,7 @@ def generate_thoi_khoa_bieu(
         # Trong Python: isoweekday() trả về 1=Thứ 2, ..., 7=Chủ Nhật.
         # Nếu hệ thống tính Thứ 2=2, Chủ Nhật=8 thì cộng thêm 1.
         weekday = current_date.isoweekday() + 1
-        
+
         # Nếu ngày hiện tại nằm trong thứ xếp lịch VÀ không phải ngày nghỉ
         if weekday in request.thu_trong_tuan and current_date not in ngay_nghi_set:
             buoi_hoc = ThoiKhoaBieu(
@@ -142,7 +142,7 @@ def preview_thoi_khoa_bieu(request: SinhThoiKhoaBieuRequest):
 
     while buoi_da_sinh < request.tong_so_buoi:
         weekday = current_date.isoweekday() + 1
-        
+
         if weekday in request.thu_trong_tuan and current_date not in ngay_nghi_set:
             buoi_da_sinh += 1
             preview_list.append(

@@ -1,17 +1,10 @@
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    Unicode,
-    String,
-)
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Unicode
 
 from app.database import Base
+from app.models.lead_activity import LeadInteraction, LeadStatusHistory
 
 
-class AdmissionsLead(Base):
+class Lead(Base):
     __tablename__ = "TuyenSinh_Lead"
 
     LeadId = Column(Integer, primary_key=True, autoincrement=True)
@@ -20,12 +13,13 @@ class AdmissionsLead(Base):
     Email = Column(String(255), nullable=True)
     Nguon = Column(Unicode(100), nullable=False)
     GhiChu = Column(Unicode(1000), nullable=True)
+    LyDoTuChoi = Column(Unicode(500), nullable=True)
     ChuongTrinhId = Column(
         Integer,
         ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),
         nullable=True,
     )
-    TrangThai = Column(Unicode(30), nullable=False)
+    TrangThai = Column(Unicode(30), nullable=False, default="Mới")
     NgayTao = Column(DateTime, nullable=False)
     NgayCapNhat = Column(DateTime, nullable=False)
     NguoiTaoId = Column(
@@ -33,10 +27,9 @@ class AdmissionsLead(Base):
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=True,
     )
-    LyDoTuChoi = Column(Unicode(500), nullable=True)
 
 
-class AdmissionsLeadAssignment(Base):
+class LeadAssignmentHistory(Base):
     __tablename__ = "TuyenSinh_Lead_PhanCong"
 
     PhanCongId = Column(Integer, primary_key=True, autoincrement=True)
@@ -60,42 +53,35 @@ class AdmissionsLeadAssignment(Base):
     DangPhanCong = Column(Boolean, nullable=False, default=True)
 
 
-class AdmissionsLeadStatusHistory(Base):
-    __tablename__ = "TuyenSinh_Lead_LichSuTrangThai"
+class LeadConversion(Base):
+    __tablename__ = "TuyenSinh_Lead_ChuyenDoi"
 
-    LichSuId = Column(Integer, primary_key=True, autoincrement=True)
     LeadId = Column(
         Integer,
         ForeignKey("TuyenSinh_Lead.LeadId"),
-        nullable=False,
+        primary_key=True,
     )
-    TrangThaiCu = Column(Unicode(30), nullable=True)
-    TrangThaiMoi = Column(Unicode(30), nullable=False)
-    LyDo = Column(Unicode(500), nullable=True)
-    NguoiThucHienId = Column(
+    NguoiDungId = Column(
+        Integer,
+        ForeignKey("NguoiDung.NguoiDungId"),
+        nullable=False,
+        unique=True,
+    )
+    MaHocVien = Column(String(20), nullable=False, unique=True)
+    ChuongTrinhId = Column(
+        Integer,
+        ForeignKey("ChuongTrinhDaoTao.ChuongTrinhId"),
+        nullable=True,
+    )
+    NgayNhapHoc = Column(DateTime, nullable=False)
+    NguoiChuyenDoiId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),
         nullable=False,
     )
-    ThoiDiem = Column(DateTime, nullable=False)
 
 
-class AdmissionsLeadInteraction(Base):
-    __tablename__ = "TuyenSinh_Lead_TuongTac"
-
-    TuongTacId = Column(Integer, primary_key=True, autoincrement=True)
-    LeadId = Column(
-        Integer,
-        ForeignKey("TuyenSinh_Lead.LeadId"),
-        nullable=False,
-    )
-    Loai = Column(Unicode(20), nullable=False)
-    NoiDung = Column(Unicode(2000), nullable=False)
-    ThoiDiem = Column(DateTime, nullable=False)
-    HenGoiLaiLuc = Column(DateTime, nullable=True)
-    NguoiThucHienId = Column(
-        Integer,
-        ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
-    )
-    NgayTao = Column(DateTime, nullable=False)
+AdmissionsLead = Lead
+AdmissionsLeadAssignment = LeadAssignmentHistory
+AdmissionsLeadStatusHistory = LeadStatusHistory
+AdmissionsLeadInteraction = LeadInteraction

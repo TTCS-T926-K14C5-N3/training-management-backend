@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thực hành flex-grow</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="page">
+        <h1>Thực hành thuộc tính flex-grow</h1>
+        <p>Flex Item số 2 có <code>flex-grow: 1</code> nên nhận thêm phần không gian còn trống.</p>
+
+        <section class="flex-container" aria-label="Ví dụ flex-grow gồm 5 item">
+            <div class="item">Item 1</div>
+            <div class="item item-grow">Item 2<br><small>flex-grow: 1</small></div>
+            <div class="item">Item 3</div>
+            <div class="item">Item 4</div>
+            <div class="item">Item 5</div>
+        </section>
+
+        <h2>Thử thay đổi giá trị</h2>
+        <p>Trong file <code>style.css</code>, sửa <code>flex-grow: 1</code> thành <code>flex-grow: 2</code> để Item 2 nhận phần không gian lớn hơn.</p>
+    </main>
+</body>
+</html>

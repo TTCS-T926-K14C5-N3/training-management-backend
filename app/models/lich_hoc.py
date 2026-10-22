@@ -3,11 +3,12 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Time,
-    UniqueConstraint,
     Unicode,
     UnicodeText,
+    text,
 )
 
 from app.database import Base
@@ -15,10 +16,25 @@ from app.database import Base
 
 class LichHoc(Base):
     __tablename__ = "LichHoc"
+    __table_args__ = (
+        Index(
+            "UX_LichHoc_LopHoc_BuoiHoc_DaLenLich",
+            "LopHocId",
+            "BuoiHocId",
+            unique=True,
+            mssql_where=text(
+                "BuoiHocId IS NOT NULL AND TrangThai = N'Đã lên lịch'"
+            ),
+            sqlite_where=text(
+                "BuoiHocId IS NOT NULL AND TrangThai = 'Đã lên lịch'"
+            ),
+        ),
+    )
 
     LichHocId = Column(Integer, primary_key=True, autoincrement=True)
     LopHocId = Column(Integer, ForeignKey("LopHoc.LopHocId"), nullable=False)
     MonHocId = Column(Integer, ForeignKey("MonHoc.MonHocId"), nullable=False)
+    BuoiHocId = Column(Integer, ForeignKey("BuoiHoc.BuoiHocId"), nullable=True)
     BaiHocId = Column(Integer, ForeignKey("BuoiHoc.BuoiHocId"), nullable=True)
     NgayHoc = Column(Date, nullable=False)
     GioBatDau = Column(Time, nullable=False)

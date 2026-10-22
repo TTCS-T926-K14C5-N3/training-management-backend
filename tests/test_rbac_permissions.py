@@ -2,13 +2,20 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.core.security import require_permission
+from app.models.quyen import Quyen
+from app.models.vai_tro import VaiTro
 from app.models.vai_tro_quyen import VaiTroQuyen
 from app.services.rbac_service import (
     DEFAULT_ROLE_PERMISSIONS,
     PERMISSION_CATALOG,
+    ROLE_NAMES,
+    initialize_role_permissions,
 )
+from app.services.user_import_service import ROLE_ID_TO_NAME, parse_role
 
 
 class FakePermissionResult:
@@ -20,22 +27,37 @@ class FakePermissionResult:
 
 
 class FakePermissionDatabase:
-    def __init__(self, role_id: int):
+    def __init__(self, role_id: int, role_name: str = ""):
         self.role_id = role_id
+        self.role_name = role_name
 
-    def execute(self, _query, parameters):
-        granted_codes = set(DEFAULT_ROLE_PERMISSIONS[self.role_id])
+    def execute(self, query, parameters):
+        granted_codes = set(DEFAULT_ROLE_PERMISSIONS.get(self.role_id, ()))
+        sql = str(query).lower()
+        is_admin_clause = (
+            (self.role_id == 8 and "vaitroid = 8" in sql)
+            or (
+                self.role_name.strip().casefold()
+                in {
+                    "admin",
+                    "quản trị hệ thống",
+                    "quản trị viên hệ thống",
+                }
+                and "quản trị viên hệ thống" in sql
+            )
+        )
         return FakePermissionResult(
-            parameters["ma_quyen"] in granted_codes
+            is_admin_clause or parameters["ma_quyen"] in granted_codes
         )
 
 
 @pytest.mark.parametrize(
     ("role_id", "permission_code"),
     [
-        (2, "SCHEDULE_VIEW"),
         (3, "GRADE_UPDATE"),
+        (7, "SCHEDULE_UPDATE"),
         (6, "TUITION_UPDATE"),
+        (7, "STUDENT_PROFILE_UPDATE"),
         (8, "ROLE_UPDATE"),
     ],
 )
@@ -51,15 +73,40 @@ def test_expected_role_permissions_are_allowed(role_id, permission_code):
     assert result is user
 
 
+def test_admin_role_is_allowed_even_when_permission_is_not_seeded():
+    check_permission = require_permission("PERMISSION_MISSING_FROM_DATABASE")
+    user = SimpleNamespace(NguoiDungId=8)
+
+    result = check_permission(
+        current_user=user,
+        db=FakePermissionDatabase(8),
+    )
+
+    assert result is user
+
+
+def test_admin_name_is_allowed_when_role_id_is_not_eight():
+    check_permission = require_permission("PERMISSION_MISSING_FROM_DATABASE")
+    user = SimpleNamespace(NguoiDungId=99)
+
+    result = check_permission(
+        current_user=user,
+        db=FakePermissionDatabase(99, "Quản trị hệ thống"),
+    )
+
+    assert result is user
+
+
 @pytest.mark.parametrize(
     ("role_id", "permission_code"),
     [
         (3, "TUITION_UPDATE"),
+        (3, "SCHEDULE_UPDATE"),
+        (4, "SCHEDULE_UPDATE"),
         (6, "GRADE_UPDATE"),
         (4, "GRADE_VIEW"),
         (2, "USER_DELETE"),
-        (2, "SCHEDULE_CREATE"),
-        (2, "SCHEDULE_UPDATE"),
+        (5, "STUDENT_PROFILE_UPDATE"),
     ],
 )
 def test_missing_role_permissions_are_denied(role_id, permission_code):
@@ -84,35 +131,6 @@ def test_catalog_contains_all_eight_business_role_defaults():
     assert "TUITION_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[3]
     assert "GRADE_UPDATE" not in DEFAULT_ROLE_PERMISSIONS[6]
     assert "GRADE_VIEW" not in DEFAULT_ROLE_PERMISSIONS[4]
-    assert "SCHEDULE_MANAGE" not in DEFAULT_ROLE_PERMISSIONS[1]
-    assert "SCHEDULE_VIEW" in DEFAULT_ROLE_PERMISSIONS[2]
-    assert not {
-        "SCHEDULE_CREATE",
-        "SCHEDULE_UPDATE",
-    } & set(DEFAULT_ROLE_PERMISSIONS[2])
-    assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[7]
-    assert "SCHEDULE_MANAGE" in DEFAULT_ROLE_PERMISSIONS[8]
-    assert not {
-        "SCHEDULE_CREATE",
-        "SCHEDULE_UPDATE",
-    } & set(DEFAULT_ROLE_PERMISSIONS[3])
-    assert {
-        "SCHEDULE_VIEW",
-        "ATTENDANCE_VIEW",
-        "ATTENDANCE_UPDATE",
-    } <= set(DEFAULT_ROLE_PERMISSIONS[3])
-    assert {
-        "SCHEDULE_VIEW",
-        "ATTENDANCE_VIEW",
-        "ATTENDANCE_UPDATE",
-    } <= set(DEFAULT_ROLE_PERMISSIONS[4])
-    assert {
-        "SCHEDULE_VIEW",
-        "SCHEDULE_CREATE",
-        "SCHEDULE_UPDATE",
-        "ATTENDANCE_VIEW",
-        "ATTENDANCE_UPDATE",
-    } <= set(DEFAULT_ROLE_PERMISSIONS[7])
     assert {
         "GRADE_VIEW",
         "GRADE_CREATE",
@@ -127,6 +145,60 @@ def test_catalog_contains_all_eight_business_role_defaults():
         "CLASS_DELETE",
         "QUAN_LY_LOP",
     } <= set(DEFAULT_ROLE_PERMISSIONS[7])
+    assert "STUDENT_PROFILE_UPDATE" in codes
+    assert "STUDENT_PROFILE_UPDATE" in DEFAULT_ROLE_PERMISSIONS[7]
+
+
+def test_system_role_names_are_canonical_vietnamese_and_used_for_imports():
+    expected_names = {
+        1: "Khách",
+        2: "Học viên",
+        3: "Giảng viên",
+        4: "Trợ giảng",
+        5: "Tuyển sinh",
+        6: "Kế toán",
+        7: "Quản lý đào tạo",
+        8: "Quản trị hệ thống",
+    }
+
+    assert {
+        role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
+    } == expected_names
+    assert ROLE_ID_TO_NAME == expected_names
+    assert parse_role("Học viên") == 2
+    assert parse_role("Sinh viên") == 2
+    assert parse_role("Student") == 2
+    assert parse_role("Quản trị hệ thống") == 8
+    assert parse_role("Admin") == 8
+
+
+def test_rbac_initialization_updates_existing_role_names_to_vietnamese():
+    engine = create_engine("sqlite:///:memory:")
+    VaiTro.__table__.create(engine)
+    Quyen.__table__.create(engine)
+    VaiTroQuyen.__table__.create(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.add_all(
+            VaiTro(VaiTroId=role_id, TenVaiTro=f"Legacy role {role_id}", MoTa="Legacy")
+            for role_id in range(1, 9)
+        )
+        session.commit()
+
+        initialize_role_permissions(session)
+
+        assert {
+            role.VaiTroId: role.TenVaiTro
+            for role in session.query(VaiTro).all()
+        } == {
+            role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
+        }
+    finally:
+        session.close()
+        VaiTroQuyen.__table__.drop(engine)
+        Quyen.__table__.drop(engine)
+        VaiTro.__table__.drop(engine)
+        engine.dispose()
 
 
 def test_role_permission_model_uses_existing_composite_primary_key():

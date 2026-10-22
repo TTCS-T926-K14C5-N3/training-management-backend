@@ -12,12 +12,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.security import get_current_user
 from app.database import Base, get_db
-from app.models.diem_danh import DiemDanh
-from app.models.absence_request import AttendanceAudit, AttendanceNotification
+from app.core.security import get_current_user
+from app.models.diem_danh_buoi_hoc import DiemDanhBuoiHoc, DiemDanhBuoiHocLichSu
+from app.models.attendance import (
+    AbsenceThreshold,
+    AttendanceNotification,
+    AttendanceRecord,
+)
 from app.models.lich_hoc import LichHoc, LichHocLichSu
 from app.models.lich_hoc_thong_bao import LichHocThongBao
+from app.models.chuong_trinh_dao_tao import ChuongTrinhDaoTao
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc import LopHocMonHoc
@@ -26,11 +31,13 @@ from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.phong_hoc import PhongHoc
+from app.models.program_subject import BuoiHoc, ChuongTrinhMonHoc
 from app.models.quyen import Quyen
 from app.models.student_enrollment_action import StudentEnrollmentAction
 from app.models.vai_tro import VaiTro
 from app.models.vai_tro_quyen import VaiTroQuyen
 from app.main import app
+from app.services import attendance_thresholds
 from app.routers import schedules as schedules_router
 from app.routers.schedules import (
     _acquire_schedule_write_lock,
@@ -39,19 +46,24 @@ from app.routers.schedules import (
     create_schedule,
     get_schedule_attendance,
     get_schedule_options,
+    list_schedule_attendance_audit,
     list_completed_schedules,
     list_schedule_history,
+    list_schedule_notifications,
     list_schedules,
+    preview_generated_schedules,
+    generate_schedules,
+    save_schedule_attendance,
     update_schedule,
     update_schedule_attendance,
 )
-from app.routers.attendance import (
-    create_absence_request as create_absence_request_service,
-    decide_absence_request,
+from app.schemas.lich_hoc import (
+    DiemDanhBuoiHocWrite,
+    DiemDanhWrite,
+    LichHocCancel,
+    LichHocGenerate,
+    LichHocWrite,
 )
-
-from app.schemas.lich_hoc import DiemDanhWrite, LichHocCancel, LichHocWrite
-from app.schemas.attendance import AbsenceRequestDecision, AbsenceRequestWrite
 from app.services import business_time
 from app.services import schedule_notifications
 
@@ -336,6 +348,67 @@ def schedule_request(
     return LichHocWrite(**values)
 
 
+def generator_request(
+    class_id: int,
+    subject_id: int,
+    room_id: int | None,
+    teacher_id: int,
+    start_date: date,
+    *,
+    session_count: int = 3,
+    weekdays: list[int] | None = None,
+    holidays: list[date] | None = None,
+) -> LichHocGenerate:
+    return LichHocGenerate(
+        lopHocId=class_id,
+        monHocId=subject_id,
+        ngayBatDau=start_date,
+        thuTrongTuan=weekdays or [start_date.isoweekday()],
+        soBuoi=session_count,
+        gioBatDau=time(9),
+        gioKetThuc=time(10),
+        phongHocId=room_id,
+        giangVienId=teacher_id,
+        ngayNghi=holidays or [],
+    )
+
+
+def setup_curriculum_lessons(
+    db: Session,
+    class_record: LopHoc,
+    subject: MonHoc,
+    lesson_count: int = 5,
+) -> list[BuoiHoc]:
+    program = ChuongTrinhDaoTao(
+        MaChuongTrinh=f"TEST-{class_record.LopHocId}",
+        TenChuongTrinh="Chương trình kiểm thử",
+        TongThoiLuong=lesson_count,
+        HocPhiChuan=0,
+        NgayTao=datetime.now(),
+    )
+    db.add(program)
+    db.flush()
+    class_record.ChuongTrinhId = program.ChuongTrinhId
+    association = ChuongTrinhMonHoc(
+        ChuongTrinhId=program.ChuongTrinhId,
+        MonHocId=subject.MonHocId,
+        ThuTu=1,
+    )
+    db.add(association)
+    db.flush()
+    lessons = [
+        BuoiHoc(
+            ChuongTrinhMonHocId=association.ChuongTrinhMonHocId,
+            SoThuTu=index,
+            ChuDe=f"Bài học {index}",
+        )
+        for index in range(1, lesson_count + 1)
+    ]
+    db.add_all(lessons)
+    db.commit()
+    return lessons
+
+
 def test_schedule_write_rejects_invalid_time_range():
     with pytest.raises(ValidationError, match="Giờ kết thúc phải sau giờ bắt đầu"):
         LichHocWrite(
@@ -502,10 +575,30 @@ def test_create_update_and_persist_schedule_history(db: Session):
 
     assert changed["gioBatDau"] == "11:00"
     assert changed["phongHocId"] == room.PhongHocId
-    history = list_schedule_history(teacher, db)["items"]
-    assert [item["hanhDong"] for item in history] == ["Cập nhật", "Tạo"]
-    assert history[0]["duLieuCu"]["gioBatDau"] == "09:00"
-    assert history[0]["duLieuMoi"]["gioBatDau"] == "11:00"
+    history = list_schedule_history(
+        teacher, db, page=1, page_size=20, search=None, event_type="all"
+    )
+    assert [item["hanhDong"] for item in history["items"]] == ["Cập nhật", "Tạo"]
+    assert history["items"][0]["duLieuCu"]["gioBatDau"] == "09:00"
+    assert history["items"][0]["duLieuMoi"]["gioBatDau"] == "11:00"
+    assert history["total"] == 2
+    updated_events = list_schedule_history(
+        teacher,
+        db,
+        page=1,
+        page_size=20,
+        search="BH-",
+        event_type="date_time",
+    )
+    assert updated_events["total"] == 1
+    assert updated_events["items"][0]["hanhDong"] == "Cập nhật"
+    assert "đã thay đổi" in updated_events["items"][0]["noiDungThongBao"]
+    assert updated_events["items"][0]["trangThaiThongBao"] == {
+        "total": 1,
+        "sent": 1,
+        "failed": 0,
+        "pending": 0,
+    }
 
 
 def test_schedule_history_search_filter_and_pagination(db: Session):
@@ -648,11 +741,11 @@ def test_update_schedule_rejects_any_recorded_attendance_without_changes(
         db,
     )
     db.add(
-        DiemDanh(
+        DiemDanhBuoiHoc(
             LichHocId=schedule["lichHocId"],
             HocVienId=student.NguoiDungId,
             TrangThai="Có mặt",
-            NguoiDiemDanhId=teacher.NguoiDungId,
+            NguoiCapNhatId=teacher.NguoiDungId,
             NgayCapNhat=datetime.now(),
         )
     )
@@ -679,8 +772,8 @@ def test_update_schedule_rejects_any_recorded_attendance_without_changes(
     ).one()
     assert saved_schedule.GioBatDau == time(9)
     assert saved_schedule.GioKetThuc == time(10)
-    assert db.query(DiemDanh).filter(
-        DiemDanh.LichHocId == schedule["lichHocId"]
+    assert db.query(DiemDanhBuoiHoc).filter(
+        DiemDanhBuoiHoc.LichHocId == schedule["lichHocId"]
     ).count() == 1
     history = db.query(LichHocLichSu).filter(
         LichHocLichSu.LichHocId == schedule["lichHocId"]
@@ -788,12 +881,13 @@ def test_schedule_conflict_reports_teacher_and_room_details(db: Session):
     detail = caught.value.detail
     assert {item["loai"] for item in detail["conflicts"]} == {
         "giangVien",
+        "lopHoc",
         "phongHoc",
     }
     assert all(item["maBuoiHoc"] == "BH-000001" for item in detail["conflicts"])
 
 
-def test_schedule_conflict_includes_primary_and_assistant_instructors(db: Session):
+def test_schedule_conflict_ignores_unselected_class_instructors(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     assistant = add_user(db, 4, 4, "Trợ giảng B")
     other_teacher = add_user(db, 6, 3, "Giảng viên C")
@@ -836,25 +930,94 @@ def test_schedule_conflict_includes_primary_and_assistant_instructors(db: Sessio
         db,
     )
 
-    with pytest.raises(HTTPException) as caught:
-        create_schedule(
-            schedule_request(
-                class_record.LopHocId,
-                subject.MonHocId,
-                other_room.PhongHocId,
-                other_teacher.NguoiDungId,
-                day=day,
-            ),
-            teacher,
-            db,
-        )
+    request = schedule_request(
+        class_record.LopHocId,
+        subject.MonHocId,
+        other_room.PhongHocId,
+        other_teacher.NguoiDungId,
+        day=day,
+    )
+    preview = check_schedule_conflicts(
+        request,
+        exclude_schedule_id=None,
+        current_user=teacher,
+        db=db,
+    )
 
+    assert preview["hasConflicts"] is True
+    assert {item["loai"] for item in preview["conflicts"]} == {"lopHoc"}
+    assert all(item.get("ten") != assistant.HoTen for item in preview["conflicts"])
+    with pytest.raises(HTTPException) as caught:
+        create_schedule(request, teacher, db)
     assert caught.value.status_code == 409
-    conflicts = caught.value.detail["conflicts"]
-    assert {item["ten"]: item["vaiTro"] for item in conflicts} == {
-        teacher.HoTen: "Chính",
-        assistant.HoTen: "Phụ",
+    assert {item["loai"] for item in caught.value.detail["conflicts"]} == {
+        "lopHoc"
     }
+
+
+def test_schedule_conflict_matches_selected_teacher_across_classes(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    manager = add_user(db, 7, 7, "Quản lý đào tạo")
+    other_teacher = add_user(db, 8, 3, "Giảng viên khác")
+    other_room = PhongHoc(
+        PhongHocId=2,
+        MaPhong="A102",
+        TenPhong="Phòng A102",
+        SucChua=30,
+        TrangThai="Đang hoạt động",
+    )
+    other_class = LopHoc(
+        MaLop="CS101-02",
+        TenLop="Lớp Lập trình khác",
+        NamHoc="2026-2027",
+        GiangVienId=other_teacher.NguoiDungId,
+        NgayKhaiGiang=date.today(),
+        SiSoToiDa=30,
+        HinhThuc="Trực tiếp",
+        PhongHocId=other_room.PhongHocId,
+        TienDo=0,
+        TrangThai="Đang học",
+        NgayTao=datetime.now(),
+    )
+    db.add_all([other_room, other_class])
+    db.flush()
+    db.add(
+        LopHocMonHoc(
+            LopHocId=other_class.LopHocId,
+            MonHocId=subject.MonHocId,
+        )
+    )
+    db.commit()
+
+    day = date.today() + timedelta(days=13)
+    create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        teacher,
+        db,
+    )
+
+    preview = check_schedule_conflicts(
+        schedule_request(
+            other_class.LopHocId,
+            subject.MonHocId,
+            other_room.PhongHocId,
+            teacher.NguoiDungId,
+            day=day,
+        ),
+        exclude_schedule_id=None,
+        current_user=manager,
+        db=db,
+    )
+
+    assert preview["hasConflicts"] is True
+    assert {item["loai"] for item in preview["conflicts"]} == {"giangVien"}
+    assert all(item["maLop"] == class_record.MaLop for item in preview["conflicts"])
 
 
 def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Session):
@@ -904,23 +1067,71 @@ def test_schedule_conflict_checks_room_and_allows_adjacent_time_slots(db: Sessio
 
     assert caught.value.status_code == 409
     conflicts = caught.value.detail["conflicts"]
-    assert {item["loai"] for item in conflicts} == {"phongHoc"}
+    assert {item["loai"] for item in conflicts} == {"lopHoc", "phongHoc"}
     assert {item["maBuoiHoc"] for item in conflicts} == {
         "BH-000001",
         "BH-000002",
     }
-    assert all(item["ten"] == room.TenPhong for item in conflicts)
-    assert all(item["maPhong"] == room.MaPhong for item in conflicts)
+    room_conflicts = [
+        item for item in conflicts if item["loai"] == "phongHoc"
+    ]
+    assert all(item["ten"] == room.TenPhong for item in room_conflicts)
+    assert all(item["maPhong"] == room.MaPhong for item in room_conflicts)
     assert all(item["maLop"] == class_record.MaLop for item in conflicts)
     assert all(item["tenLop"] == class_record.TenLop for item in conflicts)
     assert all(item["ngay"] == day.isoformat() for item in conflicts)
-    assert {(item["gioBatDau"], item["gioKetThuc"]) for item in conflicts} == {
+    assert {(item["gioBatDau"], item["gioKetThuc"]) for item in room_conflicts} == {
         ("09:00", "10:00"),
         ("10:00", "11:00"),
     }
 
 
-def test_schedule_conflict_checks_shared_online_room_link(db: Session):
+def test_bulk_schedule_preview_skips_holidays_and_persists_lesson_history(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    lessons = setup_curriculum_lessons(db, class_record, subject)
+    first_monday = date.today() + timedelta(days=1)
+    while first_monday.isoweekday() != 1:
+        first_monday += timedelta(days=1)
+    request = generator_request(
+        class_record.LopHocId,
+        subject.MonHocId,
+        room.PhongHocId,
+        teacher.NguoiDungId,
+        first_monday,
+        session_count=3,
+        weekdays=[1],
+        holidays=[first_monday],
+    )
+
+    preview = preview_generated_schedules(request, teacher, db)
+    assert preview["skippedHolidays"] == [first_monday.isoformat()]
+    assert [item["ngayHoc"] for item in preview["sessions"]] == [
+        (first_monday + timedelta(days=7)).isoformat(),
+        (first_monday + timedelta(days=14)).isoformat(),
+        (first_monday + timedelta(days=21)).isoformat(),
+    ]
+    assert [item["buoiHocId"] for item in preview["sessions"]] == [
+        item.BuoiHocId for item in lessons[:3]
+    ]
+    options = get_schedule_options(teacher, db)
+    assert options["lopHocs"][0]["monHocs"][0]["buoiHocs"][0]["chuDe"] == "Bài học 1"
+
+    created = generate_schedules(request, teacher, db)
+    assert len(created) == 3
+    assert [item["chuDeBaiHoc"] for item in created] == [
+        "Bài học 1",
+        "Bài học 2",
+        "Bài học 3",
+    ]
+    assert db.query(LichHocLichSu).count() == 3
+    assert list_schedule_history(
+        teacher, db, page=1, page_size=20, search=None, event_type="all"
+    )["total"] == 3
+
+
+def test_bulk_schedule_preview_supports_sixty_sessions(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     assistant = add_user(db, 4, 4, "Trợ giảng B")
     class_record.HinhThuc = "Trực tuyến"
@@ -1063,7 +1274,10 @@ def test_conflict_preview_returns_multiple_items_without_writing(db: Session):
         first["lichHocId"],
         second["lichHocId"],
     }
-    assert {item["loai"] for item in preview["conflicts"]} == {"phongHoc"}
+    assert {item["loai"] for item in preview["conflicts"]} == {
+        "lopHoc",
+        "phongHoc",
+    }
     assert db.query(LichHoc).count() == schedule_count
     assert db.query(LichHocLichSu).count() == history_count
 
@@ -1454,11 +1668,11 @@ def test_cancel_schedule_rejects_recorded_attendance_without_changes(
         teacher,
         db,
     )
-    attendance = DiemDanh(
+    attendance = DiemDanhBuoiHoc(
         LichHocId=schedule["lichHocId"],
         HocVienId=student.NguoiDungId,
-        TrangThai="Có mặt",
-        NguoiDiemDanhId=teacher.NguoiDungId,
+        TrangThai="Đi muộn",
+        NguoiCapNhatId=teacher.NguoiDungId,
         NgayCapNhat=datetime.now(),
     )
     db.add(attendance)
@@ -1480,8 +1694,8 @@ def test_cancel_schedule_rejects_recorded_attendance_without_changes(
     assert saved_schedule.LyDoHuy is None
     assert saved_schedule.NgayHuy is None
     assert saved_schedule.NguoiHuyId is None
-    assert db.query(DiemDanh).filter(
-        DiemDanh.LichHocId == schedule["lichHocId"]
+    assert db.query(DiemDanhBuoiHoc).filter(
+        DiemDanhBuoiHoc.LichHocId == schedule["lichHocId"]
     ).count() == 1
     history = db.query(LichHocLichSu).filter(
         LichHocLichSu.LichHocId == schedule["lichHocId"]
@@ -1495,6 +1709,7 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
 ):
     teacher, room, subject, class_record = setup_schedule_context(db)
     new_teacher = add_user(db, 4, 4, "Giảng viên thay thế")
+    class_teacher = add_user(db, 5, 3, "Giảng viên phụ trách lớp")
     student = add_user(db, 20, 2, "Học viên trong lớp")
     old_day = date.today() + timedelta(days=18)
     db.add(
@@ -1525,6 +1740,8 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
         teacher,
         db,
     )
+    class_record.GiangVienId = class_teacher.NguoiDungId
+    db.commit()
     delivered = []
     monkeypatch.setattr(
         schedule_notifications,
@@ -1543,7 +1760,7 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
             start=time(11),
             end=time(12),
         ),
-        teacher,
+        class_teacher,
         db,
     )
 
@@ -1552,6 +1769,7 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
     assert {item.NguoiNhanId for item in notifications} == {
         teacher.NguoiDungId,
         new_teacher.NguoiDungId,
+        class_teacher.NguoiDungId,
         student.NguoiDungId,
     }
     assert len({item.SuKienId for item in notifications}) == 1
@@ -1559,7 +1777,7 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
     assert all(item.TrangThai == "Đã gửi" for item in notifications)
     assert all(item.SoLanGui == 1 for item in notifications)
     assert all(
-        item.NguoiThucHienId == teacher.NguoiDungId
+        item.NguoiThucHienId == class_teacher.NguoiDungId
         for item in notifications
     )
     assert all(item.ThoiDiemGui is not None for item in notifications)
@@ -1572,13 +1790,14 @@ def test_schedule_change_notifies_affected_students_and_both_instructors(
         == (old_day + timedelta(days=1)).isoformat()
         for item in notifications
     )
-    assert len(delivered) == 3
+    assert len(delivered) == 4
 
 
 def test_cancel_schedule_notifies_enrolled_students_with_cancellation_reason(
     db: Session,
 ):
     teacher, room, subject, class_record = setup_schedule_context(db)
+    class_teacher = add_user(db, 4, 3, "Giảng viên phụ trách lớp")
     student = add_user(db, 20, 2, "Học viên trong lớp")
     day = date.today() + timedelta(days=18)
     db.add(
@@ -1601,17 +1820,20 @@ def test_cancel_schedule_notifies_enrolled_students_with_cancellation_reason(
         teacher,
         db,
     )
+    class_record.GiangVienId = class_teacher.NguoiDungId
+    db.commit()
 
     cancel_schedule(
         schedule["lichHocId"],
         LichHocCancel(lyDo="Giảng viên đột xuất nghỉ."),
-        teacher,
+        class_teacher,
         db,
     )
 
     notifications = db.query(LichHocThongBao).all()
     assert {item.NguoiNhanId for item in notifications} == {
         teacher.NguoiDungId,
+        class_teacher.NguoiDungId,
         student.NguoiDungId,
     }
     assert all(item.LoaiSuKien == "Hủy buổi học" for item in notifications)
@@ -1923,6 +2145,74 @@ def test_list_schedules_only_returns_accessible_class_schedules(db: Session):
     assert options["diemDanhDuocHoTro"] is True
 
 
+def test_list_schedules_orders_latest_sessions_first(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    session_days = [
+        business_time.business_now().date() + timedelta(days=days_ahead)
+        for days_ahead in (2, 8, 5)
+    ]
+    created_ids = []
+    for session_day in session_days:
+        created = create_schedule(
+            schedule_request(
+                class_record.LopHocId,
+                subject.MonHocId,
+                room.PhongHocId,
+                teacher.NguoiDungId,
+                day=session_day,
+            ),
+            teacher,
+            db,
+        )
+        created_ids.append((session_day, created["lichHocId"]))
+
+    schedules = list_schedules(None, None, None, teacher, db)
+
+    assert [item["lichHocId"] for item in schedules] == [
+        schedule_id
+        for _, schedule_id in sorted(created_ids, reverse=True)
+    ]
+
+
+def test_instructor_schedule_list_only_returns_sessions_assigned_to_them(
+    db: Session,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    substitute = add_user(db, 4, 3, "Giảng viên dạy thay")
+    first = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=business_time.business_now().date() + timedelta(days=10),
+        ),
+        teacher,
+        db,
+    )
+    second_session = LichHoc(
+        LopHocId=class_record.LopHocId,
+        MonHocId=subject.MonHocId,
+        NgayHoc=business_time.business_now().date() + timedelta(days=11),
+        GioBatDau=time(9),
+        GioKetThuc=time(10),
+        PhongHocId=room.PhongHocId,
+        GiangVienId=substitute.NguoiDungId,
+        TrangThai="Đã lên lịch",
+        NgayTao=datetime.now(),
+        NguoiTaoId=teacher.NguoiDungId,
+        NgayCapNhat=datetime.now(),
+        NguoiCapNhatId=teacher.NguoiDungId,
+    )
+    db.add(second_session)
+    db.commit()
+
+    schedules = list_schedules(None, None, None, teacher, db)
+
+    assert [item["lichHocId"] for item in schedules] == [first["lichHocId"]]
+    assert all(item["giangVienId"] == teacher.NguoiDungId for item in schedules)
+
+
 def test_completed_schedules_are_separate_and_paginated(db: Session):
     teacher, room, subject, class_record = setup_schedule_context(db)
     now = business_time.business_now_naive()
@@ -1944,6 +2234,23 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
         for days_ago in (1, 2)
     ]
     db.add_all(completed_rows)
+    cancelled_row = LichHoc(
+        LopHocId=class_record.LopHocId,
+        MonHocId=subject.MonHocId,
+        NgayHoc=now.date() + timedelta(days=1),
+        GioBatDau=time(9),
+        GioKetThuc=time(10),
+        PhongHocId=room.PhongHocId,
+        GiangVienId=teacher.NguoiDungId,
+        TrangThai="Đã hủy",
+        NgayTao=now,
+        NguoiTaoId=teacher.NguoiDungId,
+        NgayCapNhat=now,
+        NguoiCapNhatId=teacher.NguoiDungId,
+        NgayHuy=now,
+        NguoiHuyId=teacher.NguoiDungId,
+    )
+    db.add(cancelled_row)
     db.commit()
 
     current_schedules = list_schedules(
@@ -1960,6 +2267,14 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
         current_user=teacher,
         db=db,
     )
+    cancelled_archive = list_schedules(
+        None,
+        None,
+        "Đã hủy",
+        teacher,
+        db,
+        exclude_completed=True,
+    )
     second_page = list_completed_schedules(
         page=2,
         page_size=1,
@@ -1974,6 +2289,9 @@ def test_completed_schedules_are_separate_and_paginated(db: Session):
     assert len(first_page["items"]) == len(second_page["items"]) == 1
     assert first_page["items"][0]["trangThai"] == "Đã diễn ra"
     assert first_page["items"][0]["lichHocId"] != second_page["items"][0]["lichHocId"]
+    assert [item["lichHocId"] for item in cancelled_archive] == [
+        cancelled_row.LichHocId
+    ]
 
 
 def test_student_completed_history_includes_past_assigned_inactive_classes(
@@ -2159,12 +2477,15 @@ def test_attendance_persists_status_and_uses_session_date_roster(
             room.PhongHocId,
             teacher.NguoiDungId,
             day=session_day,
+            start=time(0),
+            end=time(12),
         ),
         teacher,
         db,
     )
 
     roster = get_schedule_attendance(schedule["lichHocId"], teacher, db)
+    assert roster["coTheCapNhat"] is True
     lock_calls = []
     monkeypatch.setattr(
         schedules_router,
@@ -2186,41 +2507,158 @@ def test_attendance_persists_status_and_uses_session_date_roster(
         db,
     )
     queried = get_schedule_attendance(schedule["lichHocId"], teacher, db)
+    assert saved["coTheCapNhat"] is True
+    assert queried["coTheCapNhat"] is True
+    assert queried["canLyDoDieuChinhBatBuoc"] is False
 
-    assert [item["hocVienId"] for item in roster["hocViens"]] == [
-        first_student.NguoiDungId
-    ]
-    assert saved["trangThaiDiemDanh"] == "1/1 đã điểm danh"
-    assert queried["hocViens"][0]["trangThai"] == "Đi muộn"
-    assert queried["hocViens"][0]["ghiChu"] == "Đến sau giờ bắt đầu"
-    assert queried["hocViens"][0]["nguoiDiemDanh"] == teacher.HoTen
-    assert db.query(DiemDanh).count() == 1
-    assert db.query(AttendanceAudit).count() == 1
-    assert lock_calls == [db]
+    updated_without_reason = save_schedule_attendance(
+        schedule["lichHocId"],
+        DiemDanhBuoiHocWrite(
+            records=[{"hocVienId": first_student.NguoiDungId, "trangThai": "Có mặt"}]
+        ),
+        teacher,
+        db,
+    )
+    assert updated_without_reason["records"][0]["trangThai"] == "Có mặt"
+    assert db.query(DiemDanhBuoiHocLichSu).count() == 1
 
-    with pytest.raises(HTTPException) as error:
-        update_schedule_attendance(
+    updated = save_schedule_attendance(
+        schedule["lichHocId"],
+        DiemDanhBuoiHocWrite(
+            records=[{"hocVienId": first_student.NguoiDungId, "trangThai": "Vắng có phép"}],
+            lyDo="Học viên đến muộn.",
+        ),
+        teacher,
+        db,
+    )
+    assert updated["records"][0]["trangThai"] == "Vắng có phép"
+    assert db.query(DiemDanhBuoiHoc).count() == 1
+    assert db.query(DiemDanhBuoiHocLichSu).count() == 2
+    assert list_schedule_attendance_audit(schedule["lichHocId"], teacher, db)[0]["lyDo"] == "Học viên đến muộn."
+
+def test_schedule_attendance_cannot_be_saved_before_session_start(db: Session):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    student = add_user(db, 22, 2, "Học viên tương lai")
+    db.add(
+        LopHocHocVien(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayThamGia=datetime.now(),
+        )
+    )
+    db.commit()
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+        ),
+        teacher,
+        db,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        save_schedule_attendance(
             schedule["lichHocId"],
-            DiemDanhWrite(
-                hocViens=[
-                    {
-                        "hocVienId": withdrawn_student.NguoiDungId,
-                        "trangThai": "Vắng không phép",
-                    }
-                ]
+            DiemDanhBuoiHocWrite(
+                records=[{"hocVienId": student.NguoiDungId, "trangThai": "Có mặt"}]
             ),
             teacher,
             db,
         )
-    assert error.value.status_code == 422
+
+    assert caught.value.status_code == 409
+    assert db.query(DiemDanhBuoiHoc).count() == 0
 
 
-def test_absence_request_approval_updates_attendance_and_notifies_student(
+def test_session_attendance_threshold_crossing_notifies_student_teacher_and_manager(
     db: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     teacher, room, subject, class_record = setup_schedule_context(db)
-    student = add_user(db, 20, 2, "Học viên xin phép")
-    manager = add_user(db, 21, 7, "Quản lý đào tạo")
+    student = add_user(db, 22, 2, "Học viên vượt ngưỡng")
+    manager = add_user(db, 70, 7, "Quản lý đào tạo")
+    program = ChuongTrinhDaoTao(
+        MaChuongTrinh="PRG-ATT",
+        TenChuongTrinh="Chương trình điểm danh",
+        TongThoiLuong=20,
+        HocPhiChuan=0,
+        NgayTao=datetime.now(),
+    )
+    db.add(program)
+    db.flush()
+    class_record.ChuongTrinhId = program.ChuongTrinhId
+    db.add(
+        AbsenceThreshold(
+            ChuongTrinhId=program.ChuongTrinhId,
+            TiLeToiDa=20,
+            NgayCapNhat=datetime.now(),
+        )
+    )
+    session_day = business_time.business_now().date() + timedelta(days=10)
+    db.add(
+        LopHocHocVien(
+            LopHocId=class_record.LopHocId,
+            HocVienId=student.NguoiDungId,
+            NgayThamGia=datetime.now(),
+            NguoiGhiDanhId=teacher.NguoiDungId,
+        )
+    )
+    db.commit()
+    monkeypatch.setattr(
+        attendance_thresholds,
+        "inspect",
+        lambda _bind: SimpleNamespace(has_table=lambda _name: False),
+    )
+    schedule = create_schedule(
+        schedule_request(
+            class_record.LopHocId,
+            subject.MonHocId,
+            room.PhongHocId,
+            teacher.NguoiDungId,
+            day=session_day,
+        ),
+        teacher,
+        db,
+    )
+    monkeypatch.setattr(
+        schedules_router,
+        "business_now_naive",
+        lambda: datetime.combine(session_day, time(9, 30)),
+    )
+
+    update_schedule_attendance(
+        schedule["lichHocId"],
+        DiemDanhBuoiHocWrite(
+            records=[
+                {"hocVienId": student.NguoiDungId, "trangThai": "Vắng không phép"}
+            ]
+        ),
+        teacher,
+        db,
+    )
+
+    notices = db.query(AttendanceNotification).filter(
+        AttendanceNotification.HocVienId == student.NguoiDungId,
+        AttendanceNotification.ChuongTrinhId == program.ChuongTrinhId,
+        AttendanceNotification.Loai == "absence_threshold",
+    ).all()
+    assert {notice.NguoiNhanId for notice in notices} == {
+        teacher.NguoiDungId,
+        student.NguoiDungId,
+        manager.NguoiDungId,
+    }
+
+
+def test_ended_session_attendance_still_requires_manager_reason(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    teacher, room, subject, class_record = setup_schedule_context(db)
+    manager = add_user(db, 70, 7, "Quản lý đào tạo")
+    student = add_user(db, 22, 2, "Học viên")
+    session_day = business_time.business_now().date() + timedelta(days=10)
     db.add(
         LopHocHocVien(
             LopHocId=class_record.LopHocId,
@@ -2236,63 +2674,61 @@ def test_absence_request_approval_updates_attendance_and_notifies_student(
             subject.MonHocId,
             room.PhongHocId,
             teacher.NguoiDungId,
+            day=session_day,
+            start=time(9),
+            end=time(10),
         ),
         teacher,
         db,
     )
-
-    created = create_absence_request_service(
-        AbsenceRequestWrite(
-            scheduleId=schedule["lichHocId"],
-            reason="Có lịch khám bệnh đã hẹn trước.",
+    monkeypatch.setattr(
+        schedules_router,
+        "business_now_naive",
+        lambda: datetime.combine(session_day, time(9, 30)),
+    )
+    save_schedule_attendance(
+        schedule["lichHocId"],
+        DiemDanhBuoiHocWrite(
+            records=[{"hocVienId": student.NguoiDungId, "trangThai": "Có mặt"}]
         ),
-        student,
+        teacher,
         db,
     )
-    assert created["status"] == "pending"
-    assert created["studentName"] == student.HoTen
+    monkeypatch.setattr(
+        schedules_router,
+        "business_now_naive",
+        lambda: datetime.combine(session_day, time(10)),
+    )
 
-    with pytest.raises(HTTPException) as duplicate:
-        create_absence_request_service(
-            AbsenceRequestWrite(
-                scheduleId=schedule["lichHocId"],
-                reason="Gửi lại đơn.",
+    with pytest.raises(HTTPException) as caught:
+        save_schedule_attendance(
+            schedule["lichHocId"],
+            DiemDanhBuoiHocWrite(
+                records=[{"hocVienId": student.NguoiDungId, "trangThai": "Đi muộn"}]
             ),
-            student,
+            manager,
             db,
         )
-    assert duplicate.value.status_code == 409
 
-    reviewed = decide_absence_request(
-        created["requestId"],
-        AbsenceRequestDecision(
-            decision="approved",
-            reason="Đã nhận minh chứng.",
-        ),
-        manager,
-        db,
-    )
-    assert reviewed["status"] == "approved"
-    attendance = db.query(DiemDanh).one()
-    assert attendance.TrangThai == "Vắng có phép"
-    assert db.query(AttendanceAudit).one().TrangThaiMoi == "Vắng có phép"
-    notification = db.query(AttendanceNotification).one()
-    assert notification.NguoiNhanId == student.NguoiDungId
-    assert "được duyệt" in notification.NoiDung
+    assert caught.value.status_code == 422
+    assert get_schedule_attendance(schedule["lichHocId"], manager, db)[
+        "canLyDoDieuChinhBatBuoc"
+    ] is True
+    assert db.query(DiemDanhBuoiHoc).one().TrangThai == "Có mặt"
 
 
-def test_teacher_cannot_edit_attendance_after_session_ended(
+def test_schedule_attendance_rejects_students_not_enrolled_in_class(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ):
     teacher, room, subject, class_record = setup_schedule_context(db)
     student = add_user(db, 20, 2, "Học viên")
-    session_day = business_time.business_now().date() - timedelta(days=1)
+    session_day = business_time.business_now().date()
     db.add(
         LopHocHocVien(
             LopHocId=class_record.LopHocId,
             HocVienId=student.NguoiDungId,
-            NgayThamGia=datetime.combine(session_day - timedelta(days=2), time.min),
+            NgayThamGia=datetime.combine(session_day + timedelta(days=1), time.min),
             NguoiGhiDanhId=teacher.NguoiDungId,
         )
     )
@@ -2304,6 +2740,8 @@ def test_teacher_cannot_edit_attendance_after_session_ended(
             room.PhongHocId,
             teacher.NguoiDungId,
             day=session_day,
+            start=time(0),
+            end=time(12),
         ),
         teacher,
         db,
@@ -2328,5 +2766,5 @@ def test_teacher_cannot_edit_attendance_after_session_ended(
             teacher,
             db,
         )
-    assert caught.value.status_code == 403
-    assert db.query(DiemDanh).count() == 0
+    assert caught.value.status_code == 422
+    assert db.query(DiemDanhBuoiHoc).count() == 0

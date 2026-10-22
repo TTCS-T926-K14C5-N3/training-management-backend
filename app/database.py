@@ -1,19 +1,16 @@
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import (
-    declarative_base,
-    sessionmaker
-)
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import (
-    DB_SERVER,
-    DB_NAME,
     DB_DRIVER,
+    DB_NAME,
+    DB_PASSWORD,
+    DB_SERVER,
     DB_TRUSTED_CONNECTION,
     DB_TRUST_SERVER_CERTIFICATE,
     DB_USER,
-    DB_PASSWORD,
 )
 
 
@@ -64,7 +61,6 @@ connection_string = build_connection_string(
     password=DB_PASSWORD,
 )
 
-
 DATABASE_URL = (
     "mssql+pyodbc:///?odbc_connect="
     + quote_plus(connection_string)
@@ -73,14 +69,14 @@ DATABASE_URL = (
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True
+    pool_pre_ping=True,
 )
 
 
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=engine
+    bind=engine,
 )
 
 

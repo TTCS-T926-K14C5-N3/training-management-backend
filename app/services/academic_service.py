@@ -1,23 +1,33 @@
+from datetime import date, datetime, time
+
+from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 
 from app.models.diem import Diem
 from app.models.lop_hoc import LopHoc
 from app.models.lop_hoc_hoc_vien import LopHocHocVien
 from app.models.lop_hoc_mon_hoc_giang_vien import LopHocMonHocGiangVien
+from app.models.mon_hoc import MonHoc
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
-from app.models.mon_hoc import MonHoc
 from app.models.vai_tro import VaiTro
 
 
 ADMIN_ROLE_ID = 8
 TRAINING_MANAGER_ROLE_ID = 7
 INSTRUCTOR_ROLE_ID = 3
-TEACHING_ASSISTANT_ROLE_ID = 4
-TEACHING_ROLE_IDS = frozenset({INSTRUCTOR_ROLE_ID, TEACHING_ASSISTANT_ROLE_ID})
+ASSISTANT_ROLE_ID = 4
+TEACHING_ASSISTANT_ROLE_ID = ASSISTANT_ROLE_ID
+TEACHING_ROLE_IDS = {INSTRUCTOR_ROLE_ID, ASSISTANT_ROLE_ID}
 STUDENT_ROLE_ID = 2
-ACTIVE_CLASS_STATUSES = ("Đang hoạt động", "Chuẩn bị", "Đang học")
+ADMIN_ROLE_NAMES = {
+    "admin",
+    "quản trị hệ thống",
+    "quản trị viên hệ thống",
+}
+ACTIVE_USER_STATUS = "HoatDong"
+LOCKED_USER_STATUS = "BiKhoa"
+ACTIVE_CLASS_STATUSES = {"Chuẩn bị", "Đang học", "Đang hoạt động"}
 
 
 def user_role_ids(db: Session, user_id: int) -> set[int]:
@@ -29,15 +39,28 @@ def user_role_ids(db: Session, user_id: int) -> set[int]:
     }
 
 
+def user_is_admin(db: Session, user_id: int) -> bool:
+    roles = (
+        db.query(VaiTro.VaiTroId, VaiTro.TenVaiTro)
+        .join(NguoiDungVaiTro, NguoiDungVaiTro.VaiTroId == VaiTro.VaiTroId)
+        .filter(NguoiDungVaiTro.NguoiDungId == user_id)
+        .all()
+    )
+    return any(
+        role_id == ADMIN_ROLE_ID or role_name.strip().casefold() in ADMIN_ROLE_NAMES
+        for role_id, role_name in roles
+    )
+
+
 def has_schedule_wide_scope(
     db: Session,
     user_id: int,
     role_ids: set[int],
 ) -> bool:
-    if role_ids.intersection({ADMIN_ROLE_ID, TRAINING_MANAGER_ROLE_ID}):
+    if TRAINING_MANAGER_ROLE_ID in role_ids or user_is_admin(db, user_id):
         return True
     role_names = (
-        name.lower()
+        name.strip().casefold()
         for (name,) in db.query(VaiTro.TenVaiTro)
         .join(
             NguoiDungVaiTro,
@@ -46,10 +69,7 @@ def has_schedule_wide_scope(
         .filter(NguoiDungVaiTro.NguoiDungId == user_id)
         .all()
     )
-    return any(
-        "admin" in name or "quản trị" in name
-        for name in role_names
-    )
+    return any(name in ADMIN_ROLE_NAMES for name in role_names)
 
 
 def accessible_classes(
@@ -65,6 +85,7 @@ def accessible_classes(
 
     if has_schedule_wide_scope(db, user.NguoiDungId, roles):
         return query.order_by(LopHoc.MaLop).all()
+
     if roles.intersection(TEACHING_ROLE_IDS):
         teaching_classes = db.query(
             LopHocMonHocGiangVien.LopHocId
@@ -72,28 +93,29 @@ def accessible_classes(
             LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId
         )
         if INSTRUCTOR_ROLE_ID in roles:
-            return (
-                query.filter(
-                    or_(
-                        LopHoc.GiangVienId == user.NguoiDungId,
-                        LopHoc.LopHocId.in_(teaching_classes),
-                    )
+            query = query.filter(
+                or_(
+                    LopHoc.GiangVienId == user.NguoiDungId,
+                    LopHoc.LopHocId.in_(teaching_classes),
                 )
-                .order_by(LopHoc.MaLop)
-                .all()
             )
-        return (
-            query.filter(LopHoc.LopHocId.in_(teaching_classes))
-            .order_by(LopHoc.MaLop)
-            .all()
-        )
+        else:
+            query = query.filter(LopHoc.LopHocId.in_(teaching_classes))
+        return query.order_by(LopHoc.MaLop).all()
+
     if STUDENT_ROLE_ID in roles:
         return (
             query.join(
                 LopHocHocVien,
                 LopHocHocVien.LopHocId == LopHoc.LopHocId,
             )
-            .filter(LopHocHocVien.HocVienId == user.NguoiDungId)
+            .filter(
+                LopHocHocVien.HocVienId == user.NguoiDungId,
+                LopHocHocVien.TrangThaiGhiDanh == "Đang học",
+                LopHocHocVien.NgayThamGia <= datetime.combine(date.today(), time.max),
+                (LopHocHocVien.NgayKetThuc.is_(None))
+                | (LopHocHocVien.NgayKetThuc > datetime.combine(date.today(), time.min)),
+            )
             .order_by(LopHoc.MaLop)
             .all()
         )
@@ -126,6 +148,10 @@ def can_access_class(
             .filter(
                 LopHocHocVien.LopHocId == lop_hoc.LopHocId,
                 LopHocHocVien.HocVienId == user.NguoiDungId,
+                LopHocHocVien.TrangThaiGhiDanh == "Đang học",
+                LopHocHocVien.NgayThamGia <= datetime.combine(date.today(), time.max),
+                (LopHocHocVien.NgayKetThuc.is_(None))
+                | (LopHocHocVien.NgayKetThuc > datetime.combine(date.today(), time.min)),
             )
             .first()
             is not None
@@ -139,13 +165,18 @@ def accessible_grades_query(db: Session, user: NguoiDung):
 
     if has_schedule_wide_scope(db, user.NguoiDungId, roles):
         return query
-    if INSTRUCTOR_ROLE_ID in roles:
-        return query.join(LopHoc, LopHoc.LopHocId == Diem.LopHocId).filter(
+    if roles.intersection(TEACHING_ROLE_IDS):
+        assigned_class_ids = db.query(LopHoc.LopHocId).filter(
             LopHoc.GiangVienId == user.NguoiDungId
+        ).union(
+            db.query(LopHocMonHocGiangVien.LopHocId).filter(
+                LopHocMonHocGiangVien.GiangVienId == user.NguoiDungId
+            )
         )
+        return query.filter(Diem.LopHocId.in_(assigned_class_ids))
     if STUDENT_ROLE_ID in roles:
         return query.filter(Diem.HocVienId == user.NguoiDungId)
-    return query.filter(Diem.DiemId == -1)
+    return query.filter(false())
 
 
 def ensure_valid_academic_year(value: str) -> None:
@@ -168,7 +199,7 @@ def ensure_active_student(db: Session, user_id: int) -> NguoiDung:
         .filter(
             NguoiDung.NguoiDungId == user_id,
             NguoiDungVaiTro.VaiTroId == STUDENT_ROLE_ID,
-            NguoiDung.TrangThai == "HoatDong",
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
         )
         .first()
     )
@@ -187,12 +218,37 @@ def ensure_active_instructor(db: Session, user_id: int) -> NguoiDung:
         .filter(
             NguoiDung.NguoiDungId == user_id,
             NguoiDungVaiTro.VaiTroId.in_(TEACHING_ROLE_IDS),
-            NguoiDung.TrangThai == "HoatDong",
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
         )
         .first()
     )
     if teacher is None:
         raise ValueError("Giảng viên không tồn tại hoặc tài khoản chưa hoạt động.")
+    return teacher
+
+
+def ensure_active_teaching_role(
+    db: Session,
+    user_id: int,
+    required_role_id: int,
+) -> NguoiDung:
+    teacher = (
+        db.query(NguoiDung)
+        .filter(
+            NguoiDung.NguoiDungId == user_id,
+            NguoiDung.TrangThai == ACTIVE_USER_STATUS,
+        )
+        .first()
+    )
+    if teacher is None or required_role_id not in user_role_ids(db, user_id):
+        role_name = (
+            "giảng viên chính"
+            if required_role_id == INSTRUCTOR_ROLE_ID
+            else "trợ giảng"
+        )
+        raise ValueError(
+            f"Tài khoản không có vai trò {role_name} hoặc chưa hoạt động."
+        )
     return teacher
 
 
@@ -214,3 +270,32 @@ def ensure_active_subjects(db: Session, subject_ids: list[int]) -> list[MonHoc]:
     if len(subjects) != len(requested_ids):
         raise ValueError("Có môn học không tồn tại hoặc đã ngừng hoạt động.")
     return subjects
+
+
+def build_prerequisite_map(
+    items: list[tuple[int, int | None]],
+) -> dict[int, int]:
+    """Validate prerequisite references and return the subject-to-prerequisite map."""
+    requested_subject_ids = {mon_hoc_id for mon_hoc_id, _ in items}
+    for mon_hoc_id, prerequisite_id in items:
+        if prerequisite_id is None:
+            continue
+        if prerequisite_id == mon_hoc_id:
+            raise ValueError("Môn học không thể là tiên quyết của chính nó.")
+        if prerequisite_id not in requested_subject_ids:
+            raise ValueError("Môn tiên quyết phải thuộc cùng chương trình.")
+
+    prerequisite_by_subject = {
+        mon_hoc_id: prerequisite_id
+        for mon_hoc_id, prerequisite_id in items
+        if prerequisite_id is not None
+    }
+    for subject_id in requested_subject_ids:
+        seen = set()
+        cursor = subject_id
+        while cursor in prerequisite_by_subject:
+            cursor = prerequisite_by_subject[cursor]
+            if cursor in seen or cursor == subject_id:
+                raise ValueError("Quan hệ môn tiên quyết không được tạo vòng lặp.")
+            seen.add(cursor)
+    return prerequisite_by_subject

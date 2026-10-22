@@ -2,38 +2,36 @@ import os
 
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
+# ============================================================
+# SQL SERVER
+# ============================================================
 
-DB_SERVER = os.getenv(
-    "DB_SERVER"
-)
+DB_SERVER = os.getenv("DB_SERVER")
 
 DB_NAME = os.getenv(
     "DB_NAME",
-    "QuanLyDaoTao"
+    "QuanLyDaoTao",
 )
 
 DB_DRIVER = os.getenv(
     "DB_DRIVER",
-    "ODBC Driver 18 for SQL Server"
+    "ODBC Driver 18 for SQL Server",
 )
 
 DB_TRUSTED_CONNECTION = os.getenv(
     "DB_TRUSTED_CONNECTION",
     "yes",
-).strip().lower() in {"yes", "true", "1"}
+).strip().lower() in {"1", "true", "yes", "y"}
 
 DB_TRUST_SERVER_CERTIFICATE = os.getenv(
     "DB_TRUST_SERVER_CERTIFICATE",
     "yes",
-).strip().lower() in {"yes", "true", "1"}
+).strip().lower() in {"1", "true", "yes", "y"}
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-
-
 if not DB_SERVER:
     raise ValueError(
         "Chua cau hinh DB_SERVER. "
@@ -42,9 +40,9 @@ if not DB_SERVER:
 
 if not DB_TRUSTED_CONNECTION and not (DB_USER and DB_PASSWORD):
     raise ValueError(
-        "DB_TRUSTED_CONNECTION=no yeu cau cau hinh ca DB_USER va DB_PASSWORD."
+        "Can cau hinh DB_USER va DB_PASSWORD khi "
+        "DB_TRUSTED_CONNECTION=no."
     )
-
 
 # ============================================================
 # SMTP - GỬI EMAIL
@@ -52,30 +50,70 @@ if not DB_TRUSTED_CONNECTION and not (DB_USER and DB_PASSWORD):
 
 SMTP_HOST = os.getenv(
     "SMTP_HOST",
-    "smtp.gmail.com"
+    "smtp.gmail.com",
 )
 
 SMTP_PORT = int(
-    os.getenv(
-        "SMTP_PORT",
-        "587"
-    )
+    os.getenv("SMTP_PORT", "587")
 )
 
-SMTP_USERNAME = os.getenv(
-    "SMTP_USERNAME"
-)
-
-SMTP_PASSWORD = os.getenv(
-    "SMTP_PASSWORD"
-)
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 SMTP_FROM = os.getenv(
     "SMTP_FROM",
-    SMTP_USERNAME
+    SMTP_USERNAME,
 )
+
+# ============================================================
+# JWT - XÁC THỰC
+# ============================================================
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+if not SECRET_KEY:
+    raise ValueError(
+        "Chua cau hinh SECRET_KEY. "
+        "Hay them SECRET_KEY vao file .env."
+    )
+
+ALGORITHM = os.getenv(
+    "JWT_ALGORITHM",
+    "HS256",
+)
+
+ACCESS_TOKEN_EXPIRE_MINUTES = int(
+    os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+)
+
+# ============================================================
+# FRONTEND / CORS
+# ============================================================
 
 FRONTEND_URL = os.getenv(
     "FRONTEND_URL",
-    "http://localhost:5173"
+    "http://localhost:5173",
 ).rstrip("/")
+
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+# ============================================================
+# THÔNG TIN LIÊN HỆ QUẢN TRỊ
+# ============================================================
+
+ADMIN_CONTACT_PHONE = os.getenv(
+    "ADMIN_CONTACT_PHONE",
+    "0912345678",
+)
+
+ADMIN_CONTACT_EMAIL = os.getenv(
+    "ADMIN_CONTACT_EMAIL",
+    "lyachai2k@gmail.com",
+)

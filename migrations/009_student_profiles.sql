@@ -7,6 +7,12 @@ SET XACT_ABORT ON;
 BEGIN TRY
     BEGIN TRANSACTION;
 
+    IF COL_LENGTH(N'dbo.NguoiDung', N'NgaySinh') IS NULL
+        ALTER TABLE dbo.NguoiDung ADD NgaySinh DATE NULL;
+
+    IF COL_LENGTH(N'dbo.NguoiDung', N'DiaChi') IS NULL
+        ALTER TABLE dbo.NguoiDung ADD DiaChi NVARCHAR(255) NULL;
+
     IF COL_LENGTH(N'dbo.NguoiDung', N'TrinhDoDauVao') IS NULL
         ALTER TABLE dbo.NguoiDung ADD TrinhDoDauVao NVARCHAR(150) NULL;
 

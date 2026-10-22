@@ -7,7 +7,10 @@ from pydantic import (
 
 
 class ResetPasswordRequest(BaseModel):
-    token: str = Field(min_length=1)
+    token: str = Field(
+        min_length=20,
+        max_length=255,
+    )
 
     new_password: str = Field(
         min_length=8,

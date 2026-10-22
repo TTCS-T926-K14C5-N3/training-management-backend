@@ -1,10 +1,16 @@
-from sqlalchemy import Column, Integer, Numeric, String, Unicode
+from sqlalchemy import CheckConstraint, Column, Integer, Numeric, String, Unicode
 
 from app.database import Base
 
 
 class MonHoc(Base):
     __tablename__ = "MonHoc"
+    __table_args__ = (
+        CheckConstraint(
+            "TrongSo >= 0 AND TrongSo <= 1",
+            name="CK_MonHoc_TrongSo",
+        ),
+    )
 
     MonHocId = Column(Integer, primary_key=True, autoincrement=True)
     MaMonHoc = Column(String(30), nullable=False, unique=True)

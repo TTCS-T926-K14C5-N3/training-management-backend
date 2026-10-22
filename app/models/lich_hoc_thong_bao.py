@@ -47,7 +47,7 @@ class LichHocThongBao(Base):
     NguoiThucHienId = Column(
         Integer,
         ForeignKey("NguoiDung.NguoiDungId"),
-        nullable=False,
+        nullable=True,
     )
     ThoiDiemPhatSinh = Column(DateTime, nullable=False)
     TrangThai = Column(Unicode(20), nullable=False, default="Chờ gửi")

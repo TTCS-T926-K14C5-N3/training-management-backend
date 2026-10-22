@@ -1,5 +1,5 @@
 from datetime import date, time
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import (
     AliasChoices,
@@ -12,14 +12,13 @@ from pydantic import (
 
 from app.services import business_time
 
-from app.services import business_time
-
 
 class LichHocWrite(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     lop_hoc_id: int = Field(alias="lopHocId", gt=0)
     mon_hoc_id: int = Field(alias="monHocId", gt=0)
+    buoi_hoc_id: int | None = Field(default=None, alias="buoiHocId", gt=0)
     bai_hoc_id: int | None = Field(default=None, alias="baiHocId", gt=0)
     ngay_hoc: date = Field(alias="ngayHoc")
     gio_bat_dau: time = Field(alias="gioBatDau")
@@ -28,10 +27,7 @@ class LichHocWrite(BaseModel):
     giang_vien_id: int = Field(alias="giangVienId", gt=0)
     xac_nhan_trung_lich: bool = Field(
         default=False,
-        validation_alias=AliasChoices(
-            "xacNhanTrungLich",
-            "ghiDeXungDot",
-        ),
+        validation_alias=AliasChoices("xacNhanTrungLich", "ghiDeXungDot"),
     )
     ly_do_ghi_de: str | None = Field(
         default=None,
@@ -43,41 +39,111 @@ class LichHocWrite(BaseModel):
     @classmethod
     def validate_local_time(cls, value: time) -> time:
         if value.tzinfo is not None and value.utcoffset() is not None:
-            raise ValueError(
-                "Giờ học phải dùng giờ địa phương, không kèm múi giờ."
-            )
+            raise ValueError("Giờ học phải dùng giờ địa phương, không kèm múi giờ.")
         return value
 
     @field_validator("ly_do_ghi_de", mode="before")
     @classmethod
     def normalize_override_reason(cls, value: str | None) -> str | None:
-        if not isinstance(value, str):
-            return value
-        normalized = value.strip()
-        return normalized or None
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
     @model_validator(mode="after")
     def validate_time_range(self):
         if self.gio_ket_thuc <= self.gio_bat_dau:
             raise ValueError("Giờ kết thúc phải sau giờ bắt đầu.")
         if self.xac_nhan_trung_lich and len(self.ly_do_ghi_de or "") < 5:
-            raise ValueError(
-                "Lý do xác nhận ghi đè phải có ít nhất 5 ký tự."
-            )
+            raise ValueError("Lý do xác nhận ghi đè phải có ít nhất 5 ký tự.")
         now = business_time.business_now()
         if self.ngay_hoc < now.date():
             raise ValueError("Ngày học không được nằm trong quá khứ.")
         if self.ngay_hoc == now.date():
             current_time = now.timetz().replace(tzinfo=None)
             if self.gio_ket_thuc <= current_time:
-                raise ValueError(
-                    "Buổi học phải kết thúc sau thời điểm hiện tại."
-                )
+                raise ValueError("Buổi học phải kết thúc sau thời điểm hiện tại.")
             if self.gio_bat_dau <= current_time:
-                raise ValueError(
-                    "Buổi học phải bắt đầu sau thời điểm hiện tại."
-                )
+                raise ValueError("Buổi học phải bắt đầu sau thời điểm hiện tại.")
         return self
+
+
+class LichHocGenerate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    lop_hoc_id: int = Field(alias="lopHocId", gt=0)
+    mon_hoc_id: int = Field(alias="monHocId", gt=0)
+    ngay_bat_dau: date = Field(alias="ngayBatDau")
+    thu_trong_tuan: list[int] = Field(alias="thuTrongTuan", min_length=1, max_length=7)
+    so_buoi: int = Field(alias="soBuoi", ge=1, le=200)
+    gio_bat_dau: time = Field(alias="gioBatDau")
+    gio_ket_thuc: time = Field(alias="gioKetThuc")
+    phong_hoc_id: int | None = Field(default=None, alias="phongHocId", gt=0)
+    giang_vien_id: int = Field(alias="giangVienId", gt=0)
+    ngay_nghi: list[date] = Field(default_factory=list, alias="ngayNghi", max_length=100)
+
+    @field_validator("thu_trong_tuan")
+    @classmethod
+    def validate_weekdays(cls, value: list[int]) -> list[int]:
+        if any(day < 1 or day > 7 for day in value) or len(value) != len(set(value)):
+            raise ValueError("Các ngày trong tuần phải hợp lệ và không được trùng.")
+        return sorted(value)
+
+    @field_validator("ngay_nghi")
+    @classmethod
+    def validate_holidays(cls, value: list[date]) -> list[date]:
+        if len(value) != len(set(value)):
+            raise ValueError("Ngày nghỉ không được trùng.")
+        return sorted(value)
+
+    @model_validator(mode="after")
+    def validate_schedule(self):
+        if self.gio_ket_thuc <= self.gio_bat_dau:
+            raise ValueError("Giờ kết thúc phải sau giờ bắt đầu.")
+        return self
+
+
+class DiemDanhBuoiHocRecord(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    hoc_vien_id: int = Field(alias="hocVienId", gt=0)
+    trang_thai: str | None = Field(default=None, alias="trangThai")
+    ghi_chu: str | None = Field(default=None, alias="ghiChu", max_length=1000)
+
+    @field_validator("trang_thai")
+    @classmethod
+    def validate_attendance_status(cls, value: str | None) -> str | None:
+        allowed = {
+            "Có mặt",
+            "Đi muộn",
+            "Vắng có phép",
+            "Vắng không phép",
+        }
+        if value is not None and value not in allowed:
+            raise ValueError("Trạng thái điểm danh không hợp lệ.")
+        return value
+
+
+class DiemDanhBuoiHocWrite(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    records: list[DiemDanhBuoiHocRecord] = Field(min_length=1, max_length=500)
+    ly_do: str | None = Field(default=None, alias="lyDo", max_length=1000)
+
+    @field_validator("ly_do", mode="before")
+    @classmethod
+    def normalize_reason(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("records")
+    @classmethod
+    def validate_unique_students(
+        cls,
+        value: list[DiemDanhBuoiHocRecord],
+    ) -> list[DiemDanhBuoiHocRecord]:
+        student_ids = [item.hoc_vien_id for item in value]
+        if len(student_ids) != len(set(student_ids)):
+            raise ValueError("Danh sách học viên bị trùng.")
+        return value
 
 
 class LichHocCancel(BaseModel):
@@ -113,9 +179,7 @@ class DiemDanhEntry(BaseModel):
     @field_validator("ghi_chu", mode="before")
     @classmethod
     def normalize_attendance_note(cls, value: str | None) -> str | None:
-        if isinstance(value, str):
-            return value.strip() or None
-        return value
+        return value.strip() or None if isinstance(value, str) else value
 
 
 class DiemDanhWrite(BaseModel):
@@ -132,9 +196,7 @@ class DiemDanhWrite(BaseModel):
     @field_validator("ly_do", mode="before")
     @classmethod
     def normalize_reason(cls, value: str | None) -> str | None:
-        if isinstance(value, str):
-            return value.strip() or None
-        return value
+        return value.strip() or None if isinstance(value, str) else value
 
     @field_validator("hoc_viens")
     @classmethod
@@ -162,7 +224,11 @@ class LichHocRepeatWrite(BaseModel):
     phong_hoc_id: int = Field(alias="phongHocId", gt=0)
     giang_vien_id: int = Field(alias="giangVienId", gt=0)
     ghi_de_xung_dot: bool = Field(default=False, alias="ghiDeXungDot")
-    ly_do_ghi_de: str | None = Field(default=None, alias="lyDoGhiDe", max_length=1000)
+    ly_do_ghi_de: str | None = Field(
+        default=None,
+        alias="lyDoGhiDe",
+        max_length=1000,
+    )
 
     @field_validator("thu_trong_tuan")
     @classmethod
