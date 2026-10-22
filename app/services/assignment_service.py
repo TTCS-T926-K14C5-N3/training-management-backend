@@ -1,4 +1,6 @@
+import math
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -180,4 +182,48 @@ def has_active_reopen(db: Session, assignment_id: int, student_id: int, graded_a
         .first()
     )
     return reopen is not None
+
+
+def calculate_late_penalty(
+    submitted_at: datetime,
+    due_date: datetime,
+    max_score: Decimal,
+    raw_score: Decimal,
+    penalty_type: str,
+    penalty_value: Decimal,
+    min_score: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """
+    Tính điểm phạt và điểm thực nhận dựa trên chính sách nộp muộn:
+    - none: Không trừ điểm
+    - percentage_per_day: Trừ penalty_value % của max_score mỗi ngày trễ
+    - fixed_percentage: Trừ cố định penalty_value % của max_score
+    - fixed_points: Trừ cố định penalty_value điểm
+    Áp dụng điểm sàn min_score (điểm cuối không thấp hơn min_score và >= 0).
+    Trả về (actual_deduction, final_score)
+    """
+    if submitted_at <= due_date or penalty_type in ("none", "", None):
+        return Decimal("0.00"), raw_score
+
+    seconds_late = (submitted_at - due_date).total_seconds()
+    if seconds_late <= 0:
+        return Decimal("0.00"), raw_score
+
+    days_late = Decimal(max(1, math.ceil(seconds_late / 86400)))
+    deduction = Decimal("0.00")
+
+    if penalty_type == "percentage_per_day":
+        deduction = (penalty_value / Decimal(100)) * max_score * days_late
+    elif penalty_type == "fixed_percentage":
+        deduction = (penalty_value / Decimal(100)) * max_score
+    elif penalty_type == "fixed_points":
+        deduction = penalty_value
+
+    deduction = round(deduction, 2)
+    min_floor = max(Decimal("0.00"), min_score)
+    final_score = max(min_floor, raw_score - deduction)
+    final_score = min(max_score, max(Decimal("0.00"), final_score))
+    final_score = round(final_score, 2)
+    actual_deduction = max(Decimal("0.00"), raw_score - final_score)
+    return actual_deduction, final_score
 

@@ -16,17 +16,48 @@ class AssignmentWrite(BaseModel):
     han_nop: datetime = Field(alias="hanNop")
     diem_toi_da: Decimal = Field(alias="diemToiDa", gt=0, le=99999.99, max_digits=7, decimal_places=2)
     cho_nop_muon: bool = Field(default=False, alias="choNopMuon")
+    han_nop_muon: datetime | None = Field(default=None, alias="hanNopMuon")
+    loai_phat_nop_muon: str = Field(default="none", alias="loaiPhatNopMuon")
+    gia_tri_phat: Decimal = Field(default=Decimal("0.00"), alias="giaTriPhat", ge=0, le=99999.99, max_digits=7, decimal_places=2)
+    diem_san_toi_thieu: Decimal = Field(default=Decimal("0.00"), alias="diemSanToiThieu", ge=0, le=99999.99, max_digits=7, decimal_places=2)
 
     @field_validator("tieu_de", "mo_ta", mode="before")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("loai_phat_nop_muon")
+    @classmethod
+    def validate_penalty_type(cls, value: str) -> str:
+        allowed = {"none", "percentage_per_day", "fixed_percentage", "fixed_points"}
+        if value not in allowed:
+            raise ValueError(f"Loại phạt nộp muộn không hợp lệ. Phải thuộc: {', '.join(allowed)}")
+        return value
+
+
+class LatePolicyConfigWrite(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    cho_nop_muon: bool = Field(default=False, alias="choNopMuon")
+    han_nop_muon: datetime | None = Field(default=None, alias="hanNopMuon")
+    loai_phat_nop_muon: str = Field(default="none", alias="loaiPhatNopMuon")
+    gia_tri_phat: Decimal = Field(default=Decimal("0.00"), alias="giaTriPhat", ge=0, le=99999.99, max_digits=7, decimal_places=2)
+    diem_san_toi_thieu: Decimal = Field(default=Decimal("0.00"), alias="diemSanToiThieu", ge=0, le=99999.99, max_digits=7, decimal_places=2)
+
+    @field_validator("loai_phat_nop_muon")
+    @classmethod
+    def validate_penalty_type(cls, value: str) -> str:
+        allowed = {"none", "percentage_per_day", "fixed_percentage", "fixed_points"}
+        if value not in allowed:
+            raise ValueError(f"Loại phạt nộp muộn không hợp lệ. Phải thuộc: {', '.join(allowed)}")
+        return value
+
 
 class AssignmentGradeWrite(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     diem: Decimal = Field(ge=0, le=99999.99, max_digits=7, decimal_places=2)
+    diem_goc: Decimal | None = Field(default=None, alias="diemGoc", ge=0, le=99999.99, max_digits=7, decimal_places=2)
     nhan_xet: str | None = Field(default=None, alias="nhanXet", max_length=2000)
 
 

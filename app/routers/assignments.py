@@ -29,6 +29,7 @@ from app.models.nguoi_dung import NguoiDung
 from app.services.academic_service import accessible_classes, user_role_ids
 from app.services.assignment_service import (
     UPLOAD_ROOT,
+    calculate_late_penalty,
     can_teach_subject,
     delete_stored_files,
     ensure_assignment_teacher,
@@ -44,6 +45,7 @@ from app.services.assignment_service import (
 from app.schemas.assignment import (
     AssignmentGradeWrite,
     AssignmentWrite,
+    LatePolicyConfigWrite,
     ReopenWrite,
     RepositoryUrl,
 )
@@ -102,6 +104,8 @@ def _submission_payload(db: Session, submission: AssignmentSubmission | None) ->
         "status": "graded" if grade else submission.SubmissionStatus.lower(),
         "late": submission.SubmissionStatus == "Late",
         "grade": float(grade.Diem) if grade else None,
+        "rawGrade": float(grade.DiemGoc) if grade and grade.DiemGoc is not None else (float(grade.Diem) if grade else None),
+        "penaltyDeduction": float(grade.DiemTruPhat) if grade and grade.DiemTruPhat is not None else 0.0,
         "feedback": grade.NhanXet if grade else None,
         "gradedAt": grade.GradedAt.isoformat() if grade else None,
         "attachments": [_attachment_payload(item, "submission") for item in files],
@@ -131,6 +135,10 @@ def _assignment_payload(db: Session, assignment: Assignment, student_id: int | N
         "hanNop": assignment.HanNop.isoformat(),
         "diemToiDa": float(assignment.DiemToiDa),
         "choNopMuon": assignment.ChoNopMuon,
+        "hanNopMuon": assignment.HanNopMuon.isoformat() if assignment.HanNopMuon else None,
+        "loaiPhatNopMuon": assignment.LoaiPhatNopMuon or "none",
+        "giaTriPhat": float(assignment.GiaTriPhat) if assignment.GiaTriPhat is not None else 0.0,
+        "diemSanToiThieu": float(assignment.DiemSanToiThieu) if assignment.DiemSanToiThieu is not None else 0.0,
         "trangThai": assignment.TrangThai,
         "attachments": [_attachment_payload(item, "assignment") for item in attachments],
     }
@@ -148,7 +156,10 @@ def _assignment_payload(db: Session, assignment: Assignment, student_id: int | N
             )
         )
         can_resubmit = submission is None or grade is None or reopened
-        if assignment.HanNop < local_now() and not assignment.ChoNopMuon and not reopened:
+        now = local_now()
+        if assignment.HanNop < now and not assignment.ChoNopMuon and not reopened:
+            can_resubmit = False
+        if assignment.HanNopMuon and assignment.HanNopMuon < now and not reopened:
             can_resubmit = False
         payload["canResubmit"] = can_resubmit
     return payload
@@ -260,7 +271,13 @@ async def create_assignment(
         raise HTTPException(status_code=404, detail="Không tìm thấy lớp học.")
     if not can_teach_subject(db, user, body.lop_hoc_id, body.mon_hoc_id):
         raise HTTPException(status_code=403, detail="Bạn không được phân công môn học này.")
-    ensure_lesson_matches(db, body.lop_hoc_id, body.mon_hoc_id, body.lich_hoc_id)
+    due_date = to_local_naive(body.han_nop)
+    late_deadline = to_local_naive(body.han_nop_muon) if body.han_nop_muon else None
+    if body.cho_nop_muon and late_deadline and late_deadline <= due_date:
+        raise HTTPException(status_code=422, detail="Hạn chót nộp muộn phải sau hạn nộp chính thức.")
+    if body.diem_san_toi_thieu > body.diem_toi_da:
+        raise HTTPException(status_code=422, detail="Điểm sàn tối thiểu không được lớn hơn điểm tối đa.")
+
     stored = await save_uploads(files)
     now = local_now()
     assignment = Assignment(
@@ -270,9 +287,13 @@ async def create_assignment(
         GiangVienId=user.NguoiDungId,
         TieuDe=body.tieu_de,
         MoTa=body.mo_ta,
-        HanNop=to_local_naive(body.han_nop),
+        HanNop=due_date,
         DiemToiDa=body.diem_toi_da,
         ChoNopMuon=body.cho_nop_muon,
+        HanNopMuon=late_deadline if body.cho_nop_muon else None,
+        LoaiPhatNopMuon=body.loai_phat_nop_muon if body.cho_nop_muon else "none",
+        GiaTriPhat=body.gia_tri_phat if body.cho_nop_muon else Decimal("0.00"),
+        DiemSanToiThieu=body.diem_san_toi_thieu if body.cho_nop_muon else Decimal("0.00"),
         TrangThai="Draft",
         NgayTao=now,
         NgayCapNhat=now,
@@ -413,6 +434,11 @@ async def submit_assignment(
                     status_code=409,
                     detail="Bài đã được chấm. Hãy yêu cầu giảng viên mở lại trước khi nộp phiên bản mới.",
                 )
+    if is_late and assignment.HanNopMuon and now > assignment.HanNopMuon and not reopened:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Đã quá hạn chót nộp muộn ({assignment.HanNopMuon.strftime('%d/%m/%Y %H:%M')}). Bài tập đã đóng nộp bài.",
+        )
     if is_late and not assignment.ChoNopMuon and not reopened:
         raise HTTPException(status_code=409, detail="Đã quá hạn và bài tập không nhận bài muộn.")
     stored = await save_uploads(files)
@@ -460,9 +486,30 @@ def grade_submission(
     body = _parse_body(AssignmentGradeWrite, payload_json)
     if body.diem > assignment.DiemToiDa:
         raise HTTPException(status_code=422, detail="Điểm vượt quá số điểm tối đa của bài tập.")
+
+    raw_score = body.diem_goc if body.diem_goc is not None else body.diem
+    if raw_score > assignment.DiemToiDa:
+        raise HTTPException(status_code=422, detail="Điểm chấm không được vượt quá điểm tối đa.")
+
+    if submission.SubmissionStatus == "Late" and assignment.ChoNopMuon and assignment.LoaiPhatNopMuon != "none":
+        deduction, final_score = calculate_late_penalty(
+            submitted_at=submission.SubmittedAt,
+            due_date=assignment.HanNop,
+            max_score=Decimal(str(assignment.DiemToiDa)),
+            raw_score=Decimal(str(raw_score)),
+            penalty_type=assignment.LoaiPhatNopMuon,
+            penalty_value=Decimal(str(assignment.GiaTriPhat or 0)),
+            min_score=Decimal(str(assignment.DiemSanToiThieu or 0)),
+        )
+    else:
+        deduction = Decimal("0.00")
+        final_score = Decimal(str(raw_score))
+
     grade = AssignmentGrade(
         SubmissionId=submission.SubmissionId,
-        Diem=body.diem,
+        Diem=final_score,
+        DiemGoc=raw_score,
+        DiemTruPhat=deduction,
         NhanXet=body.nhan_xet,
         GiangVienId=user.NguoiDungId,
         GradedAt=local_now(),
@@ -547,6 +594,93 @@ def download_attachment(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Tệp không còn tồn tại trên máy chủ.")
     return FileResponse(path, filename=original_name)
+
+
+def _late_policy_payload(assignment: Assignment) -> dict:
+    parts = []
+    if assignment.ChoNopMuon:
+        if assignment.HanNopMuon:
+            parts.append(f"Hạn chót: {assignment.HanNopMuon.strftime('%d/%m/%Y %H:%M')}")
+        p_type = assignment.LoaiPhatNopMuon or "none"
+        p_val = float(assignment.GiaTriPhat) if assignment.GiaTriPhat is not None else 0.0
+        min_floor = float(assignment.DiemSanToiThieu) if assignment.DiemSanToiThieu is not None else 0.0
+        if p_type == "none":
+            parts.append("Không trừ điểm phạt")
+        elif p_type == "percentage_per_day":
+            parts.append(f"Trừ {p_val}%/ngày")
+        elif p_type == "fixed_percentage":
+            parts.append(f"Trừ {p_val}% cố định")
+        elif p_type == "fixed_points":
+            parts.append(f"Trừ {p_val}đ")
+        if p_type != "none" and min_floor > 0:
+            parts.append(f"Điểm sàn: {min_floor}đ")
+        desc = f"Cho phép nộp muộn ({' · '.join(parts)})" if parts else "Cho phép nộp muộn"
+    else:
+        desc = "Không nhận bài muộn"
+
+    return {
+        "assignmentId": assignment.AssignmentId,
+        "tieuDe": assignment.TieuDe,
+        "hanNop": assignment.HanNop.isoformat(),
+        "diemToiDa": float(assignment.DiemToiDa),
+        "choNopMuon": assignment.ChoNopMuon,
+        "hanNopMuon": assignment.HanNopMuon.isoformat() if assignment.HanNopMuon else None,
+        "loaiPhatNopMuon": assignment.LoaiPhatNopMuon or "none",
+        "giaTriPhat": float(assignment.GiaTriPhat) if assignment.GiaTriPhat is not None else 0.0,
+        "diemSanToiThieu": float(assignment.DiemSanToiThieu) if assignment.DiemSanToiThieu is not None else 0.0,
+        "moTaChinhSach": desc,
+    }
+
+
+@router.get("/{assignment_id}/late-policy", dependencies=[Depends(require_permission(ASSIGNMENT_VIEW))])
+def get_late_policy(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    user: NguoiDung = Depends(get_current_user),
+):
+    assignment = _get_assignment(db, assignment_id)
+    roles = user_role_ids(db, user.NguoiDungId)
+    if not (can_teach_subject(db, user, assignment.LopHocId, assignment.MonHocId) or 2 in roles):
+        raise HTTPException(status_code=403, detail="Bạn không có quyền xem chính sách nộp muộn của bài tập này.")
+    if 2 in roles and not can_teach_subject(db, user, assignment.LopHocId, assignment.MonHocId):
+        ensure_enrolled(db, assignment.LopHocId, user.NguoiDungId)
+    return _late_policy_payload(assignment)
+
+
+@router.put("/{assignment_id}/late-policy", dependencies=[Depends(require_permission(ASSIGNMENT_CREATE))])
+def update_late_policy(
+    assignment_id: int,
+    body: LatePolicyConfigWrite,
+    db: Session = Depends(get_db),
+    user: NguoiDung = Depends(get_current_user),
+):
+    assignment = _get_assignment(db, assignment_id)
+    ensure_assignment_teacher(db, user, assignment)
+
+    if body.cho_nop_muon:
+        late_deadline = to_local_naive(body.han_nop_muon) if body.han_nop_muon else None
+        if late_deadline and late_deadline <= assignment.HanNop:
+            raise HTTPException(status_code=422, detail="Hạn chót nộp muộn phải sau hạn nộp chính thức.")
+        if body.diem_san_toi_thieu > assignment.DiemToiDa:
+            raise HTTPException(status_code=422, detail="Điểm sàn tối thiểu không được lớn hơn điểm tối đa.")
+
+        assignment.ChoNopMuon = True
+        assignment.HanNopMuon = late_deadline
+        assignment.LoaiPhatNopMuon = body.loai_phat_nop_muon
+        assignment.GiaTriPhat = body.gia_tri_phat
+        assignment.DiemSanToiThieu = body.diem_san_toi_thieu
+    else:
+        assignment.ChoNopMuon = False
+        assignment.HanNopMuon = None
+        assignment.LoaiPhatNopMuon = "none"
+        assignment.GiaTriPhat = Decimal("0.00")
+        assignment.DiemSanToiThieu = Decimal("0.00")
+
+    assignment.NgayCapNhat = local_now()
+    _commit(db, "Không thể cập nhật cấu hình chính sách nộp muộn.")
+    result = _late_policy_payload(assignment)
+    result["message"] = "Đã cập nhật cấu hình chính sách nộp muộn thành công."
+    return result
 
 
 

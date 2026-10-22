@@ -209,12 +209,18 @@ Các hợp đồng API chính (các trường JSON dùng camelCase):
     nộp tại `GET /assignments/{assignment_id}/roster`, chấm bài tại
     `POST /assignments/submissions/{submission_id}/grade` và có thể mở lại bài
     đã chấm tại `POST /assignments/{assignment_id}/students/{student_id}/reopen`.
+  - `GET /assignments/{assignment_id}/late-policy` và `PUT /assignments/{assignment_id}/late-policy`
+    (SCRUM-509) xem và cập nhật cấu hình chính sách nộp muộn (`choNopMuon`, `hanNopMuon`,
+    `loaiPhatNopMuon`, `giaTriPhat`, `diemSanToiThieu`). Giảng viên phụ trách lớp/môn có
+    quyền cấu hình; hạn chót nộp muộn phải sau hạn nộp chính thức và điểm sàn không vượt
+    quá điểm tối đa của bài tập.
   - Tệp đính kèm được tải qua
     `GET /assignments/attachments/{kind}/{attachment_id}`. Quyền `ASSIGNMENT_*`
     được khởi tạo cùng catalog RBAC; học viên được xem/nộp, giảng viên/trợ giảng
     được quản lý/chấm bài.
   - Migration `016_assignments.sql` tạo các bảng bài tập, tệp đính kèm, bài nộp
-    điểm và lịch sử mở lại.
+    điểm và lịch sử mở lại; `019_assignment_late_policy.sql` bổ sung các cột chính sách
+    nộp muộn và chi tiết điểm trước/sau phạt.
 
 Các endpoint danh mục dùng quyền `CURRICULUM_VIEW/CREATE/UPDATE/DELETE`.
 Quyền `LEAD_VIEW/CREATE/UPDATE` được cấp cho tuyển sinh; `LEAD_DELETE` và
