@@ -176,6 +176,36 @@ def update_role_permissions(
 
 
 # ============================================================
+# LẤY DANH SÁCH VAI TRÒ CHO COMBOBOX
+#
+# Chỉ cần đăng nhập, không yêu cầu quyền ROLE_VIEW,
+# để admin tạo tài khoản vẫn chọn được vai trò.
+# ============================================================
+
+@router.get(
+    "/danh-sach",
+)
+def get_role_options(
+    current_user: NguoiDung = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    roles = (
+        db.query(VaiTro)
+        .filter(VaiTro.VaiTroId <= 8)
+        .order_by(VaiTro.VaiTroId)
+        .all()
+    )
+
+    return [
+        {
+            "vaiTroId": role.VaiTroId,
+            "tenVaiTro": role.TenVaiTro,
+        }
+        for role in roles
+    ]
+
+
+# ============================================================
 # LẤY VAI TRÒ CỦA MỘT NGƯỜI DÙNG
 # ============================================================
 
@@ -246,6 +276,7 @@ def get_user_roles(
 def assign_role(
     nguoi_dung_id: int,
     vai_tro_id: int,
+    current_user: NguoiDung = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     user = (
@@ -275,6 +306,23 @@ def assign_role(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Vai trò không tồn tại.",
+        )
+
+    if (
+        current_user.NguoiDungId == nguoi_dung_id
+        and (
+            role.VaiTroId == 8
+            or role.TenVaiTro.strip().casefold()
+            in {
+                "admin",
+                "quản trị hệ thống",
+                "quản trị viên hệ thống",
+            }
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Không thể tự gán vai trò quản trị cho chính mình.",
         )
 
     existing = (

@@ -8,6 +8,8 @@ from fastapi import (
     File,
     HTTPException,
 )
+from pydantic import EmailStr
+from sqlalchemy import String, cast, or_
 from pathlib import Path
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
@@ -21,6 +23,7 @@ from app.core.security import (
 )
 
 from app.models.nguoi_dung import NguoiDung
+from app.models.admissions import LeadConversion
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.vai_tro import VaiTro
 
@@ -168,8 +171,50 @@ def get_user_avatar(nguoi_dung_id: int):
 
 
 # =========================================================
-# LẤY DANH SÁCH NGƯỜI DÙNG
+# KIỂM TRA EMAIL ĐÃ TỒN TẠI CHƯA
 #
+# GET /users/check-email?email=...
+#
+# Dùng cho popup tạo tài khoản: hiển thị cảnh báo đỏ
+# ngay dưới ô email trước khi bấm tạo.
+# =========================================================
+
+@router.get(
+    "/check-email",
+    dependencies=[
+        Depends(
+            require_permission("USER_CREATE")
+        )
+    ],
+)
+def check_email_exists(
+    email: EmailStr = Query(
+        description="Email cần kiểm tra",
+    ),
+    db: Session = Depends(get_db),
+):
+    normalized_email = str(email).strip().lower()
+
+    exists = (
+        db.query(NguoiDung.NguoiDungId)
+        .filter(NguoiDung.Email == normalized_email)
+        .first()
+        is not None
+    )
+
+    return {
+        "email": normalized_email,
+        "exists": exists,
+        "message": (
+            "Email đã tồn tại"
+            if exists
+            else "Email hợp lệ"
+        ),
+    }
+
+
+# =========================================================
+# LẤY DANH SÁCH NGƯỜI DÙNG
 # GET /users/
 #
 # Hỗ trợ:
@@ -240,14 +285,16 @@ def get_users(
             search_pattern = f"%{search_value}%"
 
             query = query.filter(
-                (NguoiDung.HoTen.ilike(search_pattern))
-                |
-                (NguoiDung.Email.ilike(search_pattern))
-                |
-                (
-                    NguoiDung.SoDienThoai.ilike(
-                        search_pattern
-                    )
+                or_(
+                    NguoiDung.HoTen.ilike(search_pattern),
+                    NguoiDung.Email.ilike(search_pattern),
+                    NguoiDung.SoDienThoai.ilike(search_pattern),
+                    cast(NguoiDung.NguoiDungId, String).ilike(search_pattern),
+                    NguoiDung.NguoiDungId.in_(
+                        db.query(LeadConversion.NguoiDungId).filter(
+                            LeadConversion.MaHocVien.ilike(search_pattern)
+                        )
+                    ),
                 )
             )
 
@@ -275,7 +322,8 @@ def get_users(
 
     if status is not None:
         query = query.filter(
-            NguoiDung.TrangThai == status.value
+            NguoiDung.TrangThai
+            == status.value
         )
 
     # =====================================================
@@ -303,6 +351,7 @@ def get_users(
     role_rows = (
         db.query(
             NguoiDungVaiTro.NguoiDungId,
+            NguoiDungVaiTro.VaiTroId,
             VaiTro.TenVaiTro,
         )
         .join(
@@ -322,8 +371,10 @@ def get_users(
     ) if users else []
 
     roles_by_user: dict[int, list[str]] = {}
-    for user_id, role_name in role_rows:
+    role_ids_by_user: dict[int, list[int]] = {}
+    for user_id, role_id, role_name in role_rows:
         roles_by_user.setdefault(user_id, []).append(role_name)
+        role_ids_by_user.setdefault(user_id, []).append(role_id)
 
     # =====================================================
     # TRẢ VỀ
@@ -343,6 +394,12 @@ def get_users(
                 "vaiTro": ", ".join(
                     roles_by_user.get(user.NguoiDungId, [])
                 ),
+                "vaiTroIds": role_ids_by_user.get(user.NguoiDungId, []),
+                "maHocVien": db.query(LeadConversion.MaHocVien)
+                .filter(
+                    LeadConversion.NguoiDungId == user.NguoiDungId
+                )
+                .scalar(),
                 "ngayTao": user.NgayTao,
                 "ngayCapNhat": user.NgayCapNhat,
             }
@@ -600,7 +657,6 @@ def admin_create_user_endpoint(
 
 @router.post(
     "/",
-    status_code=201,
     dependencies=[
         Depends(
             require_permission("USER_CREATE")

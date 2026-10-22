@@ -1,5 +1,6 @@
 from app.routers import auth
 from app.schemas.login import LoginRequest
+from app.schemas.resend_activation import ResendActivationRequest
 
 
 def test_login_includes_avatar_url(monkeypatch):
@@ -27,3 +28,20 @@ def test_login_includes_avatar_url(monkeypatch):
     )
 
     assert response["avatarUrl"] == expected_avatar_url
+
+
+def test_resend_activation_endpoint_delegates_to_service(monkeypatch):
+    expected = {"message": "generic response"}
+    request = ResendActivationRequest(email="user@example.com")
+    db = object()
+    monkeypatch.setattr(
+        auth,
+        "resend_activation",
+        lambda actual_db, actual_request: (
+            expected
+            if actual_db is db and actual_request is request
+            else None
+        ),
+    )
+
+    assert auth.resend_activation_endpoint(request, db) == expected

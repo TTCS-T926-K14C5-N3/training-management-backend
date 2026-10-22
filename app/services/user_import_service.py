@@ -9,11 +9,15 @@ from openpyxl import load_workbook
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import FRONTEND_URL
 from pwdlib import PasswordHash
+from app.core.config import FRONTEND_URL
 from app.models.nguoi_dung import NguoiDung
 from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.token_kich_hoat import TokenKichHoat
+from app.services.auth_service import generate_temporary_password
 from app.services.email_service import send_activation_email
+from app.services.rbac_service import ROLE_NAMES
 
 password_hash = PasswordHash.recommended()
 # ============================================================
@@ -21,25 +25,29 @@ password_hash = PasswordHash.recommended()
 # ============================================================
 
 ROLE_ID_TO_NAME = {
-    1: "Guest",
-    2: "Student",
-    3: "Instructor",
-    4: "TA",
-    5: "Admissions",
-    6: "Accountant",
-    7: "Training Manager",
-    8: "Admin",
+    role_id: name for role_id, (name, _description) in ROLE_NAMES.items()
 }
 
 ROLE_NAME_TO_ID = {
     "guest": 1,
+    "khách": 1,
     "student": 2,
+    "sinh viên": 2,
+    "học viên": 2,
     "instructor": 3,
+    "giảng viên": 3,
     "ta": 4,
+    "trợ giảng": 4,
     "admissions": 5,
+    "tuyển sinh": 5,
     "accountant": 6,
+    "kế toán": 6,
     "training manager": 7,
+    "quản lý đào tạo": 7,
     "admin": 8,
+    "quản trị hệ thống": 8,
+    "quản trị viên": 8,
+    "quản trị viên hệ thống": 8,
 }
 
 
@@ -65,37 +73,6 @@ def normalize_email(value) -> str:
     Chuẩn hóa email.
     """
     return normalize_text(value).lower()
-
-
-def generate_temporary_password(length: int = 12) -> str:
-    """
-    Tạo mật khẩu tạm thời gồm:
-    - chữ thường
-    - chữ hoa
-    - số
-    """
-
-    if length < 3:
-        raise ValueError("Độ dài mật khẩu phải >= 3")
-
-    lowercase = "abcdefghijklmnopqrstuvwxyz"
-    uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    digits = "0123456789"
-
-    password = [
-        secrets.choice(lowercase),
-        secrets.choice(uppercase),
-        secrets.choice(digits),
-    ]
-
-    all_chars = lowercase + uppercase + digits
-
-    for _ in range(length - 3):
-        password.append(secrets.choice(all_chars))
-
-    secrets.SystemRandom().shuffle(password)
-
-    return "".join(password)
 
 
 def generate_activation_token() -> tuple[str, str]:
@@ -125,14 +102,16 @@ def parse_role(value):
 
     hoặc:
 
-    Guest
-    Student
-    Instructor
-    TA
-    Admissions
-    Accountant
-    Training Manager
-    Admin
+    Khách
+    Học viên
+    Giảng viên
+    Trợ giảng
+    Tuyển sinh
+    Kế toán
+    Quản lý đào tạo
+    Quản trị hệ thống
+
+    Các tên tiếng Anh cũ vẫn được chấp nhận để tương thích với tệp hiện có.
     """
 
     if value is None:
@@ -169,7 +148,7 @@ def parse_role(value):
         return None
 
     # Nhập tên vai trò
-    return ROLE_NAME_TO_ID.get(role_value.lower())
+    return ROLE_NAME_TO_ID.get(role_value.casefold())
 
 
 def validate_excel_headers(headers):
@@ -656,20 +635,30 @@ def create_user_from_excel_row(
     # --------------------------------------------------------
 
     activation_link = (
-        "http://localhost:5173/login"
-        f"?activate={raw_token}"
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
     )
 
     # --------------------------------------------------------
-    # Gửi email
+    # Commit tài khoản + vai trò + token TRƯỚC khi gửi email.
+    #
+    # Nếu gửi email thất bại, tài khoản vẫn được giữ lại và
+    # lỗi được ghi nhận ở trường canhBao thay vì rollback.
     # --------------------------------------------------------
 
-    send_activation_email(
-        recipient_email=email,
-        ho_ten=ho_ten,
-        temporary_password=temporary_password,
-        activation_link=activation_link,
-    )
+    db.commit()
+    db.refresh(user)
+
+    canh_bao = None
+
+    try:
+        send_activation_email(
+            recipient_email=email,
+            ho_ten=ho_ten,
+            temporary_password=temporary_password,
+            activation_link=activation_link,
+        )
+    except Exception as exc:
+        canh_bao = f"Không thể gửi email kích hoạt: {exc}"
 
     return {
         "nguoiDungId": user.NguoiDungId,
@@ -678,6 +667,7 @@ def create_user_from_excel_row(
         "vaiTroId": role_id,
         "vaiTro": ROLE_ID_TO_NAME.get(role_id),
         "matKhauTamThoiHetHan": password_expiry,
+        "canhBao": canh_bao,
     }
 
 
@@ -747,11 +737,9 @@ def import_valid_users(
                 row=row,
             )
 
-            # Commit từng user.
-            #
-            # Nếu một dòng lỗi thì những dòng trước
-            # vẫn giữ nguyên.
-            db.commit()
+            # create_user_from_excel_row đã commit tài khoản, vai trò và
+            # token trước khi gửi email, nên tài khoản đã tạo sẽ không bị
+            # mất nếu bước gửi email thất bại (lỗi được trả ở canhBao).
 
             created_users.append(
                 {

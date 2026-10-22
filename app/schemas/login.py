@@ -9,6 +9,14 @@ class LoginRequest(BaseModel):
         max_length=100
     )
 
+    # Token kích hoạt lấy từ link trong email tạo tài khoản.
+    # Có token này thì tài khoản được kích hoạt ngay
+    # trong lần đăng nhập đầu tiên.
+    activation_token: str | None = Field(
+        default=None,
+        max_length=255
+    )
+
 
 # Cấu trúc dữ liệu Backend trả về chứa Token
 class Token(BaseModel):

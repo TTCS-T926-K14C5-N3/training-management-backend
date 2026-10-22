@@ -1,3 +1,4 @@
+from datetime import datetime
 from sqlalchemy import (
     Column,
     Integer,
@@ -25,5 +26,6 @@ class NguoiDungVaiTro(Base):
 
     NgayGan = Column(
         DateTime,
+        default=datetime.now,
         nullable=False,
     )

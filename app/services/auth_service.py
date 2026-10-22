@@ -1,26 +1,43 @@
 import hashlib
 import logging
 import secrets
+import string
 from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import HTTPException
 from pwdlib import PasswordHash
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import FRONTEND_URL
 from app.core.security import create_access_token, decode_access_token
+
+from app.models.admissions import LeadConversion
 from app.models.nguoi_dung import NguoiDung
+from app.models.nguoi_dung_vai_tro import NguoiDungVaiTro
 from app.models.revoked_token import RevokedToken
+from app.models.diem import Diem
+from app.models.diem_danh_buoi_hoc import (
+    DiemDanhBuoiHoc,
+    DiemDanhBuoiHocLichSu,
+)
+from app.models.lop_hoc import LopHoc
+from app.models.lop_hoc_hoc_vien import (
+    LopHocHocVien,
+    LopHocHocVienThaoTac,
+)
 from app.models.token_mat_khau import TokenMatKhau
 from app.models.token_kich_hoat import TokenKichHoat
+from app.models.vai_tro import VaiTro
 from app.schemas.forgot_password import ForgotPasswordRequest
 from app.schemas.login import LoginRequest
 from app.schemas.admin_create_user import AdminCreateUserRequest
 from app.schemas.nguoi_dung import NguoiDungCreate, NguoiDungLock
 from app.schemas.register import RegisterRequest
 from app.schemas.reset_password import ResetPasswordRequest
+from app.schemas.resend_activation import ResendActivationRequest
 from app.services.email_service import (
     send_reset_password_email,
     send_activation_email,
@@ -29,6 +46,48 @@ from app.services.email_service import (
 
 password_hash = PasswordHash.recommended()
 logger = logging.getLogger(__name__)
+STUDENT_ROLE_ID = 2
+
+
+# =========================================================
+# ĐƯỜNG DẪN TRANG CHỦ THEO VAI TRÒ
+# =========================================================
+
+ROLE_HOME_PATHS = {
+    "admin": "/admin/home",
+    "quản trị hệ thống": "/admin/home",
+    "quản trị viên": "/admin/home",
+}
+
+
+def _role_home_path(role_names: list[str]) -> str:
+    for role_name in role_names:
+        if not role_name:
+            continue
+
+        path = ROLE_HOME_PATHS.get(role_name.strip().lower())
+        if path:
+            return path
+
+    return "/home"
+
+
+def _get_role_names(db: Session, user_id: int) -> list[str]:
+    rows = db.execute(
+        text(
+            """
+            SELECT vt.TenVaiTro
+            FROM NguoiDung_VaiTro ndvt
+            INNER JOIN VaiTro vt
+                ON ndvt.VaiTroId = vt.VaiTroId
+            WHERE ndvt.NguoiDungId = :nguoi_dung_id
+            ORDER BY vt.VaiTroId
+            """
+        ),
+        {"nguoi_dung_id": user_id},
+    ).mappings().all()
+
+    return [row["TenVaiTro"] for row in rows]
 
 
 def utc_now() -> datetime:
@@ -137,16 +196,24 @@ def register_user(
             detail="Email đã được sử dụng",
         )
 
+    phone = (
+        request.so_dien_thoai.strip()
+        if request.so_dien_thoai
+        else None
+    )
+
+    if phone and phone_exists(db, phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Số điện thoại đã được sử dụng",
+        )
+
     now = datetime.now()
 
     user = NguoiDung(
         HoTen=request.ho_ten.strip(),
         Email=email,
-        SoDienThoai=(
-            request.so_dien_thoai.strip()
-            if request.so_dien_thoai
-            else None
-        ),
+        SoDienThoai=phone,
         MatKhauHash=password_hash.hash(
             request.password
         ),
@@ -168,7 +235,6 @@ def register_user(
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Không thể tạo tài khoản",
@@ -202,12 +268,24 @@ def create_user(
             detail="Email đã được sử dụng",
         )
 
+    phone = (
+        request.so_dien_thoai.strip()
+        if request.so_dien_thoai
+        else None
+    )
+
+    if phone and phone_exists(db, phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Số điện thoại đã được sử dụng",
+        )
+
     now = datetime.now()
 
     user = NguoiDung(
-        HoTen=request.ho_ten.strip(),
+        HoTen=ho_ten.strip(),
         Email=email,
-        SoDienThoai=request.so_dien_thoai,
+        SoDienThoai=phone,
         MatKhauHash=password_hash.hash(
             request.password
         ),
@@ -241,10 +319,187 @@ def create_user(
         "user": _user_data(user),
     }
 
+def _normalize_phone(phone: str | None) -> str:
+    """Chuẩn hóa số điện thoại để so sánh."""
+    digits = "".join(
+        char for char in (phone or "")
+        if char.isdigit()
+    )
 
+    # Chuyển 84xxxxxxxxx thành 0xxxxxxxxx
+    if digits.startswith("84") and len(digits) == 11:
+        digits = "0" + digits[2:]
+
+    return digits
+
+def phone_exists(
+    db: Session,
+    phone: str | None,
+    exclude_user_id: int | None = None,
+) -> bool:
+    """Kiểm tra số điện thoại đã thuộc tài khoản khác chưa."""
+    normalized = _normalize_phone(phone)
+
+    if not normalized:
+        return False
+
+    query = db.query(NguoiDung.SoDienThoai).filter(
+        NguoiDung.SoDienThoai.isnot(None)
+    )
+
+    if exclude_user_id is not None:
+        query = query.filter(
+            NguoiDung.NguoiDungId != exclude_user_id
+        )
+
+    return any(
+        _normalize_phone(row[0]) == normalized
+        for row in query.all()
+    )
 # ============================================================
 # ADMIN TẠO TÀI KHOẢN
 # ============================================================
+
+def _resolve_selected_role(db: Session, vai_tro_id) -> dict:
+    """Chuẩn hóa và xác thực vai trò được chọn khi tạo tài khoản.
+
+    Luôn truy vấn theo đúng VaiTroId được chọn, không dùng index
+    của danh sách vai trò.
+    """
+
+    try:
+        selected_role_id = int(vai_tro_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Vai trò không hợp lệ",
+        )
+
+    if selected_role_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Vai trò không hợp lệ",
+        )
+
+    role = db.execute(
+        text("""
+            SELECT
+                VaiTroId,
+                TenVaiTro
+            FROM VaiTro
+            WHERE VaiTroId = :vai_tro_id
+        """),
+        {
+            "vai_tro_id": selected_role_id,
+        },
+    ).mappings().first()
+
+    if not role:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Vai trò có ID {selected_role_id} "
+                "không tồn tại"
+            ),
+        )
+
+    # Kiểm tra thêm để chắc chắn DB trả đúng ID
+    database_role_id = int(role["VaiTroId"])
+
+    if database_role_id != selected_role_id:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "ID vai trò được chọn không khớp "
+                "với dữ liệu trong cơ sở dữ liệu"
+            ),
+        )
+
+    return {
+        "vaiTroId": selected_role_id,
+        "tenVaiTro": role["TenVaiTro"],
+    }
+
+
+def _create_activation_token(
+    db: Session,
+    user: NguoiDung,
+    expiry: datetime,
+    now: datetime,
+) -> str:
+    """Tạo token kích hoạt và trả về link kích hoạt dùng cho email."""
+
+    raw_activation_token = secrets.token_urlsafe(32)
+
+    activation_token = TokenKichHoat(
+        NguoiDungId=user.NguoiDungId,
+        Token=hashlib.sha256(
+            raw_activation_token.encode()
+        ).hexdigest(),
+        ThoiGianTao=now,
+        ThoiGianHetHan=expiry,
+        DaSuDung=False,
+    )
+
+    db.add(activation_token)
+
+    return (
+        f"{FRONTEND_URL.rstrip('/')}/activate-account"
+        f"?token={raw_activation_token}"
+    )
+
+
+def prepare_student_account(
+    db: Session,
+    *,
+    ho_ten: str,
+    email: str,
+    so_dien_thoai: str,
+    now: datetime,
+) -> tuple[NguoiDung, str, str]:
+    """Prepare a student account and activation email data in the current transaction."""
+    if db.query(VaiTro).filter(VaiTro.VaiTroId == STUDENT_ROLE_ID).first() is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Không tìm thấy vai trò học viên trong cơ sở dữ liệu.",
+        )
+
+    temporary_password = generate_temporary_password()
+    password_expiry = now + timedelta(hours=24)
+    user = NguoiDung(
+        HoTen=ho_ten,
+        Email=email,
+        SoDienThoai=so_dien_thoai,
+        MatKhauHash=password_hash.hash(temporary_password),
+        TrangThai="HoatDong",
+        DaKichHoat=False,
+        BatBuocDoiMatKhau=True,
+        CanDoiMatKhau=True,
+        MatKhauTamThoiHetHan=password_expiry,
+        SoLanDangNhapSai=0,
+        KhoaDen=None,
+        LyDoKhoa=None,
+        TokenValidAfter=None,
+        NgayTao=now,
+        NgayCapNhat=now,
+    )
+    db.add(user)
+    db.flush()
+    db.add(
+        NguoiDungVaiTro(
+            NguoiDungId=user.NguoiDungId,
+            VaiTroId=STUDENT_ROLE_ID,
+            NgayGan=now,
+        )
+    )
+    activation_link = _create_activation_token(
+        db=db,
+        user=user,
+        expiry=password_expiry,
+        now=now,
+    )
+    return user, temporary_password, activation_link
+
 
 def admin_create_user(
     db: Session,
@@ -287,19 +542,8 @@ def admin_create_user(
     # 2. LẤY CHÍNH XÁC VAI TRÒ ĐƯỢC CHỌN
     # ========================================================
 
-    try:
-        selected_role_id = int(request.vai_tro_id)
-    except (TypeError, ValueError):
-        raise HTTPException(
-            status_code=400,
-            detail="Vai trò không hợp lệ",
-        )
-
-    if selected_role_id <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Vai trò không hợp lệ",
-        )
+    role = _resolve_selected_role(db, request.vai_tro_id)
+    selected_role_id = role["vaiTroId"]
 
     # ========================================================
     # 3. KIỂM TRA EMAIL ĐÃ TỒN TẠI
@@ -318,66 +562,16 @@ def admin_create_user(
         )
 
     # ========================================================
-    # 4. KIỂM TRA VAI TRÒ
-    #
-    # QUAN TRỌNG:
-    # Luôn truy vấn theo đúng selected_role_id.
-    # Không dùng index của danh sách vai trò.
-    # ========================================================
-
-    role = db.execute(
-        text("""
-            SELECT
-                VaiTroId,
-                TenVaiTro
-            FROM VaiTro
-            WHERE VaiTroId = :vai_tro_id
-        """),
-        {
-            "vai_tro_id": selected_role_id,
-        },
-    ).mappings().first()
-
-    if not role:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Vai trò có ID {selected_role_id} "
-                "không tồn tại"
-            ),
-        )
-
-    # Kiểm tra thêm để chắc chắn DB trả đúng ID
-    database_role_id = int(role["VaiTroId"])
-
-    if database_role_id != selected_role_id:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "ID vai trò được chọn không khớp "
-                "với dữ liệu trong cơ sở dữ liệu"
-            ),
-        )
-
-    # ========================================================
-    # 5. SINH MẬT KHẨU TẠM THỜI
+    # 4. SINH MẬT KHẨU TẠM THỜI VÀ THỜI GIAN
     # ========================================================
 
     temporary_password = generate_temporary_password()
-
-    # ========================================================
-    # 6. THỜI GIAN
-    # ========================================================
 
     now = datetime.now()
 
     temporary_password_expiry = (
         now + timedelta(hours=24)
     )
-
-    # ========================================================
-    # 7. TẠO USER
-    # ========================================================
 
     user = NguoiDung(
         HoTen=ho_ten,
@@ -410,7 +604,7 @@ def admin_create_user(
 
     try:
         # ====================================================
-        # 8. INSERT USER
+        # 5. INSERT USER
         # ====================================================
 
         db.add(user)
@@ -425,106 +619,34 @@ def admin_create_user(
             )
 
         # ====================================================
-        # 9. GÁN VAI TRÒ
-        #
-        # ĐÂY LÀ PHẦN SỬA QUAN TRỌNG NHẤT
+        # 6. GÁN VAI TRÒ
         #
         # Luôn sử dụng selected_role_id.
         # Không sử dụng index của danh sách vai trò.
         # ====================================================
 
-        db.execute(
-            text("""
-                INSERT INTO NguoiDung_VaiTro
-                (
-                    NguoiDungId,
-                    VaiTroId
-                )
-                VALUES
-                (
-                    :nguoi_dung_id,
-                    :vai_tro_id
-                )
-            """),
-            {
-                "nguoi_dung_id": user.NguoiDungId,
-                "vai_tro_id": selected_role_id,
-            },
-        )
-
-        # ====================================================
-        # 10. KIỂM TRA LẠI VAI TRÒ VỪA INSERT
-        #
-        # Nếu DB lưu sai ID -> rollback ngay.
-        # ====================================================
-
-        inserted_role = db.execute(
-            text("""
-                SELECT TOP 1
-                    ndvt.VaiTroId
-                FROM NguoiDung_VaiTro ndvt
-                WHERE ndvt.NguoiDungId = :nguoi_dung_id
-                ORDER BY ndvt.VaiTroId
-            """),
-            {
-                "nguoi_dung_id": user.NguoiDungId,
-            },
-        ).scalar()
-
-        if inserted_role is None:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Không thể gán vai trò "
-                    "cho tài khoản"
-                ),
+        db.add(
+            NguoiDungVaiTro(
+                NguoiDungId=user.NguoiDungId,
+                VaiTroId=selected_role_id,
+                NgayGan=now,
             )
-
-        inserted_role_id = int(inserted_role)
-
-        if inserted_role_id != selected_role_id:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Lỗi gán vai trò: "
-                    f"đã chọn VaiTroId={selected_role_id} "
-                    f"nhưng DB ghi VaiTroId={inserted_role_id}"
-                ),
-            )
-
-        # ====================================================
-        # 11. TẠO TOKEN KÍCH HOẠT
-        # ====================================================
-
-        raw_activation_token = (
-            secrets.token_urlsafe(32)
         )
-
-        activation_token = TokenKichHoat(
-            NguoiDungId=user.NguoiDungId,
-            Token=hashlib.sha256(
-                raw_activation_token.encode()
-            ).hexdigest(),
-            ThoiGianTao=now,
-            ThoiGianHetHan=(
-                temporary_password_expiry
-            ),
-            DaSuDung=False,
-        )
-
-        db.add(activation_token)
+        db.flush()
 
         # ====================================================
-        # 12. LINK KÍCH HOẠT
+        # 7. TẠO TOKEN KÍCH HOẠT VÀ LINK KÍCH HOẠT
         # ====================================================
 
-        activation_link = (
-            "http://localhost:5173/login"
-            f"?activate={raw_activation_token}"
+        activation_link = _create_activation_token(
+            db=db,
+            user=user,
+            expiry=temporary_password_expiry,
+            now=now,
         )
 
         # ====================================================
-        # 13. GỬI EMAIL
+        # 8. GỬI EMAIL
         # ====================================================
 
         send_activation_email(
@@ -535,7 +657,7 @@ def admin_create_user(
         )
 
         # ====================================================
-        # 14. COMMIT
+        # 9. COMMIT
         # ====================================================
 
         db.commit()
@@ -557,50 +679,16 @@ def admin_create_user(
             ),
         )
 
-    # ========================================================
-    # 15. LẤY LẠI VAI TRÒ SAU KHI GÁN
-    #
-    # Response lấy trực tiếp từ quan hệ DB.
-    # ========================================================
-
-    final_role = db.execute(
-        text("""
-            SELECT TOP 1
-                vt.VaiTroId,
-                vt.TenVaiTro
-            FROM NguoiDung_VaiTro ndvt
-            INNER JOIN VaiTro vt
-                ON ndvt.VaiTroId = vt.VaiTroId
-            WHERE ndvt.NguoiDungId = :nguoi_dung_id
-              AND ndvt.VaiTroId = :vai_tro_id
-        """),
-        {
-            "nguoi_dung_id": user.NguoiDungId,
-            "vai_tro_id": selected_role_id,
-        },
-    ).mappings().first()
-
-    if not final_role:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Không thể xác nhận vai trò "
-                "của tài khoản vừa tạo"
-            ),
-        )
-
     return {
         "message": "Tạo tài khoản thành công",
         "nguoiDungId": user.NguoiDungId,
         "hoTen": user.HoTen,
         "email": user.Email,
 
-        # Vai trò lấy trực tiếp từ quan hệ DB
+        # Vai trò lấy từ bản ghi vừa gán
         "vaiTro": {
-            "vaiTroId": int(
-                final_role["VaiTroId"]
-            ),
-            "tenVaiTro": final_role["TenVaiTro"],
+            "vaiTroId": selected_role_id,
+            "tenVaiTro": role["tenVaiTro"],
         },
 
         "daKichHoat": user.DaKichHoat,
@@ -639,10 +727,52 @@ def login_user(
         )
 
     if not getattr(user, "DaKichHoat", True):
-        raise HTTPException(
-            status_code=403,
-            detail="Tài khoản chưa được kích hoạt",
-        )
+        activation_token = None
+
+        if request.activation_token:
+            token_hash = hashlib.sha256(
+                request.activation_token.encode()
+            ).hexdigest()
+            activation_token = (
+                db.query(TokenKichHoat)
+                .filter(
+                    TokenKichHoat.Token == token_hash,
+                    TokenKichHoat.DaSuDung == False,
+                )
+                .first()
+            )
+
+            if (
+                activation_token
+                and activation_token.NguoiDungId
+                != user.NguoiDungId
+            ):
+                activation_token = None
+
+            if (
+                activation_token
+                and activation_token.ThoiGianHetHan < datetime.now()
+            ):
+                activation_token.DaSuDung = True
+                db.commit()
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Link kích hoạt đã hết hạn. "
+                        "Vui lòng liên hệ quản trị viên."
+                    ),
+                )
+
+            if activation_token:
+                user.DaKichHoat = True
+                activation_token.DaSuDung = True
+                db.commit()
+
+        if not user.DaKichHoat:
+            raise HTTPException(
+                status_code=403,
+                detail="Tài khoản chưa được kích hoạt",
+            )
 
     now = datetime.now()
 
@@ -693,6 +823,7 @@ def login_user(
             user.SoLanDangNhapSai or 0
         ) + 1
 
+        # Sai 5 lần → khóa 15 phút
         if user.SoLanDangNhapSai >= 5:
             user.KhoaDen = (
                 now + timedelta(minutes=15)
@@ -744,6 +875,15 @@ def login_user(
     user.TrangThai = "HoatDong"
     user.NgayCapNhat = now
 
+    token_valid_after = user.TokenValidAfter
+    if token_valid_after is not None and token_valid_after > utc_now():
+        logger.warning(
+            "TokenValidAfter for user %s is in the future; "
+            "clamping it to the successful login time.",
+            user.NguoiDungId,
+        )
+        user.TokenValidAfter = utc_now()
+
     db.commit()
     db.refresh(user)
 
@@ -794,6 +934,42 @@ def login_user(
         },
     ).mappings().all()
 
+    # =====================================================
+    # TẠO JWT
+    # =====================================================
+
+    # =================================================
+    # BẮT BUỘC ĐỔI MẬT KHẨU TẠM THỜI
+    #
+    # Tài khoản do admin tạo có YeuCauDoiMatKhau=True.
+    # Chỉ cấp token được phép đổi mật khẩu thôi,
+    # để không thể dùng mật khẩu tạm đi khắp hệ thống.
+    # =================================================
+
+    access_token = create_access_token(
+        {
+            "sub": user.Email,
+            "user_id": user_id,
+            "roles": (
+                []
+                if user.YeuCauDoiMatKhau
+                else [
+                    role["TenVaiTro"]
+                    for role in roles
+                ]
+            ),
+            "muc_dich": (
+                "DOI_MAT_KHAU"
+                if user.YeuCauDoiMatKhau
+                else "TRUY_CAP"
+            ),
+        }
+    )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
     return {
         "message": "Đăng nhập thành công",
 
@@ -812,7 +988,9 @@ def login_user(
         "token_type": "bearer",
 
         "nguoiDungId": user.NguoiDungId,
+
         "hoTen": user.HoTen,
+
         "email": user.Email,
 
         "yeuCauDoiMatKhau": bool(
@@ -986,6 +1164,7 @@ def forgot_password(
             "message": message
         }
 
+
     raw_token = secrets.token_urlsafe(32)
 
     now = datetime.now()
@@ -1033,7 +1212,7 @@ def forgot_password(
             reset_link=reset_link,
         )
 
-    except RuntimeError as exc:
+    except RuntimeError as error:
         logger.exception(
             "Failed to send password-reset email for user_id=%s",
             user.NguoiDungId,
@@ -1052,15 +1231,110 @@ def forgot_password(
 
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Không thể gửi email đặt lại mật khẩu lúc này. "
-                "Vui lòng thử lại sau."
-            ),
-        ) from exc
+            detail="Không thể gửi email đặt lại mật khẩu lúc này. Vui lòng thử lại sau.",
+        ) from error
 
     return {
         "message": message
     }
+
+
+def resend_activation(
+    db: Session,
+    request: ResendActivationRequest,
+):
+    message = (
+        "Yêu cầu đã được tiếp nhận. Nếu email thuộc tài khoản chưa kích hoạt, "
+        "hướng dẫn sẽ được gửi; nếu không nhận được email, vui lòng thử lại "
+        "sau hoặc liên hệ quản trị viên."
+    )
+    email = str(request.email).strip().lower()
+    user = (
+        db.query(NguoiDung)
+        .filter(NguoiDung.Email == email)
+        .first()
+    )
+
+    if (
+        not user
+        or user.DaKichHoat
+        or user.TrangThai != "HoatDong"
+    ):
+        return {"message": message}
+
+    now = datetime.now()
+    activation_tokens = (
+        db.query(TokenKichHoat)
+        .filter(
+            TokenKichHoat.NguoiDungId == user.NguoiDungId,
+            TokenKichHoat.DaSuDung == False,
+        )
+        .all()
+    )
+
+    recent_valid_token = any(
+        token.ThoiGianTao >= now - timedelta(minutes=5)
+        and token.ThoiGianHetHan > now
+        for token in activation_tokens
+    )
+    if recent_valid_token:
+        return {"message": message}
+
+    for token in activation_tokens:
+        token.DaSuDung = True
+
+    raw_token = secrets.token_urlsafe(32)
+    activation_token = TokenKichHoat(
+        NguoiDungId=user.NguoiDungId,
+        Token=hashlib.sha256(raw_token.encode()).hexdigest(),
+        ThoiGianTao=now,
+        ThoiGianHetHan=now + timedelta(hours=24),
+        DaSuDung=False,
+    )
+    db.add(activation_token)
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Failed to save activation token for user_id=%s",
+            user.NguoiDungId,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Không thể gửi hướng dẫn kích hoạt lúc này. "
+                "Vui lòng thử lại sau."
+            ),
+        ) from exc
+
+    activation_link = (
+        f"{FRONTEND_URL.rstrip('/')}/activate-account?token={raw_token}"
+    )
+    try:
+        send_activation_email(
+            recipient_email=user.Email,
+            ho_ten=user.HoTen,
+            temporary_password=None,
+            activation_link=activation_link,
+        )
+    except RuntimeError:
+        activation_token.DaSuDung = True
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Failed to invalidate undelivered activation token for user_id=%s",
+                user.NguoiDungId,
+            )
+        logger.exception(
+            "Failed to send activation email for user_id=%s",
+            user.NguoiDungId,
+        )
+
+    return {"message": message}
 
 
 # ============================================================
@@ -1093,7 +1367,9 @@ def activate_account(
     now = datetime.now()
 
     if activation_token.ThoiGianHetHan < now:
+
         activation_token.DaSuDung = True
+
         db.commit()
 
         raise HTTPException(
@@ -1116,7 +1392,6 @@ def activate_account(
             detail="Không tìm thấy người dùng",
         )
 
-    user.DaKichHoat = True
     user.NgayCapNhat = now
 
     activation_token.DaSuDung = True
@@ -1135,49 +1410,22 @@ def activate_account(
 
     return {
         "message": "Kích hoạt tài khoản thành công",
-        "nguoiDungId": user.NguoiDungId,
         "email": user.Email,
-        "daKichHoat": user.DaKichHoat,
     }
 
 
-# ============================================================
-# KIỂM TRA RESET TOKEN
-# ============================================================
+# =========================================================
+# KIỂM TRA TOKEN RESET PASSWORD
+# =========================================================
 
 def validate_reset_token(
     db: Session,
     token: str,
 ):
-    token_hash = hashlib.sha256(
-        token.encode()
-    ).hexdigest()
-
-    reset_token = (
-        db.query(TokenMatKhau)
-        .filter(
-            TokenMatKhau.Token == token_hash,
-            TokenMatKhau.DaSuDung == False,
-        )
-        .first()
+    _get_valid_reset_token(
+        db,
+        token,
     )
-
-    if not reset_token:
-        raise HTTPException(
-            status_code=400,
-            detail="Token không hợp lệ",
-        )
-
-    now = datetime.now()
-
-    if reset_token.ThoiGianHetHan < now:
-        reset_token.DaSuDung = True
-        db.commit()
-
-        raise HTTPException(
-            status_code=400,
-            detail="Token đã hết hạn",
-        )
 
     return {
         "message": "Token hợp lệ"
@@ -1277,6 +1525,7 @@ def update_user(
 ):
     user = _find_user(db, user_id)
 
+    # Kiểm tra email trùng
     if request.email:
         email = str(request.email).strip().lower()
 
@@ -1284,7 +1533,8 @@ def update_user(
             db.query(NguoiDung)
             .filter(
                 NguoiDung.Email == email,
-                NguoiDung.NguoiDungId != user_id,
+                NguoiDung.NguoiDungId
+                != user_id,
             )
             .first()
         )
@@ -1296,16 +1546,46 @@ def update_user(
             )
 
         user.Email = email
-
+    # ============================================================
+    # CẬP NHẬT HỌ TÊN
+    # ============================================================
     if request.ho_ten is not None:
         user.HoTen = request.ho_ten.strip()
 
-    # Cho phép cập nhật hoặc xóa số điện thoại
-    if hasattr(request, "so_dien_thoai"):
-        if request.so_dien_thoai is not None:
-            user.SoDienThoai = request.so_dien_thoai.strip() or None
-        else:
-            user.SoDienThoai = None
+    # Cập nhật họ tên
+    if request.ho_ten:
+        user.HoTen = request.ho_ten.strip()
+
+    # Kiểm tra và cập nhật số điện thoại
+    if "so_dien_thoai" in request.model_fields_set:
+        phone = (
+            request.so_dien_thoai.strip()
+            if request.so_dien_thoai
+            else None
+        )
+        if phone and phone_exists(
+            db,
+            phone,
+            exclude_user_id=user_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+        user.SoDienThoai = phone
+
+        if phone and phone_exists(
+            db,
+            phone,
+            exclude_user_id=user_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Số điện thoại đã được sử dụng",
+            )
+
+        user.SoDienThoai = phone
 
     user.NgayCapNhat = datetime.now()
 
@@ -1315,7 +1595,6 @@ def update_user(
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Không thể cập nhật",
@@ -1348,14 +1627,94 @@ def delete_user(
             detail="Không tìm thấy người dùng",
         )
 
+    has_grades = (
+        db.query(Diem.DiemId)
+        .filter(Diem.HocVienId == user_id)
+        .first()
+        is not None
+    )
+    if has_grades:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì người dùng đã có "
+                "dữ liệu điểm. Hãy khóa tài khoản để giữ lại "
+                "lịch sử đào tạo."
+            ),
+        )
+
+    protected_history = (
+        (
+            "điểm danh",
+            db.query(DiemDanhBuoiHoc)
+            .filter(DiemDanhBuoiHoc.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "lịch sử điểm danh",
+            db.query(DiemDanhBuoiHocLichSu)
+            .filter(DiemDanhBuoiHocLichSu.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "lịch sử thao tác lớp học",
+            db.query(LopHocHocVienThaoTac)
+            .filter(LopHocHocVienThaoTac.HocVienId == user_id)
+            .count(),
+        ),
+        (
+            "hồ sơ chuyển đổi tuyển sinh",
+            db.query(LeadConversion)
+            .filter(LeadConversion.NguoiDungId == user_id)
+            .count(),
+        ),
+    )
+    retained_history = [
+        f"{count} {label}"
+        for label, count in protected_history
+        if count
+    ]
+    if retained_history:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì hồ sơ đã có dữ liệu lịch sử "
+                f"({', '.join(retained_history)}). Hãy khóa tài khoản để "
+                "giữ lại lịch sử đào tạo."
+            ),
+        )
+
     email = user.Email
     ho_ten = user.HoTen
 
     try:
+        # Bỏ liên kết lớp và giảng viên để không giữ khóa ngoại
+        # trỏ đến tài khoản đã xóa.
+        db.query(LopHocHocVien).filter(
+            LopHocHocVien.HocVienId == user_id
+        ).delete(synchronize_session=False)
+        db.query(LopHoc).filter(
+            LopHoc.GiangVienId == user_id
+        ).update(
+            {LopHoc.GiangVienId: None},
+            synchronize_session=False,
+        )
+
         # Xóa quan hệ người dùng - vai trò
         db.execute(
             text("""
                 DELETE FROM NguoiDung_VaiTro
+                WHERE NguoiDungId = :nguoi_dung_id
+            """),
+            {
+                "nguoi_dung_id": user_id
+            },
+        )
+
+        # Xóa phiên đăng nhập được lưu trong schema nền.
+        db.execute(
+            text("""
+                DELETE FROM PhienDangNhap
                 WHERE NguoiDungId = :nguoi_dung_id
             """),
             {
@@ -1390,13 +1749,23 @@ def delete_user(
 
         db.commit()
 
-    except Exception as exc:
+    except IntegrityError as exc:
         db.rollback()
-
-        print(
-            f"[DELETE USER] Lỗi xóa tài khoản "
-            f"{user_id}: {exc}"
+        logger.warning(
+            "Cannot delete user %s because related records still reference it: %s",
+            user_id,
+            exc,
         )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa tài khoản vì vẫn còn dữ liệu khác đang liên "
+                "kết với tài khoản. Hãy khóa tài khoản để giữ lại lịch sử."
+            ),
+        ) from exc
+    except Exception:
+        db.rollback()
+        logger.exception("[DELETE USER] Lỗi xóa tài khoản %s", user_id)
 
         raise HTTPException(
             status_code=500,
@@ -1423,6 +1792,7 @@ def lock_user(
     user = _find_user(db, user_id)
 
     user.TrangThai = "BiKhoa"
+
     user.KhoaDen = None
 
     user.LyDoKhoa = request.ly_do_khoa.strip()
@@ -1468,8 +1838,11 @@ def unlock_user(
         )
 
     user.TrangThai = "HoatDong"
+
     user.KhoaDen = None
+
     user.LyDoKhoa = None
+
     user.SoLanDangNhapSai = 0
     now = datetime.now()
     user.TokenValidAfter = utc_now()
@@ -1489,6 +1862,7 @@ def unlock_user(
 
     return {
         "message": "Mở khóa tài khoản thành công",
+
         "user": {
             **_user_data(user),
             "ngayCapNhat": user.NgayCapNhat,
